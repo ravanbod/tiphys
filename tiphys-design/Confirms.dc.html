@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Restart and run confirmations</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app fx" style="width:1600px;height:640px;padding:40px;flex-direction:row;gap:32px;align-items:flex-start;background:#E4E7EC">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-restart" viewBox="0 0 16 16"><path d="M13 8a5 5 0 11-1.6-3.7M13 2.5v3h-3"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 16 16"><path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z"/></symbol>
+<symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2l6.5 11.5h-13zM8 6.5v3.2M8 11.6h.01"/></symbol>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+</defs></svg>
+
+<!-- 1 · Restart confirm (prod) -->
+<div class="col" style="width:480px;gap:8px">
+  <span class="lbl" style="color:#3D4656">D5 · Restart — confirm in prod</span>
+  <div class="dlg" style="border-color:var(--prod);box-shadow:0 0 0 1px var(--prod),0 16px 48px rgba(10,14,20,.20)">
+    <div class="hd"><h2>Restart payments-api?</h2><p>Every pod in this workload is replaced, one after another.</p></div>
+    <div class="bd">
+      <dl class="kv" style="grid-template-columns:90px 1fr">
+        <dt>Kind</dt><dd><span class="tag">Deployment</span></dd>
+        <dt>Name</dt><dd class="mono">payments-api</dd>
+        <dt>Namespace</dt><dd class="mono">payments-api</dd>
+        <dt>Cluster</dt><dd class="mono">prod-1</dd>
+        <dt>Environment</dt><dd><span class="env prod">prod</span></dd>
+      </dl>
+      <div class="banner prod"><svg class="i"><use href="#i-warn"/></svg><span>This is production. Capacity drops briefly during the rollout.</span></div>
+      <label class="f">Type <b class="mono" style="color:var(--tx)">payments-api</b> to confirm<input class="input mono" value="payments-ap" aria-label="Type the workload name to confirm"></label>
+    </div>
+    <div class="ft"><a class="btn" href="WorkloadDetail.dc.html">Cancel</a><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-restart"/></svg>Restart</span></div>
+  </div>
+</div>
+
+<!-- 2 · Rollout progress -->
+<div class="col" style="width:480px;gap:8px">
+  <span class="lbl" style="color:#3D4656">D5 · After confirming — rollout progress</span>
+  <div class="dlg">
+    <div class="hd"><h2>Restarting payments-api</h2><p class="row"><span class="mono" style="color:var(--tx)">prod-1 / payments-api</span><span class="env prod">prod</span></p></div>
+    <div class="bd">
+      <div class="col" style="gap:10px">
+        <div class="col" style="gap:4px"><div class="row"><span>Updated</span><span class="grow"></span><span class="mono">2 / 3</span></div><div class="bar"><i style="width:66%"></i></div></div>
+        <div class="col" style="gap:4px"><div class="row"><span>Ready</span><span class="grow"></span><span class="mono">2 / 3</span></div><div class="bar"><i style="width:66%"></i></div></div>
+        <div class="col" style="gap:4px"><div class="row"><span>Available</span><span class="grow"></span><span class="mono">2 / 3</span></div><div class="bar"><i style="width:66%"></i></div></div>
+      </div>
+      <div class="col" style="gap:0;border:1px solid var(--ln);border-radius:6px">
+        <div class="row" style="padding:8px 12px"><span class="dot ok"></span><span class="mono">payments-api-84d7f6c9b-4tn2p</span><span class="grow"></span><span class="chip ok">Ready</span></div>
+        <div class="row" style="padding:8px 12px;border-top:1px solid var(--ln)"><span class="dot ok"></span><span class="mono">payments-api-84d7f6c9b-8wq5c</span><span class="grow"></span><span class="chip ok">Ready</span></div>
+        <div class="row" style="padding:8px 12px;border-top:1px solid var(--ln)"><span class="dot info"></span><span class="mono">payments-api-84d7f6c9b-k9xzd</span><span class="grow"></span><span class="chip info">Starting</span></div>
+      </div>
+    </div>
+    <div class="ft"><a class="btn" href="WorkloadDetail.dc.html">Close</a></div>
+  </div>
+  <span class="lbl" style="color:#3D4656;margin-top:8px">Final result — failure shows Kubernetes' own reason</span>
+  <div class="card" style="border-color:var(--red)">
+    <div class="bd col" style="gap:8px">
+      <div class="row"><span class="chip err">Rollout failed</span><b>payments-api did not become ready</b></div>
+      <div class="muted">ProgressDeadlineExceeded: ReplicaSet "payments-api-84d7f6c9b" has timed out progressing.</div>
+      <div class="row" style="gap:4px;color:var(--ac);font-weight:500"><svg class="i"><use href="#i-chev"/></svg>Kubernetes details</div>
+    </div>
+  </div>
+</div>
+
+<!-- 3 · Run CronJob confirm -->
+<div class="col" style="width:480px;gap:8px">
+  <span class="lbl" style="color:#3D4656">D6 · Run now — confirm</span>
+  <div class="dlg" style="border-color:var(--prod);box-shadow:0 0 0 1px var(--prod),0 16px 48px rgba(10,14,20,.20)">
+    <div class="hd"><h2>Run reconcile-ledger now?</h2><p>Creates one new Job from this CronJob's template. The schedule does not change.</p></div>
+    <div class="bd">
+      <dl class="kv" style="grid-template-columns:90px 1fr">
+        <dt>CronJob</dt><dd class="mono">reconcile-ledger</dd>
+        <dt>Schedule</dt><dd><span class="mono">*/15 * * * *</span><span class="muted">Every 15 minutes</span></dd>
+        <dt>Namespace</dt><dd class="mono">payments-api</dd>
+        <dt>Cluster</dt><dd class="mono">prod-1</dd>
+        <dt>Environment</dt><dd><span class="env prod">prod</span></dd>
+      </dl>
+      <div class="banner prod"><svg class="i"><use href="#i-warn"/></svg><span>This runs against production data and is recorded in the audit log.</span></div>
+    </div>
+    <div class="ft"><a class="btn" href="CronJobs.dc.html">Cancel</a><a class="btn act" href="CronJobs.dc.html"><svg class="i"><use href="#i-bolt"/></svg>Run now</a></div>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1600,"height":640}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+# Internal-only files: left out of `git archive` and so of the published tree
+# (see scripts/publish-github.sh).
+.gitlab-ci.yml       export-ignore
+.gitlab-ci-files/    export-ignore
+scripts/publish-github.sh export-ignore

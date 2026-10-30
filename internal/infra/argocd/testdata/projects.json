@@ -1,0 +1,8 @@
+{
+  "metadata": {},
+  "items": [
+    {"metadata": {"name": "default"}, "spec": {"sourceRepos": ["*"], "destinations": [{"server": "*", "namespace": "*"}]}},
+    {"metadata": {"name": "payments"}, "spec": {"description": "Payments team"}},
+    {"metadata": {"name": "platform"}, "spec": {}}
+  ]
+}

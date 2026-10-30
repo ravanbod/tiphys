@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app" style="align-items:center;justify-content:center;gap:0">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.2 7V5a2.8 2.8 0 015.6 0v2"/></symbol>
+</defs></svg>
+
+<main style="width:100%;max-width:400px;padding:24px;display:flex;flex-direction:column;align-items:center;gap:28px;margin:auto">
+  <div class="col" style="align-items:center;gap:16px">
+    <span class="mark lg" aria-hidden="true"></span>
+    <h1 style="margin:0;font-size:34px;font-weight:600;letter-spacing:-.01em">Tiphys</h1>
+  </div>
+  <p style="margin:0;text-align:center;font-size:15px;line-height:1.5;color:var(--tx2)">Logs, shell and restarts for your services, without cluster credentials</p>
+  <div class="col" style="width:100%;gap:12px">
+    <a class="btn pri" href="Main.dc.html" style="height:42px;justify-content:center;font-size:14px;width:100%">Sign in with SSO</a>
+    <div class="row muted" style="justify-content:center;gap:6px;font-size:12px"><svg class="i" style="width:13px;height:13px"><use href="#i-lock"/></svg>Signs you in through your organization's Keycloak. There is no password here.</div>
+  </div>
+</main>
+
+<footer class="muted" style="padding:16px 24px;font-size:12px;display:flex;gap:16px;width:100%;justify-content:center">
+  <span>Actions are checked against your grants and time windows.</span><span>Every action is audited.</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

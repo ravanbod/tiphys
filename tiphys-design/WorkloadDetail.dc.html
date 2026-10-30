@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>payments-api · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-box" viewBox="0 0 16 16"><path d="M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6"/></symbol>
+<symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="2.5"/><path d="M7.3 8.7L13 3M11 5l2 2"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-star" viewBox="0 0 16 16"><path d="M8 1.8l1.9 4 4.3.5-3.2 2.9.9 4.3L8 11.4l-3.9 2.1.9-4.3L1.8 6.3l4.3-.5z"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+<symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8 10.5h3.5"/></symbol>
+<symbol id="i-list" viewBox="0 0 16 16"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></symbol>
+<symbol id="i-restart" viewBox="0 0 16 16"><path d="M13 8a5 5 0 11-1.6-3.7M13 2.5v3h-3"/></symbol>
+<symbol id="i-ext" viewBox="0 0 16 16"><path d="M9 2.5h4.5V7M13.5 2.5L7.5 8.5M12 9.5V13H3V4h3.5"/></symbol>
+<symbol id="i-x" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search apps, namespaces, workloads" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx prod"><span class="dot prod"></span>prod-1 · <b>prod</b></span>
+  <span class="user"><span class="av">SM</span><span><b>Sara Moradi</b><i>Developer</i></span></span>
+</header>
+
+<div class="body">
+<nav class="side" aria-label="Main">
+  <a class="on" href="Main.dc.html"><svg class="i"><use href="#i-box"/></svg>Workloads</a>
+  <a href="MyAccess.dc.html"><svg class="i"><use href="#i-key"/></svg>My access</a>
+  <h6>Starred</h6>
+  <a href="WorkloadDetail.dc.html"><svg class="i"><use href="#i-star"/></svg><span class="mono">payments-api</span><span class="env prod" style="margin-left:auto">prod</span></a>
+  <a href="WorkloadDetail.dc.html"><svg class="i"><use href="#i-star"/></svg><span class="mono">search-indexer</span><span class="env prod" style="margin-left:auto">prod</span></a>
+</nav>
+
+<main class="main">
+  <nav class="crumbs" aria-label="Breadcrumb">
+    <a href="Main.dc.html">prod-1</a><svg class="i"><use href="#i-chev"/></svg>
+    <a href="Main.dc.html">payments</a><svg class="i"><use href="#i-chev"/></svg>
+    <a href="Main.dc.html">payments-api</a><svg class="i"><use href="#i-chev"/></svg>
+    <a href="Main.dc.html" class="mono">payments-api</a><svg class="i"><use href="#i-chev"/></svg>
+    <span class="mono" style="color:var(--tx)">payments-api</span>
+  </nav>
+
+  <div class="row wrap" style="align-items:flex-start;gap:16px">
+    <div class="col" style="gap:6px;flex:1;min-width:320px">
+      <div class="row"><span class="tag">Deployment</span><h1 class="mono" style="margin:0;font-size:20px;font-weight:600">payments-api</h1><span class="env prod">prod</span></div>
+      <div class="row wrap muted" style="gap:14px">
+        <span>Namespace <b class="mono" style="color:var(--tx)">payments-api</b></span>
+        <span>Cluster <b class="mono" style="color:var(--tx)">prod-1</b></span>
+        <a class="row" style="gap:4px;text-decoration:none" href="#">Argo app payments-api <svg class="i" style="width:13px;height:13px"><use href="#i-ext"/></svg></a>
+      </div>
+    </div>
+    <div class="row">
+      <a class="btn act" href="Confirms.dc.html"><svg class="i"><use href="#i-restart"/></svg>Restart</a>
+    </div>
+  </div>
+
+  <div class="row wrap">
+    <div class="stat"><span class="lbl">Ready</span><b>3 / 3</b></div>
+    <div class="stat"><span class="lbl">Updated</span><b>3 / 3</b></div>
+    <div class="stat"><span class="lbl">Strategy</span><b style="font-size:14px;line-height:26px">RollingUpdate</b></div>
+    <div class="stat"><span class="lbl">Last rollout</span><b style="font-size:14px;line-height:26px">3 days ago</b></div>
+    <div class="stat"><span class="lbl">Image</span><b class="mono" style="font-size:12px;line-height:26px">payments-api:2026.10.17-4</b></div>
+  </div>
+
+  <div class="row" style="align-items:flex-start;gap:16px">
+    <div class="col" style="flex:1;min-width:0;gap:0">
+      <div class="tabs"><a class="on" href="WorkloadDetail.dc.html">Pods <span class="c">3</span></a><a href="WorkloadDetail.dc.html">Events</a><a href="CronJobs.dc.html">CronJobs <span class="c">4</span></a></div>
+      <div class="card" style="border-top:0;border-radius:0 0 8px 8px">
+      <table class="tbl">
+        <thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Restarts</th><th>Age</th><th>Node</th><th>Last termination</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="mono">payments-api-7d9c6b5f4-2kq8x</td>
+            <td><span class="chip ok"><span class="dot ok"></span>Running</span></td><td class="mono">2/2</td><td>0</td><td>3d 12h</td><td class="mono">node-a3</td><td class="muted">—</td>
+            <td style="text-align:right"><span class="row" style="justify-content:flex-end"><a class="btn sm" href="Logs.dc.html"><svg class="i"><use href="#i-list"/></svg>Logs</a><a class="btn act sm" href="ExecConnect.dc.html"><svg class="i"><use href="#i-term"/></svg>Exec</a></span></td>
+          </tr>
+          <tr class="sel">
+            <td class="mono">payments-api-7d9c6b5f4-9mzt5</td>
+            <td><span class="chip ok"><span class="dot ok"></span>Running</span></td><td class="mono">2/2</td><td><b>1</b></td><td>3d 12h</td><td class="mono">node-b1</td>
+            <td><span class="chip err">OOMKilled</span> <span class="muted">2h ago</span></td>
+            <td style="text-align:right"><span class="row" style="justify-content:flex-end"><a class="btn sm" href="Logs.dc.html"><svg class="i"><use href="#i-list"/></svg>Logs</a><a class="btn act sm" href="ExecConnect.dc.html"><svg class="i"><use href="#i-term"/></svg>Exec</a></span></td>
+          </tr>
+          <tr>
+            <td class="mono">payments-api-7d9c6b5f4-xv7wd</td>
+            <td><span class="chip ok"><span class="dot ok"></span>Running</span></td><td class="mono">2/2</td><td>0</td><td>3d 12h</td><td class="mono">node-a1</td><td class="muted">—</td>
+            <td style="text-align:right"><span class="row" style="justify-content:flex-end"><a class="btn sm" href="Logs.dc.html"><svg class="i"><use href="#i-list"/></svg>Logs</a><a class="btn act sm" href="ExecConnect.dc.html"><svg class="i"><use href="#i-term"/></svg>Exec</a></span></td>
+          </tr>
+        </tbody>
+      </table>
+      </div>
+    </div>
+
+    <aside class="card" style="width:380px;flex:none" aria-label="Pod details">
+      <div class="hd"><span class="mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis">payments-api-7d9c6b5f4-9mzt5</span><span class="grow"></span><button class="btn ghost sm" aria-label="Close panel"><svg class="i"><use href="#i-x"/></svg></button></div>
+      <div class="bd col" style="gap:14px">
+        <div class="col" style="gap:8px">
+          <span class="lbl">Containers</span>
+          <div style="border:1px solid var(--ln);border-radius:6px;padding:10px 12px" class="col">
+            <div class="row"><b class="mono">app</b><span class="chip ok"><span class="dot ok"></span>Running</span><span class="grow"></span><span class="muted">1 restart</span></div>
+            <dl class="kv" style="grid-template-columns:90px 1fr">
+              <dt>Last state</dt><dd><span class="chip err">Terminated · OOMKilled</span></dd>
+              <dt>Exit code</dt><dd class="mono">137</dd>
+              <dt>Finished</dt><dd>2h ago · ran 14h 02m</dd>
+              <dt>Memory limit</dt><dd class="mono">512Mi</dd>
+            </dl>
+          </div>
+          <div style="border:1px solid var(--ln);border-radius:6px;padding:10px 12px" class="col">
+            <div class="row"><b class="mono">metrics-sidecar</b><span class="chip ok"><span class="dot ok"></span>Running</span><span class="grow"></span><span class="muted">0 restarts</span></div>
+          </div>
+        </div>
+        <div class="col" style="gap:8px">
+          <span class="lbl">Pod events</span>
+          <div class="col" style="gap:0">
+            <div class="row" style="align-items:flex-start;padding:8px 0;border-top:1px solid var(--ln)"><span class="chip err" style="margin-top:1px">Warning</span><div><b>OOMKilling</b><div class="muted">Container app exceeded its memory limit and was killed.</div></div><span class="muted" style="margin-left:auto;white-space:nowrap">2h</span></div>
+            <div class="row" style="align-items:flex-start;padding:8px 0;border-top:1px solid var(--ln)"><span class="chip" style="margin-top:1px">Normal</span><div><b>Started</b><div class="muted">Started container app</div></div><span class="muted" style="margin-left:auto;white-space:nowrap">2h</span></div>
+            <div class="row" style="align-items:flex-start;padding:8px 0;border-top:1px solid var(--ln)"><span class="chip" style="margin-top:1px">Normal</span><div><b>Pulled</b><div class="muted">Image already present on machine</div></div><span class="muted" style="margin-left:auto;white-space:nowrap">2h</span></div>
+          </div>
+        </div>
+        <div class="row"><a class="btn" href="Logs.dc.html"><svg class="i"><use href="#i-list"/></svg>Logs</a><a class="btn act" href="ExecConnect.dc.html"><svg class="i"><use href="#i-term"/></svg>Exec</a></div>
+      </div>
+    </aside>
+  </div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1000}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "metadata": {},
+  "items": [
+    {
+      "server": "https://kubernetes.default.svc",
+      "name": "in-cluster",
+      "config": {"tlsClientConfig": {"insecure": false}},
+      "connectionState": {"status": "Successful", "message": "", "attemptedAt": "2026-10-20T08:00:00Z"},
+      "serverVersion": "1.31",
+      "info": {"connectionState": {"status": "Successful"}, "serverVersion": "1.31", "applicationsCount": "12"}
+    },
+    {
+      "server": "https://k8s-prod-1.example.internal:6443",
+      "name": "prod-1",
+      "config": {"tlsClientConfig": {"insecure": false}},
+      "connectionState": {"status": "Successful"},
+      "serverVersion": "1.30",
+      "info": {"connectionState": {"status": "Successful"}, "applicationsCount": "800"}
+    },
+    {
+      "server": "https://k8s-stage.example.internal:6443/",
+      "name": "staging",
+      "config": {"tlsClientConfig": {"insecure": false}},
+      "connectionState": {"status": "Successful"},
+      "serverVersion": "1.30"
+    }
+  ]
+}

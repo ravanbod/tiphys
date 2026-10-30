@@ -1,0 +1,51 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-10-20T10:12:00Z" },
+  "title": "Tiphys",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Login.dc.html": { "x": 0, "y": 300, "w": 1440, "h": 900, "title": "Login", "expand": "fill", "is_interactive": true },
+    "Main.dc.html": { "x": 1520, "y": 300, "w": 1440, "h": 900, "title": "D1 · Workloads (home)", "expand": "fill", "is_interactive": true },
+    "WorkloadDetail.dc.html": { "x": 3040, "y": 300, "w": 1440, "h": 1000, "title": "D2 · Workload detail — Pods", "expand": "fill", "is_interactive": true },
+    "Logs.dc.html": { "x": 4560, "y": 300, "w": 1440, "h": 900, "title": "D3 · Log viewer", "expand": "fill", "is_interactive": true },
+    "CronJobs.dc.html": { "x": 6080, "y": 300, "w": 1440, "h": 860, "title": "D6 · Run CronJob", "expand": "fill", "is_interactive": true },
+
+    "ExecConnect.dc.html": { "x": 0, "y": 1720, "w": 960, "h": 600, "title": "D4 · Pre-connect dialog", "is_interactive": true },
+    "Terminal.dc.html": { "x": 1040, "y": 1720, "w": 1440, "h": 820, "title": "D4 · Terminal + 5-minute warning", "expand": "fill", "is_interactive": true },
+    "ExecEnded.dc.html": { "x": 2560, "y": 1720, "w": 1440, "h": 820, "title": "D4 · Session end screen", "expand": "fill", "is_interactive": true },
+    "Confirms.dc.html": { "x": 4080, "y": 1720, "w": 1600, "h": 640, "title": "D5 / D6 · Restart, rollout, run-now", "is_interactive": true },
+
+    "States.dc.html": { "x": 0, "y": 2920, "w": 1120, "h": 640, "title": "Disabled-action states", "is_interactive": true },
+    "BreakGlass.dc.html": { "x": 1200, "y": 2920, "w": 1280, "h": 760, "title": "D8 · Break-glass flow", "is_interactive": true },
+    "MyAccess.dc.html": { "x": 2560, "y": 2920, "w": 1440, "h": 1000, "title": "D7 · My access + request form", "expand": "fill", "is_interactive": true },
+    "Requests.dc.html": { "x": 4080, "y": 2920, "w": 1440, "h": 900, "title": "A6 · Access requests", "expand": "fill", "is_interactive": true },
+
+    "GrantEditor.dc.html": { "x": 0, "y": 4300, "w": 1440, "h": 1120, "title": "A3 · Grants + access checker", "expand": "fill", "is_interactive": true },
+    "TimeWindows.dc.html": { "x": 1520, "y": 4300, "w": 1440, "h": 1100, "title": "A5 · Time windows & holidays", "expand": "fill", "is_interactive": true },
+    "Users.dc.html": { "x": 3040, "y": 4300, "w": 1440, "h": 860, "title": "A1 · Users", "expand": "fill", "is_interactive": true },
+    "Teams.dc.html": { "x": 4560, "y": 4300, "w": 1440, "h": 860, "title": "A2 · Teams", "expand": "fill", "is_interactive": true },
+
+    "Clusters.dc.html": { "x": 0, "y": 5800, "w": 1440, "h": 900, "title": "A4 · Clusters & environments", "expand": "fill", "is_interactive": true },
+    "Settings.dc.html": { "x": 1520, "y": 5800, "w": 1440, "h": 1000, "title": "A7 · Settings", "expand": "fill", "is_interactive": true },
+    "AuditLog.dc.html": { "x": 3040, "y": 5800, "w": 1440, "h": 960, "title": "R1 · Audit log", "expand": "fill", "is_interactive": true },
+    "Sessions.dc.html": { "x": 4560, "y": 5800, "w": 1440, "h": 860, "title": "R2 · Sessions", "expand": "fill", "is_interactive": true },
+    "Replay.dc.html": { "x": 6080, "y": 5800, "w": 1440, "h": 900, "title": "R3 · Session replay", "expand": "fill", "is_interactive": true },
+    "Mobile.dc.html": { "x": 7600, "y": 5800, "w": 860, "h": 844, "title": "Phone · approvals + audit" }
+  },
+  "order": [
+    "Login.dc.html", "Main.dc.html", "WorkloadDetail.dc.html", "Logs.dc.html", "CronJobs.dc.html",
+    "ExecConnect.dc.html", "Terminal.dc.html", "ExecEnded.dc.html", "Confirms.dc.html",
+    "States.dc.html", "BreakGlass.dc.html", "MyAccess.dc.html", "Requests.dc.html",
+    "GrantEditor.dc.html", "TimeWindows.dc.html", "Users.dc.html", "Teams.dc.html",
+    "Clusters.dc.html", "Settings.dc.html", "AuditLog.dc.html", "Sessions.dc.html", "Replay.dc.html", "Mobile.dc.html"
+  ],
+  "notes": {
+    "r1": { "x": 0, "y": 40, "text": "1 · Sign in, find a workload, read logs", "kind": "title1", "maxW": 7520 },
+    "r2": { "x": 0, "y": 1460, "text": "2 · Shell, restart & run: the dangerous actions", "kind": "title1", "maxW": 5680 },
+    "r3": { "x": 0, "y": 2660, "text": "3 · Why it's unavailable, break-glass, access", "kind": "title1", "maxW": 5520 },
+    "r4": { "x": 0, "y": 4040, "text": "4 · Admin: grants, windows, people", "kind": "title1", "maxW": 6000 },
+    "r5": { "x": 0, "y": 5540, "text": "5 · Clusters, settings, audit & replay", "kind": "title1", "maxW": 8460 }
+  },
+  "designSystems": []
+}

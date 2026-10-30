@@ -1,0 +1,138 @@
+# Tiphys portal, one replica, in the management cluster next to Argo CD.
+# Secrets are mounted as files (never env values). Create them first:
+#   tiphys-portal-secrets: oidc-client-secret, session-keys, argo-token,
+#                          minio-access-key, minio-secret-key, loki-password (optional)
+#   tiphys-portal-database: app-url, retention-url (DSNs for the two roles)
+# Replace the example values (host names, image, PUBLIC_URL) for your environment.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tiphys-portal
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tiphys-portal
+  namespace: tiphys-portal
+---
+# Clusters are registered by creating Secrets annotated `tiphys/cluster: <name>`
+# (kubeconfig in the `kubeconfig` key) in this namespace. The portal only reads
+# them and never writes or deletes them: you manage those Secrets yourself.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tiphys-portal-credentials
+  namespace: tiphys-portal
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tiphys-portal-credentials
+  namespace: tiphys-portal
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: tiphys-portal-credentials
+subjects:
+  - kind: ServiceAccount
+    name: tiphys-portal
+    namespace: tiphys-portal
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tiphys-portal
+  namespace: tiphys-portal
+data:
+  GIN_MODE: release
+  LOG_LEVEL: info
+  PUBLIC_URL: https://tiphys.example.com
+  OIDC_ISSUER_URL: https://keycloak.example.com/realms/main
+  OIDC_CLIENT_ID: tiphys
+  ARGO_URL: https://argocd.example.com
+  MINIO_ENDPOINT: minio.example.com:9000
+  MINIO_BUCKET: tiphys-recordings
+  LOKI_URL: http://loki.monitoring:3100
+  CREDENTIAL_STORE: secrets
+  CREDENTIAL_NAMESPACE: tiphys-portal
+  KUBE_EXTRA_DOMAIN: portal.example.com
+  TIPHYS_BOOTSTRAP_ADMINS: admin.user
+  OIDC_CLIENT_SECRET_FILE: /secrets/portal/oidc-client-secret
+  SESSION_ENCRYPTION_KEYS_FILE: /secrets/portal/session-keys
+  ARGO_TOKEN_FILE: /secrets/portal/argo-token
+  MINIO_ACCESS_KEY_FILE: /secrets/portal/minio-access-key
+  MINIO_SECRET_KEY_FILE: /secrets/portal/minio-secret-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tiphys-portal
+  namespace: tiphys-portal
+spec:
+  replicas: 1 # v1: a restart drops live streams; the portal is otherwise stateless
+  # The new pod starts before the old one stops, so updates have no downtime.
+  # During the short overlap open streams still end, and the new pod marks
+  # exec sessions still open on the old one as ended (portal_restart).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels: {app: tiphys-portal}
+  template:
+    metadata:
+      labels: {app: tiphys-portal}
+    spec:
+      serviceAccountName: tiphys-portal
+      terminationGracePeriodSeconds: 60 # exec recordings are finalized on shutdown
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: portal
+          image: registry.example.com/tiphys/portal:v1 # your build of this repository
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: metrics, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: tiphys-portal}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: tiphys-portal-database, key: app-url}}
+            - name: DATABASE_RETENTION_URL
+              valueFrom: {secretKeyRef: {name: tiphys-portal-database, key: retention-url}}
+          volumeMounts:
+            - {name: secrets, mountPath: /secrets/portal, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: secrets
+          secret: {secretName: tiphys-portal-secrets}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tiphys-portal
+  namespace: tiphys-portal
+  labels: {app: tiphys-portal}
+spec:
+  selector: {app: tiphys-portal}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+    - {name: metrics, port: 9090, targetPort: metrics}

@@ -1,0 +1,10 @@
+.env
+.DS_Store
+/bin/
+/web/node_modules/
+/web/dist/
+/internal/transport/serverhttp/webdist/*
+!/internal/transport/serverhttp/webdist/.gitkeep
+*.test
+*.out
+/.clusters/

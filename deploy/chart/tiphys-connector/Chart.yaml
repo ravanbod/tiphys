@@ -1,0 +1,7 @@
+apiVersion: v2
+name: tiphys-connector
+description: Per-cluster RBAC and admission policies for the Tiphys access portal (no workloads).
+type: application
+version: 0.1.0
+appVersion: "1.0"
+kubeVersion: ">=1.25.0-0"

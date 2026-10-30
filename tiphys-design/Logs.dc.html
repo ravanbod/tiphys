@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Logs · payments-api · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app" style="height:100vh;min-height:760px">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+<symbol id="i-chevd" viewBox="0 0 16 16"><path d="M3.5 6L8 10.5 12.5 6"/></symbol>
+<symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2v8M4.5 7L8 10.5 11.5 7M3 13.5h10"/></symbol>
+<symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8l8 5.2-8 5.2z"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search apps, namespaces, workloads" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx prod"><span class="dot prod"></span>prod-1 · <b>prod</b></span>
+  <span class="user"><span class="av">SM</span><span><b>Sara Moradi</b><i>Developer</i></span></span>
+</header>
+
+<div style="padding:12px 20px 10px;display:flex;flex-direction:column;gap:10px;background:var(--bg);flex:none">
+  <div class="row wrap" style="gap:12px">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="Main.dc.html">prod-1</a><svg class="i"><use href="#i-chev"/></svg><a href="Main.dc.html">payments</a><svg class="i"><use href="#i-chev"/></svg><a href="Main.dc.html">payments-api</a><svg class="i"><use href="#i-chev"/></svg><a href="WorkloadDetail.dc.html" class="mono">payments-api</a><svg class="i"><use href="#i-chev"/></svg><span style="color:var(--tx)">Logs</span></nav>
+    <span class="env prod">prod</span>
+    <span class="grow"></span>
+    <a class="btn" href="#"><svg class="i"><use href="#i-down"/></svg>Download .log</a>
+  </div>
+
+  <div class="row wrap" style="gap:10px">
+    <label class="row" style="gap:6px"><span class="muted">Pod</span><select class="sel mono" aria-label="Pod" style="min-width:250px"><option>payments-api-7d9c6b5f4-9mzt5</option></select></label>
+    <label class="row" style="gap:6px"><span class="muted">Container</span><select class="sel mono" aria-label="Container"><option>app</option></select></label>
+    <label class="chk"><input type="checkbox"> Previous container</label>
+    <span style="width:1px;height:20px;background:var(--ln)"></span>
+    <label class="chk"><input class="sw" type="checkbox" checked> Live tail</label>
+    <label class="row" style="gap:6px"><span class="muted">Lines</span><select class="sel" aria-label="Lines to load"><option>1,000</option></select></label>
+    <label class="row" style="gap:6px"><span class="muted">Since</span><select class="sel" aria-label="Since"><option>1h</option></select></label>
+    <label class="chk"><input type="checkbox" checked> Wrap lines</label>
+    <label class="chk"><input type="checkbox" checked> Timestamps</label>
+    <span class="grow"></span>
+    <label class="search" style="width:300px;height:28px;background:var(--sf);color:var(--tx)"><svg class="i"><use href="#i-search"/></svg><input value="timeout" aria-label="Search logs"><span class="muted" style="font-size:12px;white-space:nowrap">3 of 14</span></label>
+    <button class="btn sm" aria-label="Previous match"><svg class="i" style="transform:rotate(180deg)"><use href="#i-chevd"/></svg></button>
+    <button class="btn sm" aria-label="Next match"><svg class="i"><use href="#i-chevd"/></svg></button>
+  </div>
+</div>
+
+<div style="flex:1;margin:0 20px 8px;border-radius:8px 8px 0 0;overflow:hidden;position:relative;display:flex;flex-direction:column;min-height:0;border:1px solid #243041">
+  <div class="log" style="flex:1;padding:10px 0;overflow:hidden">
+    <div><span class="ts">13:40:58.201</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 138ms req=8f3a0e</span></div>
+    <div><span class="ts">13:40:58.944</span><span class="lv I">INFO</span><span>ledger posted entry le_99204 amount=1800 currency=EUR</span></div>
+    <div><span class="ts">13:40:59.310</span><span class="lv I">INFO</span><span>http   GET  /v1/charges/ch_44ab 200 21ms req=8f3a0f</span></div>
+    <div><span class="ts">13:41:00.002</span><span class="lv W">WARN</span><span>gateway upstream latency p99=1.8s host=psp-a.internal</span></div>
+    <div><span class="ts">13:41:01.115</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 402ms req=8f3a10</span></div>
+    <div><span class="ts">13:41:02.114</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 142ms req=8f3a11</span></div>
+    <div><span class="ts">13:41:02.388</span><span class="lv I">INFO</span><span>ledger posted entry le_99205 amount=4200 currency=EUR</span></div>
+    <div><span class="ts">13:41:03.020</span><span class="lv W">WARN</span><span>gateway retrying psp-a.internal attempt=1/3 reason=<mark class="hit">timeout</mark></span></div>
+    <div><span class="ts">13:41:04.771</span><span class="lv E">ERROR</span><span>psp    <mark class="hit">timeout</mark> calling psp-a.internal after 2000ms (attempt 1/3) req=8f3a12</span></div>
+    <div class="cur"><span class="ts">13:41:05.012</span><span class="lv E">ERROR</span><span>psp    <mark class="hit">timeout</mark> calling psp-a.internal after 2000ms (attempt 2/3) req=8f3a12</span></div>
+    <div><span class="ts">13:41:05.340</span><span class="lv I">INFO</span><span>http   GET  /v1/charges/ch_44ac 200 18ms req=8f3a13</span></div>
+    <div><span class="ts">13:41:06.980</span><span class="lv E">ERROR</span><span>psp    <mark class="hit">timeout</mark> calling psp-a.internal after 2000ms (attempt 3/3) req=8f3a12</span></div>
+    <div><span class="ts">13:41:06.981</span><span class="lv W">WARN</span><span>router failover psp-a.internal -> psp-b.internal req=8f3a12</span></div>
+    <div><span class="ts">13:41:07.455</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 2488ms req=8f3a12</span></div>
+    <div><span class="ts">13:41:08.002</span><span class="lv D">DEBUG</span><span>pool   db connections active=14 idle=6 waiting=0</span></div>
+    <div><span class="ts">13:41:08.771</span><span class="lv I">INFO</span><span>http   POST /v1/refunds 201 96ms req=8f3a14</span></div>
+    <div><span class="ts">13:41:09.404</span><span class="lv I">INFO</span><span>ledger posted entry le_99206 amount=-1800 currency=EUR</span></div>
+    <div><span class="ts">13:41:10.118</span><span class="lv W">WARN</span><span>memory rss=468Mi limit=512Mi (91%) gc pause=212ms</span></div>
+    <div><span class="ts">13:41:11.250</span><span class="lv I">INFO</span><span>http   GET  /healthz 200 1ms</span></div>
+    <div><span class="ts">13:41:12.640</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 151ms req=8f3a15</span></div>
+    <div><span class="ts">13:41:13.092</span><span class="lv I">INFO</span><span>ledger posted entry le_99207 amount=990 currency=EUR</span></div>
+    <div><span class="ts">13:41:14.377</span><span class="lv W">WARN</span><span>gateway upstream latency p99=1.4s host=psp-b.internal</span></div>
+    <div><span class="ts">13:41:15.801</span><span class="lv I">INFO</span><span>http   GET  /v1/charges/ch_44ae 200 24ms req=8f3a16</span></div>
+    <div><span class="ts">13:41:16.230</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 160ms req=8f3a17</span></div>
+    <div><span class="ts">13:41:17.002</span><span class="lv D">DEBUG</span><span>pool   db connections active=11 idle=9 waiting=0</span></div>
+    <div><span class="ts">13:41:18.411</span><span class="lv I">INFO</span><span>http   POST /v1/charges 201 133ms req=8f3a18</span></div>
+    <div><span class="ts">13:41:19.067</span><span class="lv I">INFO</span><span>ledger posted entry le_99208 amount=2750 currency=EUR</span></div>
+  </div>
+  <div style="position:absolute;right:18px;bottom:14px"><a class="btn pri" href="#"><svg class="i"><use href="#i-down"/></svg>Jump to latest · 42 new</a></div>
+</div>
+
+<div class="row" style="padding:0 20px 12px;font-size:12px;color:var(--tx3);gap:14px;flex:none">
+  <span class="row" style="gap:6px"><span class="dot ok"></span>Auto-scroll paused — you scrolled up</span>
+  <span>1,000 lines loaded</span>
+  <span class="grow"></span>
+  <span class="mono">payments-api-7d9c6b5f4-9mzt5 / app</span>
+  <span>Viewing logs is recorded in the audit log</span>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

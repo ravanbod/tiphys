@@ -1,0 +1,46 @@
+/* Additions for the admin pages (Requests, Grants, Time windows). Tokens come from portal.css. */
+
+/* ---- Requests: list items and the mobile action bar */
+.rq-item{display:block;width:100%;text-align:left;padding:12px 16px;border:0;border-bottom:1px solid var(--ln);background:none;color:var(--tx);font:inherit;cursor:pointer}
+.rq-item:last-child{border-bottom:0}
+.rq-item:hover{background:var(--sf2)}
+.rq-item.on,.rq-item.on:hover{background:var(--acbg)}
+.rq-item:focus-visible{outline-offset:-2px}
+.rq-item .quote{margin-top:4px;color:var(--tx3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rq-bar{position:sticky;bottom:0;z-index:20;margin:auto -12px -12px;padding:12px 16px 16px;display:flex;flex-direction:column;gap:8px;background:var(--sf);border-top:1px solid var(--ln)}
+.rq-bar .btn{flex:1;height:44px;justify-content:center;font-size:14px}
+.rq-bar .input{height:44px}
+.rq-back{display:flex;align-items:center;gap:6px}
+.rq-back .btn{height:44px;width:44px;justify-content:center;padding:0}
+
+/* ---- Grants: access checker steps */
+.step{display:flex;align-items:flex-start;gap:10px;padding:10px 0;border-top:1px solid var(--ln)}
+.step .chip{flex:none;min-width:24px;justify-content:center}
+.step.skip{opacity:.6}
+.step .t{font-weight:600}
+.step .d{color:var(--tx3)}
+.pickbox{display:flex;flex-direction:column;border:1px solid var(--ln);border-radius:6px;margin-top:4px;max-height:240px;overflow:auto}
+.pickbox .chk{padding:7px 10px}
+.pickbox .chk+.chk{border-top:1px solid var(--ln)}
+
+/* ---- Time windows: weekly preview grid */
+.wk{display:grid;grid-template-columns:44px repeat(7,minmax(0,1fr));gap:6px}
+.wk .hd2{font-size:12px;text-align:center;color:var(--tx2);padding-bottom:4px}
+.wk .hd2 b{display:block;color:var(--tx);font-weight:600}
+.wk .hd2.today,.wk .hd2.today b{color:var(--ac)}
+.wk .hrs{position:relative;height:432px;font-size:10.5px;color:var(--tx3)}
+.wk .hrs span{position:absolute;right:6px;transform:translateY(-50%)}
+.wk .day{position:relative;height:432px;border-radius:6px;background:var(--sf2);overflow:hidden;background-image:repeating-linear-gradient(45deg,transparent 0 6px,rgba(0,0,0,.05) 6px 7px)}
+.wk .seg-open,.wk .seg-deny{position:absolute;left:0;right:0}
+.wk .seg-open{background:var(--grnbg);border-top:1px solid var(--grn);border-bottom:1px solid var(--grn)}
+.wk .seg-deny{background:var(--redbg);border-top:1px solid var(--red);border-bottom:1px solid var(--red);background-image:repeating-linear-gradient(45deg,transparent 0 5px,rgba(196,37,37,.18) 5px 6px)}
+.wk .seg-open:hover,.wk .seg-open:focus-visible{filter:brightness(.96)}
+.wk .seg-deny:hover,.wk .seg-deny:focus-visible{filter:brightness(.96)}
+.wk .nowline{position:absolute;left:0;right:0;height:2px;background:var(--ac);pointer-events:none}
+.wk .seg-btn{padding:0;margin:0;border-left:0;border-right:0;cursor:default;font:inherit}
+.swatch{width:14px;height:10px;display:inline-block;flex:none}
+@media (max-width:640px){
+  .wk{grid-template-columns:30px repeat(7,minmax(0,1fr));gap:3px}
+  .wk .hd2{font-size:10px}
+  .wk .hrs span{right:3px}
+}

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Audit log · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-list" viewBox="0 0 16 16"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></symbol>
+<symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8 10.5h3.5"/></symbol>
+<symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c.4-2.4 2.2-3.5 4.5-3.5s4.1 1.1 4.5 3.5M11 3.2a2.4 2.4 0 010 4.6M12.5 9.7c1.3.5 2 1.5 2.2 3.3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 16 16"><path d="M8 1.5l5.5 2v4.2c0 3.2-2.3 5.6-5.5 6.8-3.2-1.2-5.5-3.6-5.5-6.8V3.5z"/></symbol>
+<symbol id="i-server" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2"/><rect x="2" y="9" width="12" height="4.5" rx="1.2"/><path d="M4.5 4.75h.01M4.5 11.25h.01"/></symbol>
+<symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.3 1.5"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-down" viewBox="0 0 16 16"><path d="M8 2v8M4.5 7L8 10.5 11.5 7M3 13.5h10"/></symbol>
+<symbol id="i-play" viewBox="0 0 16 16"><path d="M4.5 2.8l8 5.2-8 5.2z"/></symbol>
+<symbol id="i-x" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search events, users, targets" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx"><span class="dot"></span>All environments</span>
+  <span class="user"><span class="av">LS</span><span><b>Leila Safavi</b><i>Auditor · read-only</i></span></span>
+</header>
+
+<div class="body">
+<nav class="side" aria-label="Main">
+  <a class="on" href="AuditLog.dc.html"><svg class="i"><use href="#i-list"/></svg>Audit log</a>
+  <a href="Sessions.dc.html"><svg class="i"><use href="#i-term"/></svg>Sessions</a>
+  <h6>View only</h6>
+  <a href="Users.dc.html"><svg class="i"><use href="#i-users"/></svg>Users &amp; teams<span class="ro">View</span></a>
+  <a href="GrantEditor.dc.html"><svg class="i"><use href="#i-shield"/></svg>Grants<span class="ro">View</span></a>
+  <a href="Clusters.dc.html"><svg class="i"><use href="#i-server"/></svg>Clusters &amp; environments<span class="ro">View</span></a>
+  <a href="TimeWindows.dc.html"><svg class="i"><use href="#i-clock"/></svg>Time windows &amp; holidays<span class="ro">View</span></a>
+</nav>
+
+<main class="main">
+  <div class="ph"><div><h1>Audit log</h1><p>Newest first · 1,284 events in the last 24 hours</p></div><span class="grow"></span><a class="btn" href="#"><svg class="i"><use href="#i-down"/></svg>Export CSV</a></div>
+
+  <div class="row wrap">
+    <select class="sel" aria-label="Time range"><option>Last 24 hours</option></select>
+    <select class="sel" aria-label="User"><option>Any user</option></select>
+    <select class="sel" aria-label="Action"><option>Any action</option></select>
+    <select class="sel" aria-label="Environment"><option>Any environment</option></select>
+    <select class="sel" aria-label="Result"><option>Any result</option></select>
+    <label class="chk"><input type="checkbox"> Break-glass only</label>
+    <a class="btn ghost sm" href="#">+ 5 more filters</a>
+  </div>
+
+  <div class="row" style="align-items:flex-start;gap:16px">
+    <div class="card" style="flex:1;min-width:0">
+      <table class="tbl">
+        <thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th><th>Env</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr class="sel"><td class="mono">13:38:41</td><td>Sara Moradi</td><td>Exec started</td><td class="mono">prod-1 / payments-api / …2kq8x</td><td><span class="env prod">prod</span></td><td><span class="chip ok">Succeeded</span></td></tr>
+          <tr><td class="mono">13:35:07</td><td>Reza Ahmadi <span class="muted">admin</span></td><td>Grant changed</td><td class="mono">team Payments</td><td class="muted">—</td><td><span class="chip ok">Succeeded</span></td></tr>
+          <tr><td class="mono">13:22:50</td><td>Nima Karimi</td><td>Exec started</td><td class="mono">prod-2 / search-indexer</td><td><span class="env prod">prod</span></td><td><span class="chip err">Denied</span> <span class="muted">outside time window</span></td></tr>
+          <tr><td class="mono">13:20:12</td><td>Nima Karimi</td><td>Break-glass started</td><td class="mono">prod-2 / search-indexer</td><td><span class="env prod">prod</span></td><td><span class="chip ok">Succeeded</span> <span class="bgm">Break-glass</span></td></tr>
+          <tr><td class="mono">13:19:30</td><td>Mina Hosseini</td><td>Logs viewed</td><td class="mono">staging-1 / notifications-api</td><td><span class="env">staging</span></td><td><span class="chip ok">Allowed</span></td></tr>
+          <tr><td class="mono">13:05:44</td><td>Sara Moradi</td><td>Restart</td><td class="mono">prod-1 / payments-gateway</td><td><span class="env prod">prod</span></td><td><span class="chip ok">Succeeded</span></td></tr>
+          <tr><td class="mono">12:58:03</td><td>Arash Rahimi</td><td>Exec started</td><td class="mono">prod-1 / payments-api</td><td><span class="env prod">prod</span></td><td><span class="chip err">Denied</span> <span class="muted">no grant</span></td></tr>
+          <tr><td class="mono">12:41:19</td><td>Mina Hosseini</td><td>Access request created</td><td class="mono">notifications · staging-1</td><td><span class="env">staging</span></td><td><span class="chip ok">Succeeded</span></td></tr>
+          <tr><td class="mono">12:30:00</td><td>Kian Jalali</td><td>Log downloaded</td><td class="mono">prod-1 / payments-worker</td><td><span class="env prod">prod</span></td><td><span class="chip ok">Succeeded</span></td></tr>
+          <tr><td class="mono">12:10:22</td><td>Nima Karimi</td><td>CronJob run</td><td class="mono">prod-1 / reconcile-ledger</td><td><span class="env prod">prod</span></td><td><span class="chip err">Failed</span></td></tr>
+          <tr><td class="mono">11:58:09</td><td>Reza Ahmadi <span class="muted">admin</span></td><td>Time window changed</td><td class="mono">Prod change freeze</td><td class="muted">—</td><td><span class="chip ok">Succeeded</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <aside class="card" style="width:420px;flex:none" aria-label="Event detail">
+      <div class="hd">Exec started <span class="env prod">prod</span><span class="grow"></span><button class="btn ghost sm" aria-label="Close drawer"><svg class="i"><use href="#i-x"/></svg></button></div>
+      <div class="bd col" style="gap:14px">
+        <dl class="kv">
+          <dt>Time</dt><dd class="mono">2026-10-20 13:38:41 (Asia/Tehran)</dd>
+          <dt>User</dt><dd>Sara Moradi <span class="muted">· team Payments</span></dd>
+          <dt>Target</dt><dd class="mono">prod-1 / payments-api / payments-api-7d9c6b5f4-2kq8x</dd>
+          <dt>Container</dt><dd class="mono">app · /bin/sh</dd>
+          <dt>Result</dt><dd><span class="chip ok">Succeeded</span></dd>
+          <dt>Matched grant</dt><dd>Team Payments → Argo project payments</dd>
+          <dt>Session</dt><dd class="mono">sess_7Hq2Lm · open now</dd>
+        </dl>
+        <div class="row"><a class="btn pri" href="Replay.dc.html"><svg class="i"><use href="#i-play"/></svg>Replay session</a><a class="btn" href="Terminal.dc.html">Watch live</a></div>
+        <div class="col" style="gap:6px">
+          <span class="lbl">Admin change events show a before / after diff</span>
+          <div class="card" style="font:12px/1.6 'IBM Plex Mono',monospace">
+            <div style="padding:2px 10px;background:var(--redbg);color:var(--red)">- actions: logs, exec</div>
+            <div style="padding:2px 10px;background:var(--grnbg);color:var(--grn)">+ actions: logs, exec, restart</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":960}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

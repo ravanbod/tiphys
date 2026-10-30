@@ -1,0 +1,107 @@
+{{- if eq .Values.admission.mode "kyverno" }}
+{{- $users := "tiphys:user" }}
+# The same three rules as vap.yaml, for clusters without
+# ValidatingAdmissionPolicy (Kubernetes < 1.30). Needs Kyverno 1.10 or newer.
+#
+# 1. Restart only. Every top-level spec key other than template and restartAt
+#    is compared with oldObject, then the pod template (spec, metadata other
+#    than annotations, annotations other than restartedAt) and the workload's
+#    own metadata.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tiphys-restart-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: {{ .Values.admission.kyvernoAction }}
+  background: false
+  failurePolicy: Fail
+  rules:
+    - name: restart-only
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, DaemonSet, "argoproj.io/v1alpha1/Rollout"]
+              operations: [UPDATE]
+            subjects:
+              - kind: User
+                name: {{ $users | quote }}
+      validate:
+        message: "only the restart field of a workload may be changed"
+        deny:
+          conditions:
+            any:
+              {{- include "tiphys.kyvernoChanged" "sort_by(items(%[1]s.spec, 'k', 'v')[?k != 'template' && k != 'restartAt'], &k)" | nindent 14 }}
+              {{- include "tiphys.kyvernoChanged" "%[1]s.spec.template.spec || parse_json('{}')" | nindent 14 }}
+              {{- include "tiphys.kyvernoChanged" "sort_by(items(%[1]s.spec.template.metadata || parse_json('{}'), 'k', 'v')[?k != 'annotations'], &k)" | nindent 14 }}
+              {{- include "tiphys.kyvernoChanged" "sort_by(items(%[1]s.spec.template.metadata.annotations || parse_json('{}'), 'k', 'v')[?k != 'kubectl.kubernetes.io/restartedAt'], &k)" | nindent 14 }}
+              {{- include "tiphys.kyvernoChanged" "sort_by(items(%[1]s.metadata.annotations || parse_json('{}'), 'k', 'v')[?k != 'deprecated.daemonset.template.generation'], &k)" | nindent 14 }}
+              {{- include "tiphys.kyvernoChanged" "[%[1]s.metadata.labels, %[1]s.metadata.finalizers, %[1]s.metadata.ownerReferences]" | nindent 14 }}
+---
+# 2. Jobs only from CronJobs.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tiphys-jobs-from-cronjobs
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: {{ .Values.admission.kyvernoAction }}
+  background: false
+  failurePolicy: Fail
+  rules:
+    - name: cronjob-owner-and-manual-annotation
+      match:
+        any:
+          - resources:
+              kinds: [Job]
+              operations: [CREATE]
+            subjects:
+              - kind: User
+                name: {{ $users | quote }}
+      validate:
+        message: "a Job may only be created as the child of a CronJob, with the annotation cronjob.kubernetes.io/instantiate: manual"
+        deny:
+          conditions:
+            any:
+              - key: {{ "{{ length(request.object.metadata.ownerReferences[?kind == 'CronJob' && to_string(controller) == 'true'] || parse_json('[]')) }}" | quote }}
+                operator: Equals
+                value: 0
+              - key: {{ "{{ request.object.metadata.annotations.\"cronjob.kubernetes.io/instantiate\" || '' }}" | quote }}
+                operator: NotEquals
+                value: manual
+---
+# 3. Protected namespaces: no write and no exec.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tiphys-protected-namespaces
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: {{ .Values.admission.kyvernoAction }}
+  background: false
+  failurePolicy: Fail
+  rules:
+    - name: no-writes-no-exec
+      match:
+        any:
+          - resources:
+              kinds: ["*"]
+              operations: [CREATE, UPDATE, DELETE, CONNECT]
+              namespaces: {{ .Values.protectedNamespaces | default list | toJson }}
+            subjects:
+              - kind: User
+                name: {{ $users | quote }}
+          - resources:
+              kinds: ["Pod/exec"]
+              operations: [CONNECT]
+              namespaces: {{ .Values.protectedNamespaces | default list | toJson }}
+            subjects:
+              - kind: User
+                name: {{ $users | quote }}
+      validate:
+        message: "this namespace is protected: no writes or exec"
+        deny: {}
+{{- end }}

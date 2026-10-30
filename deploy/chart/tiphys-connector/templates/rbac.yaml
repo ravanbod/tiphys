@@ -1,0 +1,139 @@
+# Connector ServiceAccount: may only impersonate the fixed identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tiphys-connector-impersonator
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["users"]
+    verbs: ["impersonate"]
+    resourceNames: [{{ include "tiphys.user" . | quote }}]
+  - apiGroups: [""]
+    resources: ["groups"]
+    verbs: ["impersonate"]
+    resourceNames: [{{ include "tiphys.group" . | quote }}]
+  - apiGroups: ["authentication.k8s.io"]
+    resources:
+      - "userextras/{{ .Values.extraDomain }}/username"
+      - "userextras/{{ .Values.extraDomain }}/break-glass"
+    verbs: ["impersonate"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tiphys-connector-impersonator
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tiphys-connector-impersonator
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+---
+# Lets the connector (not the impersonated user) read
+# which admission policies exist, to report the cluster's admission mode.
+# Read-only, names only matter; it grants nothing on workloads or Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tiphys-connector-admission-reader
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["kyverno.io"]
+    resources: ["clusterpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tiphys-connector-admission-reader
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tiphys-connector-admission-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccountName }}
+    namespace: {{ .Release.Namespace }}
+---
+# What the impersonated identity may do (bound to group tiphys:users).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tiphys-actions
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events"]
+    verbs: ["get", "list", "watch"]
+  # The namespace page's traffic graph: Ingresses and Gateway API routes to
+  # the Services and pods behind them.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["get", "list", "watch"]
+  # Only the Gateways routes attach to, for their class and addresses.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get"]
+  # Namespace names only, so the portal can offer them in pickers without Argo CD.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
+  {{- if .Values.debug.enabled }}
+  {{- include "tiphys.debugChecked" . }}
+  # Debug containers; what may be added is limited by tiphys-debug-only.
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["update"]
+  {{- end }}
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tiphys-actions
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tiphys-actions
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: {{ include "tiphys.group" . | quote }}

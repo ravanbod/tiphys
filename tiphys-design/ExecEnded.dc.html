@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Session ended · payments-api · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app" style="height:100vh;min-height:720px">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.3 1.5"/></symbol>
+<symbol id="i-restart" viewBox="0 0 16 16"><path d="M13 8a5 5 0 11-1.6-3.7M13 2.5v3h-3"/></symbol>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search apps, namespaces, workloads" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx prod"><span class="dot prod"></span>prod-1 · <b>prod</b></span>
+  <span class="user"><span class="av">SM</span><span><b>Sara Moradi</b><i>Developer</i></span></span>
+</header>
+
+<div class="termbar">
+  <span class="mono">payments-api-7d9c6b5f4-2kq8x</span><span class="mono" style="color:#8C97A8">/ app</span><span class="env prod">prod</span>
+  <span class="row" style="gap:6px;color:#8C97A8"><span class="dot" style="background:#7F8CA0"></span>Ended</span>
+  <span class="grow"></span>
+  <span class="mono" style="color:#8C97A8">30:00 total</span>
+</div>
+
+<div style="flex:1;position:relative;overflow:hidden">
+  <div class="term" style="position:absolute;inset:0;padding:14px 18px;opacity:.38">
+    <div><span class="pr">app@payments-api-7d9c6b5f4-2kq8x</span>:<span style="color:#6FA8FF">/srv</span>$ cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current</div>
+    <div>536870912</div>
+    <div>491782144</div>
+    <div><span class="pr">app@payments-api-7d9c6b5f4-2kq8x</span>:<span style="color:#6FA8FF">/srv</span>$ ps aux | head -3</div>
+    <div>USER  PID %CPU %MEM COMMAND</div>
+    <div>app     1  4.1 91.2 /usr/local/bin/payments-api</div>
+    <div><span class="dm">[connection closed]</span></div>
+  </div>
+  <div style="position:absolute;inset:0;background:rgba(244,245,247,.0);display:flex;align-items:center;justify-content:center;padding:24px">
+    <div class="col" style="gap:24px;align-items:center;width:100%">
+      <div class="dlg" style="width:520px">
+        <div class="hd" style="padding-top:20px"><div class="row"><span class="chip warn">Session closed</span><span class="grow"></span><span class="env prod">prod</span></div><h2 style="margin-top:10px;font-size:18px">Maximum session length reached</h2><p>Exec sessions are limited to 30 minutes. Everything you ran was recorded.</p></div>
+        <div class="bd">
+          <dl class="kv" style="grid-template-columns:110px 1fr">
+            <dt>Pod</dt><dd class="mono">payments-api-7d9c6b5f4-2kq8x</dd>
+            <dt>Started</dt><dd>13:12:40 → 13:42:40</dd>
+            <dt>Recording</dt><dd><span class="chip ok"><svg class="i" style="width:12px;height:12px"><use href="#i-check"/></svg>Saved</span> <span class="mono muted">sess_7Hq2Lm</span></dd>
+          </dl>
+        </div>
+        <div class="ft"><a class="btn" href="WorkloadDetail.dc.html">Back to pods</a><a class="btn act" href="ExecConnect.dc.html"><svg class="i"><use href="#i-restart"/></svg>Reconnect</a></div>
+      </div>
+
+      <div class="col" style="gap:8px;align-items:center">
+        <span class="lbl">Other end reasons — same screen, reason changes</span>
+        <div class="row wrap" style="justify-content:center;max-width:900px">
+          <span class="chip" style="background:var(--sf)">You disconnected · Reconnect</span>
+          <span class="chip warn" style="background:var(--sf)">Time window closed at 18:00 · Use break-glass</span>
+          <span class="chip err" style="background:var(--sf)">Grant revoked · no reconnect</span>
+          <span class="chip err" style="background:var(--sf)">Ended by platform team · no reconnect</span>
+          <span class="chip" style="background:var(--sf)">Pod terminated · Reconnect to new pod</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":820}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

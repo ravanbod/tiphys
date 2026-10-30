@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Open a shell · payments-api · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app fx" style="width:960px;height:600px;padding:24px;flex-direction:row;gap:32px;align-items:flex-start;background:#E4E7EC">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8 10.5h3.5"/></symbol>
+<symbol id="i-warn" viewBox="0 0 16 16"><path d="M8 2l6.5 11.5h-13zM8 6.5v3.2M8 11.6h.01"/></symbol>
+</defs></svg>
+
+<div class="col" style="width:440px;gap:8px">
+  <span class="lbl" style="color:#3D4656">Staging</span>
+  <div class="dlg">
+    <div class="hd"><h2>Open a shell</h2><p class="row"><span class="mono" style="color:var(--tx)">notifications-worker-5c8d7-hq2lm</span><span class="env">staging</span></p></div>
+    <div class="bd">
+      <label class="f">Container<select class="sel" style="height:30px"><option>app</option></select></label>
+      <div class="f">Shell<div class="seg" style="align-self:flex-start"><span class="on mono">/bin/sh</span><span class="mono">/bin/bash</span></div></div>
+      <div class="banner info" style="align-items:flex-start"><span class="dot rec" style="margin-top:5px;background:#E5352B"></span><span>This session will be recorded and can be reviewed by the platform and security teams.</span></div>
+    </div>
+    <div class="ft"><a class="btn" href="WorkloadDetail.dc.html">Cancel</a><a class="btn act" href="Terminal.dc.html"><svg class="i"><use href="#i-term"/></svg>Connect</a></div>
+  </div>
+</div>
+
+<div class="col" style="width:440px;gap:8px">
+  <span class="lbl" style="color:#7E4400">Production</span>
+  <div class="dlg" style="border-color:var(--prod);box-shadow:0 0 0 1px var(--prod),0 16px 48px rgba(10,14,20,.20)">
+    <div class="hd"><h2>Open a shell</h2><p class="row"><span class="mono" style="color:var(--tx)">payments-api-7d9c6b5f4-2kq8x</span><span class="env prod">prod</span></p></div>
+    <div class="bd">
+      <div class="banner prod"><svg class="i"><use href="#i-warn"/></svg><b>You are opening a shell in production.</b></div>
+      <dl class="kv" style="grid-template-columns:90px 1fr"><dt>Cluster</dt><dd class="mono">prod-1</dd><dt>Namespace</dt><dd class="mono">payments-api</dd></dl>
+      <label class="f">Container<select class="sel" style="height:30px"><option>app</option></select></label>
+      <div class="f">Shell<div class="seg" style="align-self:flex-start"><span class="on mono">/bin/sh</span><span class="mono">/bin/bash</span></div></div>
+      <div class="banner info" style="align-items:flex-start"><span class="dot rec" style="margin-top:5px;background:#E5352B"></span><span>This session will be recorded and can be reviewed by the platform and security teams.</span></div>
+    </div>
+    <div class="ft"><a class="btn" href="WorkloadDetail.dc.html">Cancel</a><a class="btn act" href="Terminal.dc.html"><svg class="i"><use href="#i-term"/></svg>Connect</a></div>
+  </div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":960,"height":600}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

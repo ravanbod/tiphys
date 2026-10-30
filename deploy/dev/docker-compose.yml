@@ -1,0 +1,103 @@
+# Whole portal for local development, no Kubernetes needed:
+#
+#   docker compose -f deploy/dev/docker-compose.yml up -d --build
+#   open http://localhost:8080      (reza/reza admin, sara/sara developer, leila/leila auditor)
+#   docker compose -f deploy/dev/docker-compose.yml down        # add -v to drop the data volumes
+#
+# Dev only: Postgres uses its superuser, the Keycloak realm has test users.
+#
+# Keycloak is reached as http://keycloak.localhost:18080 by both your browser
+# (browsers resolve *.localhost to your machine) and the portal container
+# (extra_hosts below), so the OIDC issuer is the same URL on both sides.
+#
+# To run the portal natively instead (go run ./cmd/server), start only the
+# dependencies: docker compose -f deploy/dev/docker-compose.yml up -d postgres keycloak minio
+# and put the settings in a .env file in the project root (see .env.example).
+name: tiphys-dev
+
+services:
+  portal:
+    build:
+      context: ../..
+      args:
+        # proxy.golang.org answers 403 for some modules in some regions; override with GOPROXY=... if this one fails.
+        GOPROXY: ${GOPROXY:-https://goproxy.io,direct}
+    ports: ["127.0.0.1:8080:8080", "127.0.0.1:9090:9090"]
+    environment:
+      GIN_MODE: debug
+      LOG_LEVEL: info
+      PUBLIC_URL: http://localhost:8080
+      COOKIE_SECURE: "false"
+      TIPHYS_BOOTSTRAP_ADMINS: reza
+      # Members of this Keycloak group become admin at every login (add sara to it in Keycloak to try).
+      TIPHYS_ADMIN_GROUPS: tiphys-admins
+      # Skip Keycloak and log every visitor in as this user (needs GIN_MODE debug):
+      # "admin" is an admin, any other name (e.g. developer) a regular user.
+      # DEV_LOGIN_USER: admin
+      DATABASE_URL: postgres://postgres:tiphys-dev@postgres:5432/tiphys?sslmode=disable
+      DATABASE_MIGRATE_URL: postgres://postgres:tiphys-dev@postgres:5432/tiphys?sslmode=disable
+      OIDC_ISSUER_URL: http://keycloak.localhost:18080/realms/tiphys
+      OIDC_CLIENT_ID: tiphys
+      OIDC_CLIENT_SECRET: dev-client-secret
+      SESSION_ENCRYPTION_KEYS: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+      # No Argo CD yet: the portal logs a refresh error every minute and shows
+      # the Argo cache as stale. Point these at your Argo CD (a token with get and sync, see the README).
+      ARGO_URL: ${ARGO_URL:-http://127.0.0.1:9}
+      ARGO_TOKEN: ${ARGO_TOKEN:-unset}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: tiphys-dev
+      MINIO_SECRET_KEY: tiphys-dev-secret
+      MINIO_USE_SSL: "false"
+      MINIO_ENSURE_BUCKET: "true"
+      # Cluster kubeconfigs added from the Clusters page are kept in this volume.
+      CREDENTIAL_STORE: dir
+      CREDENTIAL_DIR: /var/lib/tiphys/clusters
+      # Allow adding clusters on the Clusters page (written to the volume above).
+      CLUSTER_REGISTRATION_FROM_UI: "true"
+    volumes:
+      - clusters:/var/lib/tiphys/clusters
+    extra_hosts:
+      - "keycloak.localhost:host-gateway"
+    depends_on:
+      postgres: {condition: service_healthy}
+      keycloak: {condition: service_started}
+      minio: {condition: service_started}
+    # The portal needs Keycloak's discovery document at startup; retry until it is up.
+    restart: on-failure
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: tiphys-dev
+      POSTGRES_DB: tiphys
+    ports: ["127.0.0.1:15432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tiphys"]
+      interval: 2s
+      retries: 30
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      JAVA_OPTS_KC_HEAP: "-Xms128m -Xmx512m"
+    volumes: ["./realm.json:/opt/keycloak/data/import/realm.json:ro"]
+    ports: ["127.0.0.1:18080:8080"]
+
+  minio:
+    # minio/minio is no longer published on Docker Hub; the Chainguard build is the same server.
+    image: cgr.dev/chainguard/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: tiphys-dev
+      MINIO_ROOT_PASSWORD: tiphys-dev-secret
+    tmpfs: ["/data:rw,mode=1777"]   # recordings are thrown away on `down`
+    ports: ["127.0.0.1:19000:9000"]
+
+volumes:
+  pgdata:
+  clusters:

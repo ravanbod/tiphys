@@ -1,0 +1,231 @@
+{{- if eq .Values.admission.mode "vap" }}
+{{- $match := "request.userInfo.username == 'tiphys:user'" }}
+# 1. Restart only: an UPDATE of a workload by tiphys:user may change nothing
+#    but the restart field. object and oldObject are dynamic in VAP, so every
+#    spec key is compared generically and a field added by a newer Kubernetes
+#    or Rollouts version is covered too.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tiphys-restart-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets"]
+      - apiGroups: ["argoproj.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["rollouts"]
+  matchConditions:
+    - name: tiphys-user
+      expression: {{ $match | quote }}
+  variables:
+    - name: restartKey
+      expression: "'kubectl.kubernetes.io/restartedAt'"
+    - name: newSpec
+      expression: "object.spec"
+    - name: oldSpec
+      expression: "oldObject.spec"
+    - name: newTemplate
+      expression: "object.spec.?template.orValue({})"
+    - name: oldTemplate
+      expression: "oldObject.spec.?template.orValue({})"
+    - name: newTemplateMeta
+      expression: "variables.newTemplate.?metadata.orValue({})"
+    - name: oldTemplateMeta
+      expression: "variables.oldTemplate.?metadata.orValue({})"
+    - name: newAnnotations
+      expression: "variables.newTemplateMeta.?annotations.orValue({})"
+    - name: oldAnnotations
+      expression: "variables.oldTemplateMeta.?annotations.orValue({})"
+    # The API server bumps this annotation on DaemonSet template changes.
+    - name: daemonSetGeneration
+      expression: "'deprecated.daemonset.template.generation'"
+    - name: newMetaAnnotations
+      expression: "object.metadata.?annotations.orValue({})"
+    - name: oldMetaAnnotations
+      expression: "oldObject.metadata.?annotations.orValue({})"
+  validations:
+    - expression: >-
+        variables.newSpec.all(k, k in ['template', 'restartAt'] || (k in variables.oldSpec && variables.newSpec[k] == variables.oldSpec[k])) &&
+        variables.oldSpec.all(k, k in ['template', 'restartAt'] || k in variables.newSpec)
+      message: "only the restart field of a workload may be changed (spec)"
+    - expression: >-
+        variables.newTemplate.?spec == variables.oldTemplate.?spec
+      message: "only the restart field of a workload may be changed (pod spec)"
+    - expression: >-
+        variables.newTemplateMeta.all(k, k == 'annotations' || (k in variables.oldTemplateMeta && variables.newTemplateMeta[k] == variables.oldTemplateMeta[k])) &&
+        variables.oldTemplateMeta.all(k, k == 'annotations' || k in variables.newTemplateMeta)
+      message: "only the restart field of a workload may be changed (pod labels)"
+    - expression: >-
+        variables.newAnnotations.all(k, k == variables.restartKey || (k in variables.oldAnnotations && variables.newAnnotations[k] == variables.oldAnnotations[k])) &&
+        variables.oldAnnotations.all(k, k == variables.restartKey || k in variables.newAnnotations)
+      message: "only the restart annotation of the pod template may be changed"
+    - expression: >-
+        object.metadata.?labels.orValue({}) == oldObject.metadata.?labels.orValue({}) &&
+        variables.newMetaAnnotations.all(k, k == variables.daemonSetGeneration || (k in variables.oldMetaAnnotations && variables.newMetaAnnotations[k] == variables.oldMetaAnnotations[k])) &&
+        variables.oldMetaAnnotations.all(k, k == variables.daemonSetGeneration || k in variables.newMetaAnnotations) &&
+        object.metadata.?finalizers.orValue([]) == oldObject.metadata.?finalizers.orValue([]) &&
+        object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([])
+      message: "metadata of a workload may not be changed"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tiphys-restart-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  policyName: tiphys-restart-only
+  validationActions: {{ toJson .Values.admission.validationActions }}
+---
+# 2. Jobs only from CronJobs: CREATE of a Job needs a CronJob controller
+#    ownerReference and the manual-instantiate annotation.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tiphys-jobs-from-cronjobs
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["*"]
+        operations: ["CREATE"]
+        resources: ["jobs"]
+  matchConditions:
+    - name: tiphys-user
+      expression: {{ $match | quote }}
+  variables:
+    - name: annotations
+      expression: "object.metadata.?annotations.orValue({})"
+  validations:
+    - expression: >-
+        object.metadata.?ownerReferences.orValue([]).exists(o,
+          o.kind == 'CronJob' && o.apiVersion.startsWith('batch/') && o.?controller.orValue(false) == true)
+      message: "a Job may only be created as the child of a CronJob"
+    - expression: >-
+        'cronjob.kubernetes.io/instantiate' in variables.annotations &&
+        variables.annotations['cronjob.kubernetes.io/instantiate'] == 'manual'
+      message: "a Job must carry the annotation cronjob.kubernetes.io/instantiate: manual"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tiphys-jobs-from-cronjobs
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  policyName: tiphys-jobs-from-cronjobs
+  validationActions: {{ toJson .Values.admission.validationActions }}
+---
+# 3. Protected namespaces: no write and no exec. The list is inline (no
+#    parameter resource), so the policy has no moving parts besides itself.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tiphys-protected-namespaces
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+  matchConditions:
+    - name: tiphys-user
+      expression: {{ $match | quote }}
+  variables:
+    - name: protected
+      expression: {{ .Values.protectedNamespaces | default list | toJson | quote }}
+  validations:
+    - expression: "!(request.namespace in variables.protected)"
+      messageExpression: "'namespace ' + request.namespace + ' is protected: no writes or exec'"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tiphys-protected-namespaces
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  policyName: tiphys-protected-namespaces
+  validationActions: {{ toJson .Values.admission.validationActions }}
+{{- if .Values.debug.enabled }}
+{{- include "tiphys.debugChecked" . }}
+---
+# 4. Debug containers only: an update of pods/ephemeralcontainers by
+#    tiphys:user adds exactly one container, named tiphys-debug-*, running the
+#    pinned image as `sleep <seconds>` against a container of the pod. It may
+#    carry no other field (no env or envFrom, so no Secrets; no volumes, ports,
+#    probes or securityContext, so no privilege the pod lacks). The API server
+#    itself forbids changing or removing existing ephemeral containers.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tiphys-debug-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["pods/ephemeralcontainers"]
+  matchConditions:
+    - name: tiphys-user
+      expression: {{ $match | quote }}
+  variables:
+    - name: oldNames
+      expression: "oldObject.spec.?ephemeralContainers.orValue([]).map(c, c.name)"
+    - name: current
+      expression: "object.spec.?ephemeralContainers.orValue([])"
+    - name: added
+      expression: "variables.current.filter(c, !(c.name in variables.oldNames))"
+    # Set by the portal, or defaulted by the API server.
+    - name: allowedKeys
+      expression: "['name', 'image', 'command', 'targetContainerName', 'imagePullPolicy', 'terminationMessagePath', 'terminationMessagePolicy', 'resources']"
+  validations:
+    - expression: "size(variables.added) == 1"
+      message: "exactly one debug container may be added at a time"
+    - expression: "size(variables.current) <= {{ int .Values.debug.maxContainersPerPod }}"
+      message: "the pod has too many debug containers; restart the workload to remove them"
+    - expression: >-
+        variables.added.all(c, c.name.startsWith('tiphys-debug-') && c.image == '{{ .Values.debug.image }}')
+      message: "a debug container must be named tiphys-debug-* and run the configured debug image"
+    - expression: >-
+        variables.added.all(c, c.?command.orValue([]).size() == 2 && c.command[0] == 'sleep' &&
+          c.command[1].matches('^[1-9][0-9]*$') && size(c.command[1]) <= 9 &&
+          int(c.command[1]) <= {{ int .Values.debug.maxLifetimeSeconds }})
+      message: "a debug container must run `sleep <seconds>` within debug.maxLifetimeSeconds"
+    - expression: >-
+        variables.added.all(c, c.?targetContainerName.orValue('') in object.spec.containers.map(x, x.name))
+      message: "a debug container must target a container of the pod"
+    - expression: >-
+        variables.added.all(c, c.all(k, k in variables.allowedKeys) && c.?resources.orValue({}).all(k, false))
+      message: "a debug container may not set env, volumes, ports, probes, securityContext or resources"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tiphys-debug-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  policyName: tiphys-debug-only
+  validationActions: {{ toJson .Values.admission.validationActions }}
+{{- end }}
+{{- end }}

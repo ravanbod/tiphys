@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Grants · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-box" viewBox="0 0 16 16"><path d="M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 16 16"><path d="M2 9l2-6h8l2 6v4H2zM2 9h4l1 2h2l1-2h4"/></symbol>
+<symbol id="i-list" viewBox="0 0 16 16"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></symbol>
+<symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8 10.5h3.5"/></symbol>
+<symbol id="i-users" viewBox="0 0 16 16"><circle cx="6" cy="5.5" r="2.5"/><path d="M1.5 13c.4-2.4 2.2-3.5 4.5-3.5s4.1 1.1 4.5 3.5M11 3.2a2.4 2.4 0 010 4.6M12.5 9.7c1.3.5 2 1.5 2.2 3.3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 16 16"><path d="M8 1.5l5.5 2v4.2c0 3.2-2.3 5.6-5.5 6.8-3.2-1.2-5.5-3.6-5.5-6.8V3.5z"/></symbol>
+<symbol id="i-server" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="4.5" rx="1.2"/><rect x="2" y="9" width="12" height="4.5" rx="1.2"/><path d="M4.5 4.75h.01M4.5 11.25h.01"/></symbol>
+<symbol id="i-clock" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.3 1.5"/></symbol>
+<symbol id="i-gear" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></symbol>
+<symbol id="i-check" viewBox="0 0 16 16"><path d="M3 8.5l3.2 3L13 4.5"/></symbol>
+<symbol id="i-x" viewBox="0 0 16 16"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.2 7V5a2.8 2.8 0 015.6 0v2"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search apps, namespaces, workloads" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx"><span class="dot"></span>All environments</span>
+  <span class="user"><span class="av">RA</span><span><b>Reza Ahmadi</b><i>Admin</i></span></span>
+</header>
+
+<div class="body">
+<nav class="side" aria-label="Main">
+  <a href="Main.dc.html"><svg class="i"><use href="#i-box"/></svg>Workloads</a>
+  <a href="Requests.dc.html"><svg class="i"><use href="#i-inbox"/></svg>Access requests<span class="n">3</span></a>
+  <h6>Audit</h6>
+  <a href="AuditLog.dc.html"><svg class="i"><use href="#i-list"/></svg>Audit log</a>
+  <a href="Sessions.dc.html"><svg class="i"><use href="#i-term"/></svg>Sessions</a>
+  <h6>Manage</h6>
+  <a href="Users.dc.html"><svg class="i"><use href="#i-users"/></svg>Users &amp; teams</a>
+  <a class="on" href="GrantEditor.dc.html"><svg class="i"><use href="#i-shield"/></svg>Grants</a>
+  <a href="Clusters.dc.html"><svg class="i"><use href="#i-server"/></svg>Clusters &amp; environments</a>
+  <a href="TimeWindows.dc.html"><svg class="i"><use href="#i-clock"/></svg>Time windows &amp; holidays</a>
+  <a href="Settings.dc.html"><svg class="i"><use href="#i-gear"/></svg>Settings</a>
+</nav>
+
+<main class="main">
+  <div class="ph"><div><h1>Grants</h1><p>Who can do what, where, and until when</p></div><span class="grow"></span><a class="btn pri" href="#"><svg class="i"><use href="#i-plus"/></svg>New grant</a></div>
+
+  <div class="row wrap">
+    <select class="sel" aria-label="Holder"><option>Any holder</option></select>
+    <select class="sel" aria-label="Scope kind"><option>Any scope</option></select>
+    <select class="sel" aria-label="Cluster"><option>All clusters</option></select>
+    <select class="sel" aria-label="Argo project"><option>All Argo projects</option></select>
+    <select class="sel" aria-label="Action"><option>Any action</option></select>
+    <label class="chk"><input type="checkbox"> Expiring soon</label>
+    <label class="chk"><input type="checkbox"> Expired</label>
+  </div>
+
+  <div class="card">
+    <table class="tbl">
+      <thead><tr><th>Holder</th><th>Scope</th><th>Cluster</th><th>Actions</th><th>Expiry</th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td><span class="chip info">Team</span> <b>Payments</b></td><td><span class="tag">Argo project</span> <span class="mono">payments</span></td><td class="mono">all</td><td><span class="chip">logs</span> <span class="chip act">exec</span> <span class="chip act">restart</span></td><td class="muted">None</td><td class="muted">Core team</td></tr>
+        <tr class="sel"><td><span class="chip info">Team</span> <b>Payments</b></td><td><span class="tag">Workloads</span> <span class="mono">2 in payments</span></td><td class="mono">prod-1</td><td><span class="chip">logs</span> <span class="chip act">exec</span></td><td>Nov 30, 18:00</td><td class="muted">Editing…</td></tr>
+        <tr><td><span class="chip info">Team</span> <b>Search</b></td><td><span class="tag">Namespace</span> <span class="mono">search-indexer</span></td><td class="mono">prod-2</td><td><span class="chip">logs</span> <span class="chip act">exec</span></td><td class="muted">None</td><td class="muted">—</td></tr>
+        <tr><td><span class="chip">User</span> <b>Sara Moradi</b></td><td><span class="tag">Workloads</span> <span class="mono">2 in payments-api</span></td><td class="mono">staging-1</td><td><span class="chip">logs</span> <span class="chip act">exec</span> <span class="chip act">run-job</span></td><td><span class="chip warn">Expires in 13 d</span></td><td class="muted">Release prep</td></tr>
+        <tr class="off"><td><span class="chip">User</span> Arash Rahimi</td><td><span class="tag">Namespace</span> <span class="mono">payments-api</span></td><td class="mono">prod-1</td><td><span class="chip">exec</span></td><td>Expired Oct 12</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="row" style="align-items:flex-start;gap:16px">
+    <div class="card" style="flex:1.25;min-width:0">
+      <div class="hd">Edit grant</div>
+      <div class="bd col" style="gap:16px">
+        <div class="f">1 · Holder
+          <div class="row"><div class="seg"><span class="on">Team</span><span>User</span></div><select class="sel" style="height:30px;flex:1"><option>Payments (9 members)</option></select></div>
+        </div>
+        <div class="f">2 · Scope kind
+          <div class="seg" style="align-self:flex-start"><span>Argo project</span><span>Namespace</span><span class="on">Workloads</span></div>
+        </div>
+        <div class="f">3 · Where <span class="hint">Cluster → namespace → workloads</span>
+          <div class="row" style="gap:8px"><select class="sel" style="height:30px;flex:1"><option>prod-1</option></select><svg class="i muted"><use href="#i-search"/></svg><select class="sel" style="height:30px;flex:1"><option>payments</option></select></div>
+          <div class="col" style="gap:0;border:1px solid var(--ln);border-radius:6px;margin-top:4px">
+            <label class="chk" style="padding:7px 10px"><input type="checkbox" checked><span class="tag">Deployment</span><span class="mono">payments-api</span></label>
+            <label class="chk" style="padding:7px 10px;border-top:1px solid var(--ln)"><input type="checkbox" checked><span class="tag">Deployment</span><span class="mono">payments-gateway</span></label>
+            <label class="chk" style="padding:7px 10px;border-top:1px solid var(--ln)"><input type="checkbox"><span class="tag">Rollout</span><span class="mono">payments-canary</span></label>
+            <label class="chk" style="padding:7px 10px;border-top:1px solid var(--ln)"><input type="checkbox"><span class="tag">CronJob</span><span class="mono">reconcile-ledger</span></label>
+          </div>
+          <span class="hint row" style="gap:6px"><svg class="i" style="width:13px;height:13px"><use href="#i-lock"/></svg>Protected namespaces (kube-system, argocd) are hidden from pickers.</span>
+        </div>
+        <div class="f">4 · Actions
+          <div class="row wrap" style="gap:16px"><label class="chk"><input type="checkbox" checked>logs <span class="muted">(events, pod status)</span></label><label class="chk"><input type="checkbox" checked>exec</label><label class="chk"><input type="checkbox">restart</label><label class="chk"><input type="checkbox">run-job</label></div>
+        </div>
+        <div class="f">5 · Expiry
+          <div class="row"><div class="seg"><span>None</span><span class="on">Date &amp; time</span></div><input class="input" style="width:220px" value="Nov 30, 2026 18:00" aria-label="Expiry date and time"><span class="muted">Asia/Tehran</span></div>
+        </div>
+        <label class="f">6 · Note <span class="hint">Optional</span><input class="input" value="Release freeze coverage" aria-label="Note"></label>
+        <div class="banner info" style="align-items:flex-start;flex-direction:column;gap:2px"><span class="lbl" style="color:var(--ac)">This grant means</span><span style="font-size:13px">Team <b>Payments</b> can read logs and exec into 2 workloads (<span class="mono">payments-api</span>, <span class="mono">payments-gateway</span>) in namespace <span class="mono">payments</span> on cluster <span class="mono">prod-1</span>, until Nov 30, 2026 18:00.</span></div>
+        <div class="row" style="justify-content:flex-end"><a class="btn" href="#">Cancel</a><a class="btn pri" href="#">Save grant</a></div>
+      </div>
+    </div>
+
+    <div class="card" style="flex:1;min-width:0">
+      <div class="hd">Access checker <small>Why can or can't someone do this?</small></div>
+      <div class="bd col" style="gap:14px">
+        <div class="row" style="gap:8px;align-items:flex-end">
+          <label class="f" style="flex:1">User<select class="sel" style="height:30px"><option>Sara Moradi</option></select></label>
+          <label class="f" style="flex:1.3">Workload<select class="sel mono" style="height:30px"><option>payments-api · prod-1</option></select></label>
+          <label class="f" style="width:100px">Action<select class="sel" style="height:30px"><option>exec</option></select></label>
+        </div>
+        <div class="row" style="padding:12px 14px;border-radius:8px;background:var(--redbg);gap:12px"><span class="chip err" style="height:24px;font-size:12px;font-weight:600">DENIED NOW</span><span style="color:var(--red)">Would be allowed with break-glass.</span></div>
+        <div class="col" style="gap:0">
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip ok" style="padding:0 5px"><svg class="i" style="width:12px;height:12px"><use href="#i-check"/></svg></span><div><b>Matching grant</b><div class="muted">Team Payments → Argo project <span class="mono">payments</span> · logs, exec, restart</div></div></div>
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip ok" style="padding:0 5px"><svg class="i" style="width:12px;height:12px"><use href="#i-check"/></svg></span><div><b>Namespace not protected</b><div class="muted"><span class="mono">payments-api</span> is allowed</div></div></div>
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip">—</span><div><b>Environment</b><div class="muted">prod · time windows apply</div></div></div>
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip ok" style="padding:0 5px"><svg class="i" style="width:12px;height:12px"><use href="#i-check"/></svg></span><div><b>Holiday</b><div class="muted">Not a holiday today</div></div></div>
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip err" style="padding:0 5px"><svg class="i" style="width:12px;height:12px"><use href="#i-x"/></svg></span><div><b>Time window — closed</b><div class="muted">Rule "Prod change freeze" denies exec, restart, run-job on Tue 13:00–15:00. Reopens at 15:00.</div></div></div>
+          <div class="row" style="align-items:flex-start;padding:10px 0;border-top:1px solid var(--ln)"><span class="chip info">BG</span><div><b>Break-glass</b><div class="muted">Available: Sara has a grant for this scope and the block is only a time window.</div></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1120}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

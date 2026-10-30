@@ -1,0 +1,92 @@
+{
+  "realm": "tiphys",
+  "enabled": true,
+  "sslRequired": "none",
+  "clients": [
+    {
+      "clientId": "tiphys",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "dev-client-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8080"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "reza",
+      "enabled": true,
+      "firstName": "Reza",
+      "lastName": "Ahmadi",
+      "email": "reza@example.com",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "reza",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "sara",
+      "enabled": true,
+      "firstName": "Sara",
+      "lastName": "Moradi",
+      "email": "sara@example.com",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "sara",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "leila",
+      "enabled": true,
+      "firstName": "Leila",
+      "lastName": "Safavi",
+      "email": "leila@example.com",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "leila",
+          "temporary": false
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "tiphys-admins"
+    }
+  ]
+}

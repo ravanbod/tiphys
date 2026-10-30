@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Workloads · Tiphys</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-box" viewBox="0 0 16 16"><path d="M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6"/></symbol>
+<symbol id="i-key" viewBox="0 0 16 16"><circle cx="5.5" cy="10.5" r="2.5"/><path d="M7.3 8.7L13 3M11 5l2 2"/></symbol>
+<symbol id="i-search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></symbol>
+<symbol id="i-star" viewBox="0 0 16 16"><path d="M8 1.8l1.9 4 4.3.5-3.2 2.9.9 4.3L8 11.4l-3.9 2.1.9-4.3L1.8 6.3l4.3-.5z"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+<symbol id="i-chevd" viewBox="0 0 16 16"><path d="M3.5 6L8 10.5 12.5 6"/></symbol>
+<symbol id="i-list" viewBox="0 0 16 16"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></symbol>
+</defs></svg>
+
+<header class="top">
+  <a class="brand" href="Main.dc.html"><span class="mark"></span>Tiphys</a>
+  <label class="search"><svg class="i"><use href="#i-search"/></svg><input placeholder="Search apps, namespaces, workloads" aria-label="Global search"><kbd>/</kbd></label>
+  <span class="grow"></span>
+  <span class="ctx"><span class="dot"></span>All environments</span>
+  <span class="user"><span class="av">SM</span><span><b>Sara Moradi</b><i>Developer</i></span></span>
+</header>
+
+<div class="body">
+<nav class="side" aria-label="Main">
+  <a class="on" href="Main.dc.html"><svg class="i"><use href="#i-box"/></svg>Workloads</a>
+  <a href="MyAccess.dc.html"><svg class="i"><use href="#i-key"/></svg>My access</a>
+  <h6>Starred</h6>
+  <a href="WorkloadDetail.dc.html"><svg class="i"><use href="#i-star"/></svg><span class="mono">payments-api</span><span class="env prod" style="margin-left:auto">prod</span></a>
+  <a href="WorkloadDetail.dc.html"><svg class="i"><use href="#i-star"/></svg><span class="mono">search-indexer</span><span class="env prod" style="margin-left:auto">prod</span></a>
+</nav>
+
+<main class="main">
+  <div class="ph">
+    <div><h1>Workloads</h1><p>12 applications you can access across 3 clusters</p></div>
+    <span class="grow"></span>
+    <div class="seg" role="group" aria-label="Group by"><span class="on">By Argo app</span><span>By namespace</span></div>
+  </div>
+
+  <div class="row wrap">
+    <select class="sel" aria-label="Cluster"><option>All clusters</option></select>
+    <select class="sel" aria-label="Environment"><option>All environments</option></select>
+    <select class="sel" aria-label="Argo project"><option>All Argo projects</option></select>
+    <label class="search" style="width:280px;height:28px;background:var(--sf)"><svg class="i"><use href="#i-search"/></svg><input placeholder="Filter by name" aria-label="Filter by name"></label>
+    <span class="grow"></span>
+    <span class="muted">Showing 8 of 12</span>
+  </div>
+
+  <div class="card">
+  <table class="tbl">
+    <thead><tr><th style="width:44px"></th><th>Application</th><th>Argo project</th><th>Cluster</th><th>Env</th><th>Namespace</th><th>Health</th><th>Sync</th><th style="text-align:right">Workloads</th></tr></thead>
+    <tbody>
+      <tr class="sec"><td colspan="9">Starred</td></tr>
+      <tr>
+        <td><span class="row" style="gap:2px;color:var(--prod)"><svg class="i" style="fill:currentColor"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chevd"/></svg><a href="WorkloadDetail.dc.html" style="text-decoration:none"><b class="mono" style="font-size:13px">payments-api</b></a></span></td>
+        <td>payments</td><td class="mono">prod-1</td><td><span class="env prod">prod</span></td><td class="mono">payments-api</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">3</td>
+      </tr>
+      <tr class="sub">
+        <td></td>
+        <td colspan="2"><span class="row" style="padding-left:24px"><span class="tag">Deployment</span><span class="mono">payments-api</span></span></td>
+        <td colspan="4"><span class="mono muted">3/3 ready</span></td>
+        <td colspan="2" style="text-align:right"><a class="btn ghost sm" href="Logs.dc.html">Logs</a><a class="btn ghost sm" href="WorkloadDetail.dc.html">Open</a></td>
+      </tr>
+      <tr class="sub">
+        <td></td>
+        <td colspan="2"><span class="row" style="padding-left:24px"><span class="tag">Deployment</span><span class="mono">payments-gateway</span></span></td>
+        <td colspan="4"><span class="mono muted">2/2 ready</span></td>
+        <td colspan="2" style="text-align:right"><a class="btn ghost sm" href="Logs.dc.html">Logs</a><a class="btn ghost sm" href="WorkloadDetail.dc.html">Open</a></td>
+      </tr>
+      <tr class="sub">
+        <td></td>
+        <td colspan="2"><span class="row" style="padding-left:24px"><span class="tag">Rollout</span><span class="mono">payments-canary</span></span></td>
+        <td colspan="4"><span class="mono muted">4/4 ready</span></td>
+        <td colspan="2" style="text-align:right"><a class="btn ghost sm" href="Logs.dc.html">Logs</a><a class="btn ghost sm" href="WorkloadDetail.dc.html">Open</a></td>
+      </tr>
+      <tr>
+        <td><span class="row" style="color:var(--prod)"><svg class="i" style="fill:currentColor"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><a href="WorkloadDetail.dc.html" style="text-decoration:none"><b class="mono" style="font-size:13px">search-indexer</b></a></span></td>
+        <td>search</td><td class="mono">prod-2</td><td><span class="env prod">prod</span></td><td class="mono">search-indexer</td>
+        <td><span class="chip info"><span class="dot info"></span>Progressing</span></td><td><span class="chip warn">OutOfSync</span></td><td style="text-align:right">2</td>
+      </tr>
+
+      <tr class="sec"><td colspan="9">All applications</td></tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">payments-worker</span></span></td>
+        <td>payments</td><td class="mono">prod-1</td><td><span class="env prod">prod</span></td><td class="mono">payments-worker</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">2</td>
+      </tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">notifications-api</span></span></td>
+        <td>notifications</td><td class="mono">prod-1</td><td><span class="env prod">prod</span></td><td class="mono">notifications-api</td>
+        <td><span class="chip err"><span class="dot err"></span>Degraded</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">2</td>
+      </tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">search-api</span></span></td>
+        <td>search</td><td class="mono">prod-2</td><td><span class="env prod">prod</span></td><td class="mono">search-api</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">4</td>
+      </tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">payments-api</span></span></td>
+        <td>payments</td><td class="mono">staging-1</td><td><span class="env">staging</span></td><td class="mono">payments-api</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip warn">OutOfSync</span></td><td style="text-align:right">3</td>
+      </tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">notifications-worker</span></span></td>
+        <td>notifications</td><td class="mono">staging-1</td><td><span class="env">staging</span></td><td class="mono">notifications-worker</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">1</td>
+      </tr>
+      <tr>
+        <td><span class="row muted"><svg class="i"><use href="#i-star"/></svg></span></td>
+        <td><span class="row"><svg class="i"><use href="#i-chev"/></svg><span class="mono" style="font-size:13px">search-indexer</span></span></td>
+        <td>search</td><td class="mono">staging-1</td><td><span class="env">staging</span></td><td class="mono">search-indexer</td>
+        <td><span class="chip ok"><span class="dot ok"></span>Healthy</span></td><td><span class="chip ok">Synced</span></td><td style="text-align:right">2</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+</main>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+{
+  "metadata": {"resourceVersion": "98123"},
+  "items": [
+    {
+      "metadata": {"name": "payments-api", "namespace": "argocd", "uid": "a1"},
+      "spec": {
+        "project": "payments",
+        "source": {"repoURL": "https://git.example.com/payments/api.git", "path": "deploy", "targetRevision": "main"},
+        "destination": {"server": "https://k8s-prod-1.example.internal:6443", "namespace": "payments"},
+        "syncPolicy": {"automated": {"prune": true}}
+      },
+      "status": {
+        "resources": [
+          {"version": "v1", "kind": "Service", "namespace": "payments", "name": "payments-api", "status": "Synced", "health": {"status": "Healthy"}},
+          {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "payments", "name": "payments-api", "status": "Synced", "health": {"status": "Healthy"}},
+          {"version": "v1", "kind": "ConfigMap", "namespace": "payments", "name": "cfg", "status": "Synced"}
+        ],
+        "sync": {"status": "Synced", "comparedTo": {"destination": {"server": "https://k8s-prod-1.example.internal:6443", "namespace": "payments"}}},
+        "health": {"status": "Healthy"},
+        "operationState": {"phase": "Succeeded", "message": "successfully synced", "startedAt": "2026-10-27T08:59:50Z", "finishedAt": "2026-10-27T09:00:05Z"}
+      }
+    },
+    {
+      "metadata": {"name": "payments-observability", "namespace": "argocd", "uid": "a2"},
+      "spec": {
+        "project": "payments",
+        "sources": [
+          {"repoURL": "https://charts.example.com", "chart": "kube-prometheus-stack", "targetRevision": "61.0.0", "helm": {"valueFiles": ["$values/payments/values.yaml"]}},
+          {"repoURL": "https://git.example.com/payments/config.git", "targetRevision": "main", "ref": "values"}
+        ],
+        "destination": {"name": "prod-1", "namespace": "payments-monitoring"}
+      },
+      "status": {
+        "resources": [
+          {"group": "monitoring.coreos.com", "version": "v1", "kind": "ServiceMonitor", "namespace": "payments-monitoring", "name": "api", "status": "Synced"},
+          {"group": "monitoring.coreos.com", "version": "v1", "kind": "ServiceMonitor", "namespace": "payments", "name": "api", "status": "Synced"},
+          {"group": "monitoring.coreos.com", "version": "v1", "kind": "ServiceMonitor", "namespace": "payments", "name": "worker", "status": "OutOfSync"},
+          {"group": "rbac.authorization.k8s.io", "version": "v1", "kind": "ClusterRole", "name": "payments-read", "status": "Synced"}
+        ],
+        "sync": {"status": "OutOfSync"},
+        "health": {"status": "Degraded"},
+        "operationState": {"phase": "Running", "startedAt": "2026-10-27T09:10:00Z"}
+      }
+    },
+    {
+      "metadata": {"name": "platform-ingress", "namespace": "argocd", "uid": "a3"},
+      "spec": {
+        "project": "platform",
+        "source": {"repoURL": "https://git.example.com/platform/ingress.git", "path": "."},
+        "destination": {"server": "https://kubernetes.default.svc", "namespace": "ingress"}
+      },
+      "status": {
+        "resources": [
+          {"group": "apps", "version": "v1", "kind": "DaemonSet", "namespace": "ingress", "name": "nginx"},
+          {"version": "v1", "kind": "Namespace", "name": "ingress"}
+        ],
+        "sync": {"status": "Synced"},
+        "health": {"status": "Healthy"}
+      }
+    },
+    {
+      "metadata": {"name": "stage-web", "namespace": "argocd", "uid": "a4"},
+      "spec": {
+        "destination": {"server": "https://k8s-stage.example.internal:6443", "namespace": "web"}
+      },
+      "status": {"sync": {"status": "Unknown"}, "health": {}}
+    },
+    {
+      "metadata": {"name": "orphan", "namespace": "argocd", "uid": "a5"},
+      "spec": {
+        "project": "platform",
+        "destination": {"server": "https://removed-cluster.example.internal:6443", "namespace": "x"}
+      },
+      "status": {
+        "resources": [{"version": "v1", "kind": "Service", "namespace": "x", "name": "svc"}],
+        "sync": {"status": "Unknown"}, "health": {"status": "Missing"}
+      }
+    }
+  ]
+}

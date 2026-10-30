@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Disabled-action states</title>
+<script src="./support.js"></script>
+<link rel="stylesheet" href="portal.css">
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+</helmet>
+<div class="app fx" style="width:1120px;height:640px;padding:24px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));gap:16px">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-term" viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M4.5 6l2 2-2 2M8 10.5h3.5"/></symbol>
+<symbol id="i-restart" viewBox="0 0 16 16"><path d="M13 8a5 5 0 11-1.6-3.7M13 2.5v3h-3"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 16 16"><path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z"/></symbol>
+<symbol id="i-list" viewBox="0 0 16 16"><path d="M5 4h9M5 8h9M5 12h9M2 4h.01M2 8h.01M2 12h.01"/></symbol>
+<symbol id="i-lock" viewBox="0 0 16 16"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.2 7V5a2.8 2.8 0 015.6 0v2"/></symbol>
+<symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></symbol>
+</defs></svg>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">No grant for this action</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-term"/></svg>Exec</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>You don't have exec access to <span class="mono">payments-api</span>.<div style="margin-top:6px"><a href="MyAccess.dc.html">Request access</a></div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">Outside time window</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-term"/></svg>Exec</span><span class="env prod">prod</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>Exec in prod is closed until Sat 09:00.<div style="margin-top:6px"><a href="BreakGlass.dc.html">Use break-glass</a></div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">Holiday</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-restart"/></svg>Restart</span><span class="env prod">prod</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>Closed today: Public holiday.<div style="margin-top:6px"><a href="BreakGlass.dc.html">Use break-glass</a></div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">Grant expired</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-term"/></svg>Exec</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>Your access expired on Oct 12.<div style="margin-top:6px"><a href="MyAccess.dc.html">Request access</a></div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">Protected namespace</span>
+  <div class="row" style="padding:6px 10px;border:1px dashed var(--ln);border-radius:6px;background:var(--sf2);color:var(--tx3)"><svg class="i"><use href="#i-lock"/></svg><span class="mono">kube-system</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>This namespace is not available through the portal.</div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">Cluster unreachable</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-list"/></svg>Logs</span><span class="chip err"><span class="dot err"></span>prod-2</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>Cluster <span class="mono">prod-2</span> is unreachable right now.<div style="margin-top:6px;opacity:.8">Last seen 11 min ago</div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:12px">
+  <span class="lbl">CronJob already running</span>
+  <div class="row"><span class="btn dis" role="button" aria-disabled="true"><svg class="i"><use href="#i-bolt"/></svg>Run now</span></div>
+  <div class="tip" style="position:relative"><i style="position:absolute;top:-4px;left:22px;width:8px;height:8px;background:var(--ink);transform:rotate(45deg)"></i>A run is already in progress.<div style="margin-top:6px"><a href="CronJobs.dc.html">View running job</a></div></div>
+</div></div>
+
+<div class="card"><div class="bd col" style="gap:10px">
+  <span class="lbl">Loading and errors</span>
+  <div class="col" style="gap:8px"><div class="skel" style="width:90%"></div><div class="skel" style="width:70%"></div><div class="skel" style="width:80%"></div></div>
+  <div class="banner red" style="align-items:flex-start;flex-direction:column;gap:4px"><b>Restart failed</b><span>Kubernetes rejected the request.</span><span class="row" style="gap:4px;font-weight:500"><svg class="i"><use href="#i-chev"/></svg>Details</span></div>
+</div></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1120,"height":640}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

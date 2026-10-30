@@ -1,0 +1,78 @@
+# Tiphys frontend (`web/`)
+
+Vite + React 18 + TypeScript (strict) + react-router (BrowserRouter). The Go server embeds `web/dist` and serves it from `/` with a client-side routing fallback; every asset URL is root-relative, fonts are self-hosted (`@fontsource/ibm-plex-*`), and there are no inline scripts or inline event handlers.
+
+## Run it
+
+```
+cd web
+npm install
+npm run dev            # Vite on :5173, proxies /api (ws:true), /auth, /healthz to http://localhost:8080
+npm run dev:mock       # same, but with the in-browser mock API (VITE_MOCK=1), no backend needed
+npm run typecheck && npm run lint && npm test && npm run build   # build output: web/dist
+```
+
+### Mock mode (`VITE_MOCK=1`)
+
+`src/mock/` patches `fetch`, `WebSocket` and `EventSource` for `/api/v1/*` and `/auth/*`. It is loaded with a dynamic import behind the env flag, so it is not in the production bundle (verified: `grep -r mock-csrf-token dist` finds nothing). It covers every endpoint in `docs/api.md`.
+
+- Persona: `?as=user|admin|auditor` (remembered in `localStorage` as `tiphys.mockRole`). Default `user` = Sara Moradi; `admin` = Reza Ahmadi; `auditor` = Leila Safavi.
+- `?stale=1` simulates a stale Argo cache (project-scoped grants stop matching, banner appears); `?stale=0` clears it. `?recordingDown=1` makes exec refuse (`recording_failed`); `?recordingDown=0` clears it.
+- Data: prod-1 / prod-2 / staging-1 / staging-2 clusters. prod-2 is unreachable (502 `cluster_error`), staging-2 is over-privileged. `payments-api` on prod-1 has an OOMKilled pod, a running CronJob (`expire-pending-charges`, `Forbid` -> `already_running`), a suspended one (`archive-reports`). On staging-1 `payments-api` exec / run-job are closed by a time window until Saturday 09:00 (Sara can use break-glass); `payments-worker` restart on prod-1 is closed by a holiday. `notifications-api` is Sara's logs-only case (`no_grant`) and its restart rollout fails with `ProgressDeadlineExceeded`. The Payments team's project grant includes `sync`, so the Argo CD card offers Sync on the payments apps; a sync of a `Degraded` app fails, and `OutOfSync` apps have pending changes (including a hidden Secret). Every namespace has a traffic graph: the first workload behind an Ingress with eight paths, the others behind HTTPRoutes on a shared Gateway. Exec into the first `payments-api` pod on prod-1 gets a `warning` after about 20 s and `end` (`max_duration`) after about 5 min 20 s so the 5-minute warning can be seen.
+- The fake exec shell understands `ls pwd whoami id hostname date echo env clear help exit`. Recordings and the command list are generated.
+- Namespace page: three tabs chosen by `?tab=` (`workloads`, `events`, `traffic`). Events and Traffic are fetched only when their tab is first opened (per namespace) and kept when switching; Refresh reloads; a 403 explains inside the tab that it needs access to the whole namespace.
+  - Workloads: the "Argo CD" card (shown whenever the namespace has Argo applications, regardless of `ARGO_UI`) and the workload list. CronJob rows get Run now for users with a `run-job` grant; "Job history" opens the namespace's CronJobs page.
+  - Argo CD card: health, sync and last sync per application, a Sync button for users who hold `sync` (dialog with the pending changes, typed confirmation in prod), and the name opens the details panel (Status, History, and Changes for users who hold `sync`); the icon next to the name links to `me.settings.argoUrl`.
+  - Traffic (`components/TrafficFlow.tsx`, layout in `lib/traffic.ts`): four columns with SVG connectors measured from the boxes. Hover highlights a box's path; clicking pins it (several can be pinned; Escape, the background or Clear unpins); "+N more" and "Expand all routes" show every rule.
+- A CronJob's page opens on its own job history and has Run now in its header.
+- Debug (`me.settings.debugEnabled`): pods get a Debug button next to Exec, both shown under the `exec` decision. It opens the exec page with `?mode=debug` (the connect dialog can switch between the container and a debug container), which connects to the `/debug` WebSocket instead of `/exec`. Sessions, Replay and Watch mark debug sessions. The mock enables it and uses the same fake shell.
+- The mock checks `X-CSRF-Token` on every non-GET and the `csrf` query on every WebSocket, like the real server.
+
+## Layout
+
+```
+src/api/        types.ts (copied from docs/api.md), client.ts (CSRF, 401 -> /auth/login?next=, or /login?next= with local accounts), errors.ts (ApiError, toApiError),
+                endpoints.ts (typed api.*), ws.ts (framing: binary = bytes, text = JSON control), sse.ts (operation stream)
+src/lib/        pure helpers with Vitest tests: decision reasons, countdowns, log parsing, asciicast parsing, cron text, window preview, ...
+src/context/    auth (Me), theme (system/light/dark + localStorage), break-glass dialog/provider, toast, shell context pill
+src/components/ Icon (replaces the SVG sprite), Dialog (focus trap, ARIA), ActionButton (DecisionInfo -> .btn.dis + reason), Shell, XTerm, ...
+src/pages/      user pages at the top level, admin/ and audit/ for the rest
+src/mock/       in-browser API (dev only)
+```
+
+Role handling: `user` and `admin` get Workloads (admins also Requests, Grants, Time windows, Users & teams, Clusters, Settings, Sessions, Audit). `auditor` gets Audit, Sessions (+ replay, live watch) and read-only configuration pages (write controls are hidden). Wrong-role URLs redirect to the role's home (`/` or `/audit`). Break-glass lives in the user menu and in the denial hints/tooltips (only when the reason is `outside_window` or `holiday` and the viewer is a `user`); the active pill with countdown and "End now" is in the top bar on every page.
+
+Disabled actions use `DecisionInfo`: `lib/decision.ts` turns `reason` / `reopensAt` / `closesAt` into text ("Exec in prod is closed until Sat 09:00", "Closes in 42 min") and picks the call to action (request access vs. break-glass).
+
+## CSP and the replay player
+
+The portal CSP (`default-src 'self'; style-src 'self' 'unsafe-inline'; ...`) has no `'wasm-unsafe-eval'`. asciinema-player compiles a WebAssembly module, which that CSP blocks. The replay page therefore feature-detects WebAssembly (`lib/wasm.ts`) and uses asciinema-player only when it can run; otherwise it uses a small xterm.js based player (`components/XtermCastPlayer.tsx`: play/pause, seek, speed, idle compression). Both support the command list click-to-seek and output search. If you add `script-src 'self' 'wasm-unsafe-eval'` (it allows WebAssembly only, not `eval`), the full asciinema-player is used automatically. Verified with a headless Chromium against the exact CSP above: no violations on any page.
+
+## API gaps
+
+Things the screens need that `docs/api.md` does not provide. The mock follows the proposals marked (mock); nothing here was assumed silently on the server side.
+
+1. **Rejected WebSocket upgrades are opaque to browsers.** `docs/api.md` says denial / `recording_unavailable` are returned as HTTP errors before the upgrade, but a browser cannot read the status or body of a failed handshake. Proposal (mock): complete the upgrade and send `{"type":"end","reason":"denied"|"recording_failed","message":...}` before closing (the UI shows it in the connect dialog). Fallback implemented: after a handshake failure the UI re-reads the workload's `DecisionInfo` to explain the denial. A `503 recording_unavailable` can only be shown via the `end` message.
+2. **My access "Available now".** `MyAccess.grants[]` has no availability. The UI derives it from `GET /clusters/{c}/namespaces/{ns}/workloads` (per distinct namespace) and, for Argo-project grants, from `GET /apps` access; unreachable clusters show "-". Proposal: add `availability: Record<Action, DecisionInfo>` (or just `allowedNow` / `reopensAt` / `reason`) per grant.
+3. **`POST /access-requests/{id}/approve` narrowing.** The decision UI lets the admin narrow *actions* as well as duration. docs/api.md only has `note` and `durationHours`. Proposal (mock): optional `actions?: Action[]` (subset of the requested ones).
+4. **Grant expired date.** `DecisionInfo` has no expiry timestamp for `grant_expired`, so the message is "Your access has expired." (My access has the dates).
+5. **Display time zone.** The server gives no display zone. Dates use the browser zone; time windows use each rule's zone and grant expiry is entered in Asia/Tehran (the spec default).
+6. **Audit filters.** No "any break-glass" filter (only `breakGlassId=<id>`): the UI filters the loaded page client-side, and the CSV link does not include it. No event total for the subtitle ("N events loaded"). No list endpoint for event types, clusters or environments for filter dropdowns (suggestions from `/admin/users` and `/admin/clusters`; environments come from the registered clusters, not a fixed list). Events carry no user role/team and no matched grant.
+7. **Watch**: `ready` should carry `cols`/`rows` of the watched terminal (the UI already uses them when present).
+8. **Teams change history**: no endpoint. The page queries `GET /audit?q=<team name>` and keeps `admin*`/`team*` events.
+9. **Clusters**: no Argo app count per cluster, no discovery list of Argo clusters (name is typed), no list of environment names (suggestions come from clusters and overrides), unspecified whether `PUT /admin/clusters/{name}` accepts an empty environment.
+10. **Settings**: no storage-usage endpoint (the retention usage bars from the design are omitted); the 422 `details.fields` keys for settings are not specified (UI accepts `key` and `rocket.key`).
+11. **Last-admin 409** has no fixed `code` (UI matches `last_admin` / message text). Please fix the code in docs/api.md.
+12. **Grants / time windows / holidays**: 422 field key names not specified (UI assumes the camelCase JSON names); a team-scoped window's `scopeValue` is assumed to be the team name and a cluster-scoped one the cluster name; midnight-crossing windows are assumed to belong to the day they start on; no bulk holiday endpoint (CSV import does one POST per row and can hit the 30/min limit). `DecisionExplain` has no name for the blocking time-window rule (the checker infers it client-side).
+13. **Auditor access to catalogs**: `/catalog/*` and `POST /admin/access-check` are admin-pickers; auditors get read-only pages without the editor/checker.
+14. **CSP**: see above (`'wasm-unsafe-eval'`).
+15. `GET /audit/export.csv` and the log download are plain links (cookie auth); they cannot be exercised in mock mode (the log download is fetched as a blob there).
+
+## Not covered
+
+- No Playwright/e2e suite is committed (screenshots were taken ad hoc against the mock); unit tests cover the pure helpers only.
+- Log view keeps at most 20,000 lines and renders the last 3,000 (older ones on demand); there is no server-side search.
+
+## Server decisions on the API gaps
+
+Resolved in the Go server (see docs/api.md): 1 (refusals are delivered as an `end` message after the upgrade, with `code` and `decision`), 3 (`actions` narrowing on approve), 7 (`cols`/`rows` on watch `ready`), 11 (`409 last_admin`), 14 (`'wasm-unsafe-eval'` is in the CSP, so the real asciinema-player runs). Not changed: 2, 4–6, 8–10, 12, 13, 15 (the UI's fallbacks stay).

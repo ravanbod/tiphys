@@ -1,0 +1,47 @@
+# The ServiceAccount and its token Secret live in the Helm release namespace
+# (install with `-n tiphys-connector --create-namespace`); the chart renders no
+# Namespace object, so the chart owns exactly that one namespace.
+serviceAccountName: tiphys-connector
+
+# Domain of the impersonation extras. Must equal the portal's
+# KUBE_EXTRA_DOMAIN (default portal.example.com); set your own domain in both.
+extraDomain: portal.example.com
+
+# Namespaces in which the impersonated identity may not write or exec. Keep
+# in sync with the portal's protected list (the portal's own check covers
+# reads as well). Rendered inline into the policies; changing it needs a new
+# chart release.
+protectedNamespaces:
+  - kube-system
+  - kube-public
+  - kube-node-lease
+  - tiphys
+
+admission:
+  # vap:     ValidatingAdmissionPolicy (Kubernetes 1.30+)
+  # kyverno: Kyverno ClusterPolicy (clusters older than 1.30, or no VAP)
+  # none:    no admission policies (RBAC only; not recommended)
+  mode: vap
+  # VAP binding actions: Deny, Warn, Audit (a list). Deny to enforce.
+  validationActions:
+    - Deny
+  # Kyverno validationFailureAction: Enforce or Audit.
+  kyvernoAction: Enforce
+
+# Debug containers (the portal's Debug button, DEBUG_IMAGE): tiphys:user may
+# add an ephemeral container to a pod, and the tiphys-debug-only admission
+# policy allows only the pinned image running `sleep <seconds>` with no env,
+# volumes, ports, probes or securityContext. Needs admission.mode vap (there
+# is no Kyverno version); the portal offers debug only where it finds that
+# policy.
+debug:
+  enabled: false
+  # Pinned by digest (repo@sha256:...), e.g. nicolaka/netshoot@sha256:<digest>;
+  # must equal the portal's DEBUG_IMAGE. Required when enabled.
+  image: ""
+  # Ephemeral containers stay in the pod spec until the pod is replaced; at
+  # this many, debug on the pod is refused until the workload restarts.
+  maxContainersPerPod: 20
+  # Upper bound of the container's `sleep`; the portal asks for its maximum
+  # exec session length plus one minute (at most 24 h + 1 min).
+  maxLifetimeSeconds: 90000
