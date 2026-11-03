@@ -16,6 +16,9 @@ var (
 	ErrRecordingUnavailable = errors.New("session recording storage is unavailable")
 	// ErrBreakGlassDisabled is returned when break-glass is turned off in the settings.
 	ErrBreakGlassDisabled = errors.New("break-glass is turned off")
+	// ErrBreakGlassApprovalRequired is returned by Start when break-glass
+	// must be requested and approved instead.
+	ErrBreakGlassApprovalRequired = errors.New("break-glass needs an admin's approval")
 	// ErrUserDisabled is returned at login for disabled users.
 	ErrUserDisabled = errors.New("user is disabled")
 	// ErrInvalidCredentials is a failed local login: unknown user, Keycloak

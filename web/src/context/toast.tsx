@@ -6,10 +6,12 @@ interface Toast {
   tone: 'ok' | 'err';
 }
 const Ctx = createContext<(text: string, tone?: 'ok' | 'err') => void>(() => {});
+const SlotCtx = createContext<HTMLElement | null>(null);
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [items, setItems] = useState<Toast[]>([]);
   const idRef = useRef(1);
+  const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   const push = useCallback((text: string, tone: 'ok' | 'err' = 'ok') => {
     const id = idRef.current++;
     setItems((x) => [...x, { id, text, tone }]);
@@ -17,8 +19,9 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   }, []);
   return (
     <Ctx.Provider value={push}>
-      {children}
+      <SlotCtx.Provider value={slot}>{children}</SlotCtx.Provider>
       <div className="toasts" role="status" aria-live="polite">
+        <div ref={setSlot} className="toast-slot" />
         {items.map((t) => (
           <div key={t.id} className={`toast ${t.tone}`}>
             {t.text}
@@ -29,3 +32,5 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   );
 }
 export const useToast = () => useContext(Ctx);
+/** Where other toasts (live changes) are rendered, above these. */
+export const useToastSlot = () => useContext(SlotCtx);

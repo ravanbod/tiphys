@@ -37,8 +37,8 @@ func (a Action) Valid() bool {
 }
 
 // ValidateScopeActions checks the actions and that they fit the scope: sync
-// needs a namespace or Argo project scope, since a workloads scope cannot
-// cover an Argo CD application.
+// needs a scope wider than workloads, since a workloads scope cannot cover an
+// Argo CD application.
 func ValidateScopeActions(s Scope, actions []Action) error {
 	if len(actions) == 0 {
 		return fmt.Errorf("at least one action is required")
@@ -48,7 +48,7 @@ func ValidateScopeActions(s Scope, actions []Action) error {
 			return fmt.Errorf("invalid action %q", a)
 		}
 		if a == ActionSync && s.Kind == ScopeWorkloads {
-			return fmt.Errorf("sync needs a namespace or Argo project scope: it applies to whole Argo CD applications")
+			return fmt.Errorf("sync needs a namespace, cluster, environment or Argo project scope: it applies to whole Argo CD applications")
 		}
 	}
 	return nil
@@ -65,6 +65,13 @@ const (
 
 func (r Role) Valid() bool {
 	return r == RoleUser || r == RoleAuditor || r == RoleAdmin
+}
+
+// UsesGrants reports whether the role's access to workloads comes from
+// grants. An auditor works like a user and can also read audit data and
+// configuration; only admins have access without grants.
+func (r Role) UsesGrants() bool {
+	return r == RoleUser || r == RoleAuditor
 }
 
 // WorkloadKind is a kind of Kubernetes workload the portal can address.
@@ -131,19 +138,31 @@ const (
 	ScopeArgoProject ScopeKind = "argo_project"
 	ScopeNamespace   ScopeKind = "namespace"
 	ScopeWorkloads   ScopeKind = "workloads"
+	// ScopeCluster covers every namespace of a cluster, including later ones.
+	ScopeCluster ScopeKind = "cluster"
+	// ScopeEnvironment covers every namespace whose Policy.Environment is the
+	// scope's, so it follows cluster labels and environment overrides.
+	ScopeEnvironment ScopeKind = "environment"
 )
 
 func (s ScopeKind) Valid() bool {
-	return s == ScopeArgoProject || s == ScopeNamespace || s == ScopeWorkloads
+	switch s {
+	case ScopeArgoProject, ScopeNamespace, ScopeWorkloads, ScopeCluster, ScopeEnvironment:
+		return true
+	}
+	return false
 }
 
 // Scope selects targets. Which fields are set depends on Kind:
 //   - argo_project: ArgoProject
 //   - namespace:    Cluster, Namespace
 //   - workloads:    Cluster, Namespace, Workloads
+//   - cluster:      Cluster
+//   - environment:  Environment
 type Scope struct {
 	Kind        ScopeKind     `json:"kind"`
 	ArgoProject string        `json:"argoProject,omitempty"`
+	Environment string        `json:"environment,omitempty"`
 	Cluster     string        `json:"cluster,omitempty"`
 	Namespace   string        `json:"namespace,omitempty"`
 	Workloads   []WorkloadRef `json:"workloads,omitempty"`
@@ -156,15 +175,32 @@ func (s Scope) Validate() error {
 		if s.ArgoProject == "" {
 			return fmt.Errorf("argo_project scope requires argoProject")
 		}
-		if s.Cluster != "" || s.Namespace != "" || len(s.Workloads) > 0 {
-			return fmt.Errorf("argo_project scope must not set cluster, namespace or workloads")
+		if s.Cluster != "" || s.Namespace != "" || len(s.Workloads) > 0 || s.Environment != "" {
+			return fmt.Errorf("argo_project scope must not set cluster, namespace, workloads or environment")
+		}
+	case ScopeCluster:
+		if s.Cluster == "" {
+			return fmt.Errorf("cluster scope requires cluster")
+		}
+		if s.ArgoProject != "" || s.Namespace != "" || len(s.Workloads) > 0 || s.Environment != "" {
+			return fmt.Errorf("cluster scope must not set argoProject, namespace, workloads or environment")
+		}
+	case ScopeEnvironment:
+		if s.Environment == "" {
+			return fmt.Errorf("environment scope requires environment")
+		}
+		if s.Environment == UnlabeledEnvironment {
+			return fmt.Errorf("environment %q cannot be granted", UnlabeledEnvironment)
+		}
+		if s.ArgoProject != "" || s.Cluster != "" || s.Namespace != "" || len(s.Workloads) > 0 {
+			return fmt.Errorf("environment scope must not set argoProject, cluster, namespace or workloads")
 		}
 	case ScopeNamespace:
 		if s.Cluster == "" || s.Namespace == "" {
 			return fmt.Errorf("namespace scope requires cluster and namespace")
 		}
-		if s.ArgoProject != "" || len(s.Workloads) > 0 {
-			return fmt.Errorf("namespace scope must not set argoProject or workloads")
+		if s.ArgoProject != "" || len(s.Workloads) > 0 || s.Environment != "" {
+			return fmt.Errorf("namespace scope must not set argoProject, workloads or environment")
 		}
 		if !ValidDNS1123Label(s.Namespace) {
 			return fmt.Errorf("invalid namespace %q", s.Namespace)
@@ -173,8 +209,8 @@ func (s Scope) Validate() error {
 		if s.Cluster == "" || s.Namespace == "" || len(s.Workloads) == 0 {
 			return fmt.Errorf("workloads scope requires cluster, namespace and at least one workload")
 		}
-		if s.ArgoProject != "" {
-			return fmt.Errorf("workloads scope must not set argoProject")
+		if s.ArgoProject != "" || s.Environment != "" {
+			return fmt.Errorf("workloads scope must not set argoProject or environment")
 		}
 		if !ValidDNS1123Label(s.Namespace) {
 			return fmt.Errorf("invalid namespace %q", s.Namespace)
@@ -191,6 +227,32 @@ func (s Scope) Validate() error {
 		return fmt.Errorf("invalid scope kind %q", s.Kind)
 	}
 	return nil
+}
+
+// Same reports whether two scopes cover exactly the same targets: the same
+// kind and fields, and for workloads the same set of workloads.
+func (s Scope) Same(o Scope) bool {
+	if s.Kind != o.Kind || s.ArgoProject != o.ArgoProject || s.Environment != o.Environment ||
+		s.Cluster != o.Cluster || s.Namespace != o.Namespace {
+		return false
+	}
+	set := func(ws []WorkloadRef) map[WorkloadRef]bool {
+		m := make(map[WorkloadRef]bool, len(ws))
+		for _, w := range ws {
+			m[w] = true
+		}
+		return m
+	}
+	a, b := set(s.Workloads), set(o.Workloads)
+	if len(a) != len(b) {
+		return false
+	}
+	for w := range a {
+		if !b[w] {
+			return false
+		}
+	}
+	return true
 }
 
 // HolderKind says whether a grant is held by a team or a user.
@@ -298,6 +360,7 @@ type Cluster struct {
 	Reachable         bool
 	PrivilegeCheckOK  bool
 	AdmissionMode     AdmissionMode
+	Protected         bool // tiphys/protected on its Secret: hidden from access requests, grants still work
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	UpdatedBy         string
@@ -471,15 +534,33 @@ func (b *BreakGlass) EffectiveEnd() time.Time {
 	return b.ExpiresAt
 }
 
-// RequestStatus is the state of an access request.
+// RequestStatus is the state of an access or break-glass request.
 type RequestStatus string
 
 const (
-	RequestPending  RequestStatus = "pending"
-	RequestApproved RequestStatus = "approved"
-	RequestRejected RequestStatus = "rejected"
-	RequestExpired  RequestStatus = "expired"
+	RequestPending   RequestStatus = "pending"
+	RequestApproved  RequestStatus = "approved"
+	RequestRejected  RequestStatus = "rejected"
+	RequestExpired   RequestStatus = "expired"
+	RequestCancelled RequestStatus = "cancelled" // break-glass requests only: withdrawn by the requester
 )
+
+// BreakGlassRequest asks an admin for a break-glass (BreakGlassApproval mode).
+// The break-glass starts when it is approved.
+type BreakGlassRequest struct {
+	ID              int64
+	UserID          int64
+	Username        string
+	Reason          string
+	Minutes         int // requested
+	Status          RequestStatus
+	DecidedBy       string
+	DecidedAt       *time.Time
+	DecisionNote    string
+	ApprovedMinutes *int
+	BreakGlassID    *int64
+	CreatedAt       time.Time
+}
 
 // AccessRequest asks for a grant.
 type AccessRequest struct {
@@ -572,6 +653,9 @@ const (
 	EventArgoDiff         = "argo.diff"
 	EventBreakGlassStart  = "break_glass.start"
 	EventBreakGlassEnd    = "break_glass.end"
+	EventBreakGlassReq    = "break_glass.request"
+	EventBreakGlassReject = "break_glass.reject"
+	EventBreakGlassCancel = "break_glass.cancel"
 	EventRequestCreate    = "access_request.create"
 	EventRequestDecide    = "access_request.decide"
 	EventAdminChange      = "admin.change"
@@ -584,15 +668,37 @@ const (
 type Settings struct {
 	ExecMaxSessionMinutes  int
 	ExecIdleTimeoutMinutes int
-	// BreakGlassEnabled turns the whole break-glass feature on or off. Off:
-	// nobody can start one, and active ones stop overriding time windows.
-	BreakGlassEnabled       bool
-	BreakGlassDefaultMin    int
-	BreakGlassMaxMinutes    int
-	RetentionAuditDays      int
-	RetentionRecordingsDays int
-	Rocket                  RocketSettings
+	BreakGlassMode         BreakGlassMode
+	BreakGlassDefaultMin   int
+	BreakGlassMaxMinutes   int
+	// BreakGlassRequestMaxAgeMin is how long a break-glass request may stay
+	// pending before it expires.
+	BreakGlassRequestMaxAgeMin int
+	RetentionAuditDays         int
+	RetentionRecordingsDays    int
+	Rocket                     RocketSettings
 }
+
+// BreakGlassMode says how break-glass is started.
+type BreakGlassMode string
+
+const (
+	// BreakGlassOff: nobody can start one, and active ones stop overriding
+	// time windows.
+	BreakGlassOff BreakGlassMode = "off"
+	// BreakGlassSelf: users start it themselves, without approval.
+	BreakGlassSelf BreakGlassMode = "self"
+	// BreakGlassApproval: users request it and an admin approves it.
+	BreakGlassApproval BreakGlassMode = "approval"
+)
+
+// Valid reports whether m is a known mode.
+func (m BreakGlassMode) Valid() bool {
+	return m == BreakGlassOff || m == BreakGlassSelf || m == BreakGlassApproval
+}
+
+// Enabled reports whether break-glasses can exist and count in this mode.
+func (m BreakGlassMode) Enabled() bool { return m == BreakGlassSelf || m == BreakGlassApproval }
 
 // RocketSettings configures Rocket.Chat notifications.
 type RocketSettings struct {
@@ -606,6 +712,7 @@ type NotificationEvent string
 
 const (
 	NotifyBreakGlassStarted NotificationEvent = "break_glass_started"
+	NotifyBreakGlassRequest NotificationEvent = "break_glass_requested"
 	NotifyRequestCreated    NotificationEvent = "request_created"
 	NotifyRequestDecided    NotificationEvent = "request_decided"
 	NotifyExecInProd        NotificationEvent = "exec_in_prod"
@@ -613,21 +720,23 @@ const (
 )
 
 var AllNotificationEvents = []NotificationEvent{
-	NotifyBreakGlassStarted, NotifyRequestCreated, NotifyRequestDecided, NotifyExecInProd, NotifyAdminChanges,
+	NotifyBreakGlassStarted, NotifyBreakGlassRequest, NotifyRequestCreated, NotifyRequestDecided, NotifyExecInProd, NotifyAdminChanges,
 }
 
 // DefaultSettings are used until an admin changes them.
 func DefaultSettings() Settings {
 	return Settings{
-		ExecMaxSessionMinutes:   120,
-		ExecIdleTimeoutMinutes:  30,
-		BreakGlassEnabled:       true,
-		BreakGlassDefaultMin:    60,
-		BreakGlassMaxMinutes:    240,
-		RetentionAuditDays:      365,
-		RetentionRecordingsDays: 180,
+		ExecMaxSessionMinutes:      120,
+		ExecIdleTimeoutMinutes:     30,
+		BreakGlassMode:             BreakGlassSelf,
+		BreakGlassDefaultMin:       60,
+		BreakGlassMaxMinutes:       240,
+		BreakGlassRequestMaxAgeMin: 60,
+		RetentionAuditDays:         365,
+		RetentionRecordingsDays:    180,
 		Rocket: RocketSettings{Events: map[NotificationEvent]bool{
 			NotifyBreakGlassStarted: true,
+			NotifyBreakGlassRequest: true,
 			NotifyRequestCreated:    true,
 			NotifyRequestDecided:    true,
 			NotifyExecInProd:        true,

@@ -100,6 +100,7 @@ func newRepos(d dbtx) application.Repositories {
 		Clusters:     clusterRepo{d},
 		Requests:     requestRepo{d},
 		BreakGlass:   breakGlassRepo{d},
+		BGRequests:   breakGlassRequestRepo{d},
 		ExecSessions: execSessionRepo{d},
 		Audit:        auditRepo{d},
 		Settings:     settingsRepo{d},

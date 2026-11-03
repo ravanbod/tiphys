@@ -514,7 +514,7 @@ function ChangeRoleDialog({ user, onClose, onDone }: { user: UserView; onClose: 
         <Seg label="Role" value={role} onChange={setRole} options={ROLES.map((r) => ({ value: r, label: ROLE_LABEL[r] }))} />
       </div>
       <div className="muted" style={{ fontSize: 12 }}>
-        User: runs workloads within granted scope. Auditor: read-only access to audit, sessions and configuration. Admin: manages everything.
+        User: runs workloads within granted scope and requests access. Auditor: the same, plus read-only access to audit, sessions and configuration. Admin: manages everything and decides requests.
       </div>
       <AdminErrorBanner error={m.error} />
     </Dialog>

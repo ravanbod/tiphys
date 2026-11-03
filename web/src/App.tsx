@@ -4,6 +4,7 @@ import type { Role } from './api';
 import { BareShell, Shell, homeFor } from './components/Shell';
 import { AuthProvider, useAuth } from './context/auth';
 import { BreakGlassProvider } from './context/breakglass';
+import { LiveProvider } from './context/live';
 import { ShellContextProvider } from './context/shell';
 import { ThemeProvider, useTheme } from './context/theme';
 import { ToastProvider } from './context/toast';
@@ -39,7 +40,9 @@ function Authed() {
     <AuthProvider>
       <ShellContextProvider>
         <BreakGlassProvider>
-          <Outlet />
+          <LiveProvider>
+            <Outlet />
+          </LiveProvider>
         </BreakGlassProvider>
       </ShellContextProvider>
     </AuthProvider>
@@ -53,7 +56,7 @@ function Only({ roles, children }: { roles: Role[]; children: React.ReactNode })
   return <>{children}</>;
 }
 
-const WORK: Role[] = ['user', 'admin'];
+const WORK: Role[] = ['user', 'auditor', 'admin'];
 const ADMIN: Role[] = ['admin'];
 const READ_CONFIG: Role[] = ['admin', 'auditor'];
 
@@ -72,7 +75,7 @@ export function App() {
                   <Route path="c/:cluster/n/:ns" element={<Only roles={WORK}><NamespacePage /></Only>} />
                   <Route path="c/:cluster/n/:ns/w/:kind/:name" element={<Only roles={WORK}><WorkloadDetailPage /></Only>} />
                   <Route path="c/:cluster/n/:ns/cronjobs" element={<Only roles={WORK}><CronJobsPage /></Only>} />
-                  <Route path="access" element={<Only roles={['user']}><MyAccess /></Only>} />
+                  <Route path="access" element={<Only roles={['user', 'auditor']}><MyAccess /></Only>} />
                   <Route path="requests" element={<Only roles={ADMIN}><Requests /></Only>} />
                   <Route path="grants" element={<Only roles={READ_CONFIG}><Grants /></Only>} />
                   <Route path="time-windows" element={<Only roles={READ_CONFIG}><TimeWindows /></Only>} />

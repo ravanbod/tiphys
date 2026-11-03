@@ -40,6 +40,7 @@ const (
 	StreamLogs  StreamKind = "logs"
 	StreamExec  StreamKind = "exec"
 	StreamWatch StreamKind = "watch"
+	StreamLive  StreamKind = "live" // changes in namespaces (WorkloadService.Live)
 )
 
 // ClosingWarningLead is how long before a deadline the client is warned.
@@ -401,6 +402,13 @@ func (m *StreamManager) evaluateAll(ctx context.Context) {
 	for _, s := range m.snapshot() {
 		if m.sessionAlive != nil && s.Spec.WebSessionID != "" && !m.sessionAlive(ctx, s.Spec.WebSessionID) {
 			s.Close(EndUserDisabled)
+			continue
+		}
+		if s.Spec.Kind == StreamLive {
+			// Every change is decided on its own; only the user must remain.
+			if u, ok := snap.Users[s.Spec.UserID]; !ok || u.Disabled {
+				s.Close(EndUserDisabled)
+			}
 			continue
 		}
 		if s.Spec.Kind == StreamWatch {

@@ -6,6 +6,7 @@ import type { K8sEvent, NamespaceApp, TrafficGraph, WorkloadAction, WorkloadSumm
 import { ActionButton } from '../components/ActionButton';
 import { ArgoAppPanel } from '../components/ArgoAppPanel';
 import { ActionChips, EnvBadge, HealthChip, KindTag, SyncChip } from '../components/Badges';
+import { Bump } from '../components/Bump';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { RunCronDialog, SyncAppDialog } from '../components/OperationDialogs';
@@ -13,13 +14,17 @@ import { TrafficFlow } from '../components/TrafficFlow';
 import { Crumbs, PageHeader } from '../components/PageHeader';
 import { WhoHasAccess } from '../components/WhoHasAccess';
 import { useAuth } from '../context/auth';
+import { useLive } from '../context/live';
+import { useSetShellCtx } from '../context/shell';
+import { eventKey, eventSig, rowClass, useAnimatedList } from '../hooks/useAnimatedList';
+import type { AnimatedRow } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
 import type { ApiState } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { grantedOrClosed } from '../lib/decision';
 import { cronJobsUrl, logsUrl, workloadUrl } from '../lib/routes';
 import { fmtDateTime, fmtRelative } from '../lib/time';
-import { trafficRules } from '../lib/traffic';
+import { inClusterNodes, trafficRules, withoutNodes } from '../lib/traffic';
 
 const NO_WORKLOADS: WorkloadSummary[] = [];
 
@@ -38,6 +43,8 @@ export function NamespacePage() {
   const list = useApi(() => api.workloads(cluster, ns), [cluster, ns, me.breakGlass?.id]);
   const nss = useApi(() => api.namespaces(), [me.breakGlass?.id]);
   const info = nss.data?.find((n) => n.cluster === cluster && n.namespace === ns);
+  const environment = info?.environment ?? list.data?.[0]?.environment;
+  useSetShellCtx(environment ? cluster : undefined, environment);
   const [sp] = useSearchParams();
   const want = sp.get('tab');
   const tab: Tab = want === 'events' || want === 'traffic' ? want : 'workloads';
@@ -49,12 +56,18 @@ export function NamespacePage() {
   else if (!opened.tabs.includes(tab)) setOpened({ key, tabs: [...opened.tabs, tab] });
   const events = useApi(() => api.namespaceEvents(cluster, ns), [cluster, ns, me.breakGlass?.id], { enabled: opened.tabs.includes('events') });
   const traffic = useApi(() => api.namespaceTraffic(cluster, ns), [cluster, ns, me.breakGlass?.id], { enabled: opened.tabs.includes('traffic') });
+  useLive({ cluster, namespace: ns }, (changes) => {
+    const all = changes.length === 0;
+    if (all || changes.some((c) => c.type !== 'event')) list.reload();
+    if (opened.tabs.includes('events') && (all || changes.some((c) => c.type === 'event' || c.type === 'pod_restarted'))) events.reload();
+  });
   const warnings = events.data?.filter((e) => e.type === 'Warning').length ?? 0;
   const problems = traffic.data?.nodes.filter((n) => n.problem).length ?? 0;
 
   const all = list.data ?? NO_WORKLOADS;
   const kinds = [...new Set(all.map((w) => w.kind))].sort();
   const shown = all.filter((w) => (!kind || w.kind === kind) && (!q || w.name.toLowerCase().includes(q.toLowerCase())));
+  const rows = useAnimatedList(list.data ? shown : undefined, (w) => `${w.kind}/${w.name}`, (w) => `${w.ready}/${w.desired}|${w.suspended}`, `${key}|${kind}|${q}`);
   const hasCron = all.some((w) => w.kind === 'CronJob');
 
   return (
@@ -69,16 +82,16 @@ export function NamespacePage() {
       </PageHeader>
 
       <div className="tabs" role="tablist" style={{ marginBottom: 12 }}>
-        <TabLink id="workloads" tab={tab}>Workloads {list.data && <span className="c">{all.length}</span>}</TabLink>
+        <TabLink id="workloads" tab={tab}>Workloads {list.data && <span className="c"><Bump value={all.length} /></span>}</TabLink>
         <TabLink id="events" tab={tab}>
-          Events {warnings > 0 && <span className="c bad" title={`${warnings} warning${warnings === 1 ? '' : 's'}`}>{warnings}</span>}
+          Events {warnings > 0 && <span className="c bad" title={`${warnings} warning${warnings === 1 ? '' : 's'}`}><Bump value={warnings} /></span>}
         </TabLink>
         <TabLink id="traffic" tab={tab}>
           Traffic {problems > 0 && <span className="c bad" title={`${problems} problem${problems === 1 ? '' : 's'}`}>{problems}</span>}
         </TabLink>
       </div>
 
-      {tab === 'events' ? <NamespaceEvents events={events} /> : tab === 'traffic' ? <NamespaceTraffic traffic={traffic} cluster={cluster} ns={ns} /> : (
+      {tab === 'events' ? <NamespaceEvents events={events} scope={key} /> : tab === 'traffic' ? <NamespaceTraffic traffic={traffic} cluster={cluster} ns={ns} /> : (
         <>
           <ArgoApps cluster={cluster} ns={ns} syncHere={!!info?.access.includes('sync')} />
 
@@ -101,22 +114,22 @@ export function NamespacePage() {
                 <table className="tbl">
                   <thead><tr><th>Workload</th><th>Kind</th><th>Status</th><th>You can</th><th /></tr></thead>
                   <tbody>
-                    {shown.length === 0 && (
+                    {rows.length === 0 && (
                       <tr><td colSpan={5} className="empty">{all.length === 0 ? 'No workloads you can use in this namespace.' : 'No workloads match these filters.'}</td></tr>
                     )}
-                    {shown.map((w) => {
+                    {rows.map(({ item: w, key: rk, anim }) => {
                       const loc = { cluster, namespace: ns, kind: w.kind, name: w.name };
                       return (
-                        <tr key={`${w.kind}/${w.name}`}>
+                        <tr key={rk} className={rowClass(anim)}>
                           <td><Link className="mono" to={workloadUrl(loc)}><b style={{ fontWeight: 500 }}>{w.name}</b></Link></td>
                           <td><KindTag kind={w.kind} /></td>
-                          <td className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : `${w.ready}/${w.desired} ready`}</td>
+                          <td className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : <><Bump value={`${w.ready}/${w.desired}`} /> ready</>}</td>
                           <td><ActionChips actions={(Object.keys(w.access) as WorkloadAction[]).filter((a) => w.access[a].allowed)} /></td>
                           <td style={{ textAlign: 'right' }}>
                             <div className="row" style={{ justifyContent: 'flex-end', gap: 4 }}>
                               {/* Only for users with a run-job grant; a closed window shows why. */}
                               {w.kind === 'CronJob' && grantedOrClosed(w.access['run-job']) && (
-                                <ActionButton action="run-job" decision={w.access['run-job']} label="Run now" icon="bolt" size="sm" target={w.name} onClick={() => setRun(w)} />
+                                <ActionButton action="run-job" decision={w.access['run-job']} label="Run now" icon="bolt" size="sm" target={w.name} hint="inline" onClick={() => setRun(w)} />
                               )}
                               <Link className="btn ghost sm" to={logsUrl(loc)}>Logs</Link>
                               <Link className="btn ghost sm" to={workloadUrl(loc)}>Open</Link>
@@ -188,7 +201,7 @@ function ArgoApps({ cluster, ns, syncHere }: { cluster: string; ns: string; sync
                 <td style={{ textAlign: 'right' }}>
                   {(syncHere || grantedOrClosed(a.access.sync)) && (
                     <ActionButton
-                      action="sync" decision={a.access.sync} label="Sync" icon="refresh" size="sm"
+                      action="sync" decision={a.access.sync} label="Sync" icon="refresh" size="sm" hint="inline"
                       target={a.syncNamespace && a.syncNamespace !== ns ? `namespace ${a.syncNamespace}, which ${a.name} also deploys to` : a.name}
                       onClick={() => setSyncing(a)}
                     />
@@ -207,20 +220,41 @@ function ArgoApps({ cluster, ns, syncHere }: { cluster: string; ns: string; sync
   );
 }
 
-/** How traffic from outside reaches the namespace (Ingresses, Gateway API routes, LoadBalancer Services). */
+/**
+ * How traffic from outside reaches the namespace (Ingresses, Gateway API
+ * routes, LoadBalancer Services). What only traffic inside the cluster
+ * reaches (Services nothing exposes, Istio waypoints and what they route to)
+ * is shown under a divider and can be hidden; while hidden, its problems are
+ * counted on the toggle.
+ */
 function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficGraph>; cluster: string; ns: string }) {
   const [allOpen, setAllOpen] = useState(false);
+  const [withInCluster, setWithInCluster] = useState(true);
   if (denied(traffic.error)) return <WholeNamespaceOnly what="The traffic graph" />;
   if (traffic.error) return <ErrorBanner error={traffic.error} onRetry={traffic.reload} />;
-  const g = traffic.data;
+  const full = traffic.data;
+  const inCluster = full ? inClusterNodes(full) : new Set<string>();
+  const services = full?.nodes.filter((n) => n.kind === 'Service' && inCluster.has(n.id)).length ?? 0;
+  const g = full && (withInCluster ? full : withoutNodes(full, inCluster));
   const problems = g?.nodes.filter((n) => n.problem).length ?? 0;
+  const hiddenProblems = withInCluster ? 0 : full?.nodes.filter((n) => n.problem && inCluster.has(n.id)).length ?? 0;
   const hasRules = !!g?.nodes.some((n) => trafficRules(g, n).length > 0);
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
   return (
     <div className="card">
       <div className="hd">
         Traffic
-        {g && problems > 0 && <small>· <span style={{ color: 'var(--red)' }}>{problems} problem{problems === 1 ? '' : 's'}</span></small>}
+        {g && problems > 0 && <small>· <span style={{ color: 'var(--red)' }}>{plural(problems, 'problem')}</span></small>}
         <span className="grow" />
+        {services > 0 && (
+          <button
+            type="button" className="btn ghost sm" aria-pressed={withInCluster} onClick={() => setWithInCluster((v) => !v)}
+            title="Services that no Ingress, Gateway or load balancer leads to: other workloads call them inside the cluster, directly or through an Istio waypoint."
+          >
+            {withInCluster ? 'Hide' : 'Show'} in-cluster Services ({services})
+            {hiddenProblems > 0 && <span style={{ color: 'var(--red)' }}> · {plural(hiddenProblems, 'problem')}</span>}
+          </button>
+        )}
         {hasRules && (
           <button type="button" className="btn ghost sm" aria-pressed={allOpen} onClick={() => setAllOpen((v) => !v)}>
             {allOpen ? 'Collapse all routes' : 'Expand all routes'}
@@ -229,8 +263,13 @@ function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficG
         <button type="button" className="btn ghost sm" onClick={traffic.reload} disabled={traffic.loading}>Refresh</button>
       </div>
       {!g ? <Skeleton rows={2} /> : g.nodes.length === 0
-        ? <div className="empty">Nothing in this namespace is exposed through an Ingress, a Gateway API route or a LoadBalancer Service.</div>
-        : <TrafficFlow graph={g} cluster={cluster} ns={ns} allOpen={allOpen} />}
+        ? (
+          <div className="empty">
+            Nothing in this namespace is exposed through an Ingress, a Gateway API route or a LoadBalancer Service
+            {services > 0 ? `; ${plural(services, 'Service')} ${services === 1 ? 'is' : 'are'} reachable inside the cluster.` : '.'}
+          </div>
+        )
+        : <TrafficFlow graph={g} cluster={cluster} ns={ns} allOpen={allOpen} inCluster={withInCluster ? inCluster : undefined} />}
     </div>
   );
 }
@@ -239,15 +278,15 @@ function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficG
  * Recent Kubernetes events of the whole namespace, warnings only by default.
  * The events of a single workload are on its own page.
  */
-function NamespaceEvents({ events }: { events: ApiState<K8sEvent[]> }) {
+function NamespaceEvents({ events, scope }: { events: ApiState<K8sEvent[]>; scope: string }) {
   const now = useNow(30_000);
   const [warningsOnly, setWarningsOnly] = useState(true);
+  const rows = useAnimatedList(events.data ? (warningsOnly ? events.data.filter((e) => e.type === 'Warning') : events.data) : undefined, eventKey, eventSig, `${scope}|${warningsOnly}`);
   if (denied(events.error)) return <WholeNamespaceOnly what="The events of the whole namespace" />;
   if (events.error) return <ErrorBanner error={events.error} onRetry={events.reload} />;
 
   const list: K8sEvent[] = events.data ?? [];
   const warnings = list.filter((e) => e.type === 'Warning').length;
-  const shown = warningsOnly ? list.filter((e) => e.type === 'Warning') : list;
   const empty = list.length === 0
     ? 'No recent events. Kubernetes keeps events for about an hour.'
     : `No warnings (${list.length} normal event${list.length === 1 ? '' : 's'} hidden).`;
@@ -263,7 +302,7 @@ function NamespaceEvents({ events }: { events: ApiState<K8sEvent[]> }) {
         </label>
         <button type="button" className="btn ghost sm" onClick={events.reload} disabled={events.loading}>Refresh</button>
       </div>
-      {!events.data ? <Skeleton rows={2} /> : <EventsTable rows={shown} empty={empty} now={now} />}
+      {!events.data ? <Skeleton rows={2} /> : <EventsTable rows={rows} empty={empty} now={now} />}
     </div>
   );
 }
@@ -276,17 +315,17 @@ function WholeNamespaceOnly({ what }: { what: string }) {
   );
 }
 
-function EventsTable({ rows, empty, now }: { rows: K8sEvent[]; empty: string; now: number }) {
+function EventsTable({ rows, empty, now }: { rows: AnimatedRow<K8sEvent>[]; empty: string; now: number }) {
   return (
     <div className="tbl-wrap">
       <table className="tbl">
         <thead><tr><th>Type</th><th>Reason</th><th>Object</th><th>Message</th><th>Last seen</th></tr></thead>
         <tbody>
           {rows.length === 0 && <tr><td colSpan={5} className="empty">{empty}</td></tr>}
-          {rows.map((e, i) => (
-            <tr key={i}>
+          {rows.map(({ item: e, key, anim }) => (
+            <tr key={key} className={rowClass(anim)}>
               <td><span className={`chip ${e.type === 'Warning' ? 'err' : ''}`}>{e.type}</span></td>
-              <td><b style={{ fontWeight: 500 }}>{e.reason}</b>{e.count > 1 && <span className="muted"> ×{e.count}</span>}</td>
+              <td><b style={{ fontWeight: 500 }}>{e.reason}</b>{e.count > 1 && <span className="muted"> ×<Bump value={e.count} /></span>}</td>
               <td className="mono muted">{e.object}</td>
               <td>{e.message}</td>
               <td className="muted" style={{ whiteSpace: 'nowrap' }} title={fmtDateTime(e.lastSeen)}>{fmtRelative(e.lastSeen, now)}</td>

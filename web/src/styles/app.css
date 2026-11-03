@@ -30,6 +30,7 @@ button.btn[disabled]{opacity:.55;cursor:not-allowed}
 .seg button.on{background:var(--acbg);color:var(--ac);font-weight:500}
 .seg button.mono{font-family:'IBM Plex Mono',monospace}
 .seg button:focus-visible{outline-offset:-2px}
+.seg button:disabled{cursor:default}
 .sel{max-width:100%}
 .input[aria-invalid="true"]{border-color:var(--red)}
 .input:focus-visible,.sel:focus-visible{outline:2px solid var(--ac);outline-offset:0}

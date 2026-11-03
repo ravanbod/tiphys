@@ -9,6 +9,7 @@ export function scopeEnvironment(
   clusters: ClusterView[] | undefined,
   overrides: EnvironmentOverride[] | undefined,
 ): string | null {
+  if (scope.kind === 'environment') return scope.environment ?? null;
   if (scope.kind === 'argo_project') {
     return overrides?.find((o) => o.kind === 'argo_project' && o.argoProject === scope.argoProject)?.environment ?? null;
   }

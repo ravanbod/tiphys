@@ -144,6 +144,13 @@ func (s *AccessService) IsProtected(namespace string) bool {
 	return s.policy.Current().Policy.IsProtected(namespace)
 }
 
+// HiddenCluster reports whether the cluster is protected (tiphys/protected)
+// and therefore left out of the principal's pickers and requests: for
+// everyone but admins. Grants on it still decide access as usual.
+func (s *AccessService) HiddenCluster(p Principal, cluster string) bool {
+	return p.User.Role != domain.RoleAdmin && s.policy.Current().Clusters[cluster].Protected
+}
+
 // RequireRole fails with ErrForbiddenRole unless the principal has one of the roles.
 func RequireRole(p Principal, roles ...domain.Role) error {
 	for _, r := range roles {

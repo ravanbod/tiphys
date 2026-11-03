@@ -8,6 +8,7 @@ export interface GrantForm {
   holderId: number | null;
   scopeKind: ScopeView['kind'];
   argoProject: string;
+  environment: string;
   cluster: string;
   namespace: string;
   /** `Kind/name` keys. */
@@ -20,7 +21,7 @@ export interface GrantForm {
 }
 
 /** Sync acts on whole Argo CD applications, which a workloads scope cannot cover. */
-export const SYNC_SCOPE_HINT = 'Sync needs a namespace or Argo project scope: it applies to whole Argo CD applications.';
+export const SYNC_SCOPE_HINT = 'Sync needs a namespace, cluster, environment or Argo project scope: it applies to whole Argo CD applications.';
 
 export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
 
@@ -31,7 +32,7 @@ export function actionOptionLabel(a: Action): string {
 
 export function emptyGrantForm(): GrantForm {
   return {
-    id: null, holderKind: 'team', holderId: null, scopeKind: ARGO_UI ? 'argo_project' : 'namespace', argoProject: '', cluster: '', namespace: '',
+    id: null, holderKind: 'team', holderId: null, scopeKind: ARGO_UI ? 'argo_project' : 'namespace', argoProject: '', environment: '', cluster: '', namespace: '',
     workloads: [], actions: ['logs'], expiryMode: 'none', expiry: '', note: '',
   };
 }
@@ -49,6 +50,7 @@ export function formFromGrant(g: GrantView): GrantForm {
     holderId: g.holder.id,
     scopeKind: g.scope.kind,
     argoProject: g.scope.argoProject ?? '',
+    environment: g.scope.environment ?? '',
     cluster: g.scope.cluster ?? '',
     namespace: g.scope.namespace ?? '',
     workloads: (g.scope.workloads ?? []).map(wlKey),
@@ -65,6 +67,10 @@ export function validateGrantForm(f: GrantForm, now: number): Record<string, str
   if (f.holderId === null) e.holder = `Choose a ${f.holderKind}.`;
   if (f.scopeKind === 'argo_project') {
     if (!f.argoProject) e.argoProject = 'Choose an Argo project.';
+  } else if (f.scopeKind === 'environment') {
+    if (!f.environment) e.environment = 'Choose an environment.';
+  } else if (f.scopeKind === 'cluster') {
+    if (!f.cluster) e.cluster = 'Choose a cluster.';
   } else {
     if (!f.cluster) e.cluster = 'Choose a cluster.';
     if (!f.namespace) e.namespace = 'Choose a namespace.';
@@ -85,9 +91,13 @@ export function grantInputFromForm(f: GrantForm): GrantInput {
   const scope: ScopeView =
     f.scopeKind === 'argo_project'
       ? { kind: 'argo_project', argoProject: f.argoProject }
-      : f.scopeKind === 'namespace'
-        ? { kind: 'namespace', cluster: f.cluster, namespace: f.namespace }
-        : { kind: 'workloads', cluster: f.cluster, namespace: f.namespace, workloads: f.workloads.map(parseWlKey) };
+      : f.scopeKind === 'environment'
+        ? { kind: 'environment', environment: f.environment }
+        : f.scopeKind === 'cluster'
+          ? { kind: 'cluster', cluster: f.cluster }
+          : f.scopeKind === 'namespace'
+            ? { kind: 'namespace', cluster: f.cluster, namespace: f.namespace }
+            : { kind: 'workloads', cluster: f.cluster, namespace: f.namespace, workloads: f.workloads.map(parseWlKey) };
   return {
     holder: { kind: f.holderKind, id: f.holderId as number },
     scope,

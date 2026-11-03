@@ -11,6 +11,7 @@ import { DiffList } from './DiffView';
 import { Dialog } from './Dialog';
 import { ErrorBanner, Skeleton } from './Feedback';
 import { Icon } from './Icon';
+import { breakGlassOn } from '../lib/breakGlass';
 
 type Tab = 'status' | 'history' | 'diff';
 
@@ -24,7 +25,7 @@ const short = (rev: string) => (/^[0-9a-f]{40}$/.test(rev) ? rev.slice(0, 7) : r
 export function ArgoAppPanel({ app, cluster, ns, argoLink, onClose }: {
   app: NamespaceApp; cluster: string; ns: string; argoLink: string; onClose: () => void;
 }) {
-  const { me, role } = useAuth();
+  const { me, usesGrants } = useAuth();
   const now = useNow(30_000);
   const [tab, setTab] = useState<Tab>('status');
   const [opened, setOpened] = useState<Tab[]>(['status']);
@@ -84,7 +85,7 @@ export function ArgoAppPanel({ app, cluster, ns, argoLink, onClose }: {
           </div>
         ))}
         {tab === 'diff' && (!diffOk
-          ? <div className="empty">{explainDecision(app.access.sync, { action: 'sync', target: app.name, canBreakGlass: role === 'user' && me.settings.breakGlassEnabled })?.text}</div>
+          ? <div className="empty">{explainDecision(app.access.sync, { action: 'sync', target: app.name, canBreakGlass: usesGrants && breakGlassOn(me) })?.text}</div>
           : diff.error ? <ErrorBanner error={diff.error} onRetry={diff.reload} /> : !diff.data ? <Skeleton rows={4} /> : (
             <div style={{ paddingTop: 10 }}><DiffList diff={diff.data} /></div>
           ))}

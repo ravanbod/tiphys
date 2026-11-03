@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import type { CronJobSummary, JobSummary } from '../api';
 import { useAuth } from '../context/auth';
+import { useLive } from '../context/live';
+import { rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { describeCron } from '../lib/cron';
@@ -10,6 +12,7 @@ import { logsUrl } from '../lib/routes';
 import { fmtDay, fmtRelative, fmtTime } from '../lib/time';
 import { ActionButton } from './ActionButton';
 import { JobStatusChip } from './Badges';
+import { Bump } from './Bump';
 import { ErrorBanner, Loading } from './Feedback';
 import { RunCronDialog } from './OperationDialogs';
 
@@ -23,14 +26,18 @@ export function CronJobsPanel({ cluster, namespace, flatTop, only }: { cluster: 
   const list = useApi(() => api.cronJobs(cluster, namespace), [cluster, namespace, me.breakGlass?.id]);
   const [run, setRun] = useState<CronJobSummary | null>(null);
   const [hl, setHl] = useState<string | null>(null);
-
-  if (list.loading && !list.data) return <Loading what="cron jobs" />;
-  if (list.error) return <ErrorBanner error={list.error} onRetry={list.reload} />;
+  useLive({ cluster, namespace, ...(only ? { kind: 'CronJob', name: only } : {}) }, (changes) => {
+    if (changes.length === 0 || changes.some((c) => c.kind === 'CronJob')) list.reload();
+  });
   const crons = (list.data ?? []).filter((c) => !only || c.name === only);
-  const cols = only ? 6 : 7;
   const jobs: (JobSummary & { cronObj: CronJobSummary })[] = crons
     .flatMap((c) => c.recentJobs.map((j) => ({ ...j, cronObj: c })))
     .sort((a, b) => Date.parse(b.startedAt ?? '') - Date.parse(a.startedAt ?? ''));
+  const jobRows = useAnimatedList(list.data ? jobs : undefined, (j) => j.name, (j) => `${j.status}|${j.succeeded}`, `${cluster}/${namespace}/${only ?? ''}`);
+
+  if (list.loading && !list.data) return <Loading what="cron jobs" />;
+  if (list.error) return <ErrorBanner error={list.error} onRetry={list.reload} />;
+  const cols = only ? 6 : 7;
   const newest = jobs.find((j) => j.manual && j.status === 'running');
 
   return (
@@ -51,7 +58,7 @@ export function CronJobsPanel({ cluster, namespace, flatTop, only }: { cluster: 
                     <td>{c.suspended ? <span className="chip warn">Suspended</span> : 'No'}</td>
                     <td>{c.lastScheduleAt ? <>{fmtTime(c.lastScheduleAt)} · {fmtRelative(c.lastScheduleAt, now)}{Date.parse(c.lastScheduleAt) < now - 24 * 3600_000 && <span className="muted"> ({fmtDay(c.lastScheduleAt)})</span>}</> : <span className="muted">Never</span>}</td>
                     <td>{c.lastResult ? <JobStatusChip status={c.lastResult} /> : <span className="muted">—</span>}</td>
-                    <td>{c.activeJobs}</td>
+                    <td><Bump value={c.activeJobs} /></td>
                     {!only && (
                       <td style={{ textAlign: 'right' }}>
                         {forbidRunning ? (
@@ -82,9 +89,9 @@ export function CronJobsPanel({ cluster, namespace, flatTop, only }: { cluster: 
             <table className="tbl nowrap">
               <thead><tr><th>Job</th><th>Triggered by</th><th>Started</th><th>Status</th><th>Pods</th><th style={{ textAlign: 'right' }} /></tr></thead>
               <tbody>
-                {jobs.length === 0 && <tr><td colSpan={6} className="empty">No recent jobs.</td></tr>}
-                {jobs.map((j) => (
-                  <tr key={j.name} className={j.name === hl || j.name === newest?.name ? 'sel' : undefined}>
+                {jobRows.length === 0 && <tr><td colSpan={6} className="empty">No recent jobs.</td></tr>}
+                {jobRows.map(({ item: j, anim }) => (
+                  <tr key={j.name} className={rowClass(anim, j.name === hl || j.name === newest?.name ? 'sel' : '')}>
                     <td><span className="mono">{j.name}</span>{j.name === newest?.name && <span className="chip info" style={{ marginLeft: 6 }}>New</span>}</td>
                     <td>{j.manual ? `${j.triggeredBy ?? 'Unknown'} · manual` : 'Schedule'}</td>
                     <td>{fmtRelative(j.startedAt, now)}</td>

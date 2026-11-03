@@ -51,6 +51,30 @@ func toBreakGlass(b domain.BreakGlass, now time.Time) breakGlassDTO {
 	}
 }
 
+type breakGlassRequestDTO struct {
+	ID              int64   `json:"id"`
+	UserID          int64   `json:"userId"`
+	Username        string  `json:"username"`
+	Reason          string  `json:"reason"`
+	DurationMinutes int     `json:"durationMinutes"`
+	Status          string  `json:"status"`
+	DecidedBy       *string `json:"decidedBy"`
+	DecidedAt       *string `json:"decidedAt"`
+	DecisionNote    *string `json:"decisionNote"`
+	ApprovedMinutes *int    `json:"approvedMinutes"`
+	BreakGlassID    *int64  `json:"breakGlassId"`
+	CreatedAt       string  `json:"createdAt"`
+	// ExpiresAt is when a pending request expires undecided.
+	ExpiresAt string `json:"expiresAt"`
+}
+
+func toBreakGlassRequest(r domain.BreakGlassRequest, maxAgeMin int) breakGlassRequestDTO {
+	return breakGlassRequestDTO{ID: r.ID, UserID: r.UserID, Username: r.Username, Reason: r.Reason, DurationMinutes: r.Minutes,
+		Status: string(r.Status), DecidedBy: strPtr(r.DecidedBy), DecidedAt: timeStr(r.DecidedAt), DecisionNote: strPtr(r.DecisionNote),
+		ApprovedMinutes: r.ApprovedMinutes, BreakGlassID: r.BreakGlassID, CreatedAt: tstr(r.CreatedAt),
+		ExpiresAt: tstr(r.CreatedAt.Add(time.Duration(maxAgeMin) * time.Minute))}
+}
+
 type meDTO struct {
 	ID          int64          `json:"id"`
 	Username    string         `json:"username"`
@@ -59,17 +83,20 @@ type meDTO struct {
 	Teams       []idName       `json:"teams"`
 	CSRFToken   string         `json:"csrfToken"`
 	BreakGlass  *breakGlassDTO `json:"breakGlass"`
-	Settings    meSettingsDTO  `json:"settings"`
-	Argo        argoStatusDTO  `json:"argo"`
+	// BreakGlassRequest is the user's pending break-glass request.
+	BreakGlassRequest *breakGlassRequestDTO `json:"breakGlassRequest"`
+	Settings          meSettingsDTO         `json:"settings"`
+	Argo              argoStatusDTO         `json:"argo"`
 }
 
 type meSettingsDTO struct {
-	// BreakGlassEnabled is false when the feature is turned off; the UI then hides it.
-	BreakGlassEnabled        bool `json:"breakGlassEnabled"`
-	BreakGlassDefaultMinutes int  `json:"breakGlassDefaultMinutes"`
-	BreakGlassMaxMinutes     int  `json:"breakGlassMaxMinutes"`
-	ExecIdleTimeoutMinutes   int  `json:"execIdleTimeoutMinutes"`
-	ExecMaxSessionMinutes    int  `json:"execMaxSessionMinutes"`
+	// BreakGlassMode is off (the UI hides break-glass), self or approval
+	// (the UI requests it instead of starting it).
+	BreakGlassMode           domain.BreakGlassMode `json:"breakGlassMode"`
+	BreakGlassDefaultMinutes int                   `json:"breakGlassDefaultMinutes"`
+	BreakGlassMaxMinutes     int                   `json:"breakGlassMaxMinutes"`
+	ExecIdleTimeoutMinutes   int                   `json:"execIdleTimeoutMinutes"`
+	ExecMaxSessionMinutes    int                   `json:"execMaxSessionMinutes"`
 	// ClusterRegistration is true when clusters can be added from the UI.
 	ClusterRegistration bool `json:"clusterRegistration"`
 	// DebugEnabled is true when the portal offers debug containers (DEBUG_IMAGE).
@@ -382,10 +409,11 @@ type scopeDTO struct {
 	Cluster     string           `json:"cluster,omitempty"`
 	Namespace   string           `json:"namespace,omitempty"`
 	Workloads   []workloadRefDTO `json:"workloads,omitempty"`
+	Environment string           `json:"environment,omitempty"`
 }
 
 func toScope(s domain.Scope) scopeDTO {
-	d := scopeDTO{Kind: s.Kind, ArgoProject: s.ArgoProject, Cluster: s.Cluster, Namespace: s.Namespace}
+	d := scopeDTO{Kind: s.Kind, ArgoProject: s.ArgoProject, Cluster: s.Cluster, Namespace: s.Namespace, Environment: s.Environment}
 	for _, w := range s.Workloads {
 		d.Workloads = append(d.Workloads, workloadRefDTO{Kind: w.Kind, Name: w.Name})
 	}
@@ -393,7 +421,7 @@ func toScope(s domain.Scope) scopeDTO {
 }
 
 func (s scopeDTO) toDomain() domain.Scope {
-	d := domain.Scope{Kind: s.Kind, ArgoProject: s.ArgoProject, Cluster: s.Cluster, Namespace: s.Namespace}
+	d := domain.Scope{Kind: s.Kind, ArgoProject: s.ArgoProject, Cluster: s.Cluster, Namespace: s.Namespace, Environment: s.Environment}
 	for _, w := range s.Workloads {
 		d.Workloads = append(d.Workloads, domain.WorkloadRef{Kind: w.Kind, Name: w.Name})
 	}
@@ -467,6 +495,8 @@ func (n grantNamer) toGrant(g domain.Grant) grantDTO {
 	if g.Scope.Namespace != "" {
 		e := n.env(g.Scope.Cluster, g.Scope.Namespace)
 		env = &e
+	} else if g.Scope.Environment != "" {
+		env = &g.Scope.Environment
 	}
 	return grantDTO{ID: g.ID, Holder: h, Scope: toScope(g.Scope), Actions: actionStrings(g.Actions), ExpiresAt: timeStr(g.ExpiresAt),
 		Note: g.Note, Expired: g.Expired(n.now), CreatedBy: g.CreatedBy, CreatedAt: tstr(g.CreatedAt), Environment: env}
@@ -648,6 +678,9 @@ type clusterDTO struct {
 	// EnvironmentFromSecret is true when the Secret's tiphys/environment
 	// annotation sets the environment; it cannot be changed in the UI then.
 	EnvironmentFromSecret bool `json:"environmentFromSecret"`
+	// Protected comes from the Secret's tiphys/protected annotation: the
+	// cluster is hidden from access requests.
+	Protected bool `json:"protected"`
 }
 
 func toCluster(c domain.Cluster, rt application.ClusterRuntime) clusterDTO {
@@ -662,7 +695,7 @@ func toCluster(c domain.Cluster, rt application.ClusterRuntime) clusterDTO {
 	return clusterDTO{Name: c.Name, Environment: strPtr(c.Environment), Reachable: c.Reachable, KubernetesVersion: strPtr(c.KubernetesVersion),
 		PrivilegeCheckOK: c.PrivilegeCheckOK, PrivilegeViolations: v, AdmissionMode: mode, LastCheckAt: timeStr(c.LastCheckAt),
 		Usable: c.Reachable && c.PrivilegeCheckOK && rt.CredentialLoaded, CredentialLoaded: rt.CredentialLoaded,
-		EnvironmentFromSecret: rt.EnvironmentFromCredential}
+		EnvironmentFromSecret: rt.EnvironmentFromCredential, Protected: c.Protected}
 }
 
 type overrideDTO struct {
@@ -680,15 +713,17 @@ func toOverride(o domain.EnvironmentOverride) overrideDTO {
 }
 
 type settingsDTO struct {
-	BreakGlassEnabled        bool      `json:"breakGlassEnabled"`
-	ExecMaxSessionMinutes    int       `json:"execMaxSessionMinutes"`
-	ExecIdleTimeoutMinutes   int       `json:"execIdleTimeoutMinutes"`
-	BreakGlassDefaultMinutes int       `json:"breakGlassDefaultMinutes"`
-	BreakGlassMaxMinutes     int       `json:"breakGlassMaxMinutes"`
-	RetentionAuditDays       int       `json:"retentionAuditDays"`
-	RetentionRecordingsDays  int       `json:"retentionRecordingsDays"`
-	Rocket                   rocketDTO `json:"rocket"`
-	LokiRetentionInfo        *string   `json:"lokiRetentionInfo"`
+	BreakGlassMode           domain.BreakGlassMode `json:"breakGlassMode"`
+	ExecMaxSessionMinutes    int                   `json:"execMaxSessionMinutes"`
+	ExecIdleTimeoutMinutes   int                   `json:"execIdleTimeoutMinutes"`
+	BreakGlassDefaultMinutes int                   `json:"breakGlassDefaultMinutes"`
+	BreakGlassMaxMinutes     int                   `json:"breakGlassMaxMinutes"`
+	// BreakGlassRequestMaxAgeMinutes is how long a break-glass request may stay pending.
+	BreakGlassRequestMaxAgeMinutes int       `json:"breakGlassRequestMaxAgeMinutes"`
+	RetentionAuditDays             int       `json:"retentionAuditDays"`
+	RetentionRecordingsDays        int       `json:"retentionRecordingsDays"`
+	Rocket                         rocketDTO `json:"rocket"`
+	LokiRetentionInfo              *string   `json:"lokiRetentionInfo"`
 }
 
 type rocketDTO struct {
@@ -707,8 +742,9 @@ func toSettings(s domain.Settings, maskWebhook bool) settingsDTO {
 		url = maskURL(url)
 	}
 	return settingsDTO{ExecMaxSessionMinutes: s.ExecMaxSessionMinutes, ExecIdleTimeoutMinutes: s.ExecIdleTimeoutMinutes,
-		BreakGlassEnabled: s.BreakGlassEnabled, BreakGlassDefaultMinutes: s.BreakGlassDefaultMin, BreakGlassMaxMinutes: s.BreakGlassMaxMinutes,
-		RetentionAuditDays: s.RetentionAuditDays, RetentionRecordingsDays: s.RetentionRecordingsDays,
+		BreakGlassMode: s.BreakGlassMode, BreakGlassDefaultMinutes: s.BreakGlassDefaultMin, BreakGlassMaxMinutes: s.BreakGlassMaxMinutes,
+		BreakGlassRequestMaxAgeMinutes: s.BreakGlassRequestMaxAgeMin,
+		RetentionAuditDays:             s.RetentionAuditDays, RetentionRecordingsDays: s.RetentionRecordingsDays,
 		Rocket: rocketDTO{WebhookURL: url, Channel: s.Rocket.Channel, Events: ev}}
 }
 
@@ -723,8 +759,9 @@ func maskURL(u string) string {
 func (d settingsDTO) toDomain(current domain.Settings) domain.Settings {
 	s := domain.Settings{
 		ExecMaxSessionMinutes: d.ExecMaxSessionMinutes, ExecIdleTimeoutMinutes: d.ExecIdleTimeoutMinutes,
-		BreakGlassEnabled: d.BreakGlassEnabled, BreakGlassDefaultMin: d.BreakGlassDefaultMinutes, BreakGlassMaxMinutes: d.BreakGlassMaxMinutes,
-		RetentionAuditDays: d.RetentionAuditDays, RetentionRecordingsDays: d.RetentionRecordingsDays,
+		BreakGlassMode: d.BreakGlassMode, BreakGlassDefaultMin: d.BreakGlassDefaultMinutes, BreakGlassMaxMinutes: d.BreakGlassMaxMinutes,
+		BreakGlassRequestMaxAgeMin: d.BreakGlassRequestMaxAgeMinutes,
+		RetentionAuditDays:         d.RetentionAuditDays, RetentionRecordingsDays: d.RetentionRecordingsDays,
 		Rocket: domain.RocketSettings{WebhookURL: d.Rocket.WebhookURL, Channel: d.Rocket.Channel, Events: map[domain.NotificationEvent]bool{}},
 	}
 	// The masked URL echoed back by the UI means "unchanged".

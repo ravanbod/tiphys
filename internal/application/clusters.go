@@ -129,7 +129,7 @@ func (s *ClusterService) audited(ctx context.Context, p Principal, op, cluster s
 
 func clusterSummary(c domain.Cluster) map[string]any {
 	return map[string]any{"name": c.Name, "environment": c.Environment, "kubernetesVersion": c.KubernetesVersion,
-		"privilegeCheckOk": c.PrivilegeCheckOK, "admissionMode": c.AdmissionMode}
+		"privilegeCheckOk": c.PrivilegeCheckOK, "admissionMode": c.AdmissionMode, "protected": c.Protected}
 }
 
 // Add validates a pasted kubeconfig (version, privilege check), writes the
@@ -292,9 +292,10 @@ func (s *ClusterService) Delete(ctx context.Context, p Principal, name string) e
 // has appeared in the credential store (an annotated Secret), and keeps its
 // environment equal to the Secret's tiphys/environment annotation when it has
 // one. Without the annotation the environment is set on the Clusters page (a
-// new cluster starts unlabeled). A credential that disappears does not remove
-// the row: the cluster stays, shown without a credential, so its grants and
-// history are kept.
+// new cluster starts unlabeled). Protected always follows the Secret's
+// tiphys/protected annotation. A credential that disappears does not remove
+// the row: the cluster stays, shown without a credential and keeping its
+// environment and protected flag, so its grants and history are kept.
 func (s *ClusterService) registerFromStore(ctx context.Context, name string) {
 	repos := s.store.Repos()
 	cur, err := repos.Clusters.Get(ctx, name)
@@ -311,9 +312,20 @@ func (s *ClusterService) registerFromStore(ctx context.Context, name string) {
 		return
 	}
 	s.setEnvFromCred(name, fromCred)
+	protected, err := s.creds.Protected(ctx, name)
+	if err != nil {
+		return
+	}
 	if exists {
 		if fromCred && cur.Environment != env {
-			s.environmentFromStore(ctx, cur, env)
+			upd := cur
+			upd.Environment = env
+			cur = s.updateFromStore(ctx, cur, upd, "environment_from_secret")
+		}
+		if cur.Protected != protected {
+			upd := cur
+			upd.Protected = protected
+			s.updateFromStore(ctx, cur, upd, "protected_from_secret")
 		}
 		return
 	}
@@ -324,7 +336,7 @@ func (s *ClusterService) registerFromStore(ctx context.Context, name string) {
 	err = s.store.InTx(ctx, func(r Repositories) error {
 		c, err := r.Clusters.Create(ctx, domain.Cluster{
 			Name: name, Environment: env, KubeconfigSecret: "annotated Secret (tiphys/cluster)",
-			AdmissionMode: domain.AdmissionNone, UpdatedBy: "credential store",
+			AdmissionMode: domain.AdmissionNone, Protected: protected, UpdatedBy: "credential store",
 		})
 		if err != nil {
 			return err
@@ -353,11 +365,11 @@ func (s *ClusterService) setEnvFromCred(name string, v bool) {
 	s.mu.Unlock()
 }
 
-// environmentFromStore sets a cluster's environment to the one its Secret
-// carries, audited as a system change.
-func (s *ClusterService) environmentFromStore(ctx context.Context, cur domain.Cluster, env string) {
-	upd := cur
-	upd.Environment, upd.UpdatedBy = env, "credential store"
+// updateFromStore writes what a cluster's Secret sets (environment,
+// protected), audited as a system change with operation op. It returns the
+// cluster as stored afterwards (cur when the write failed).
+func (s *ClusterService) updateFromStore(ctx context.Context, cur, upd domain.Cluster, op string) domain.Cluster {
+	upd.UpdatedBy = "credential store"
 	var ev domain.AuditEvent
 	err := s.store.InTx(ctx, func(r Repositories) error {
 		if err := r.Clusters.Update(ctx, upd); err != nil {
@@ -365,18 +377,20 @@ func (s *ClusterService) environmentFromStore(ctx context.Context, cur domain.Cl
 		}
 		e := s.audit.SystemEvent(domain.EventAdminChange)
 		e.Result, e.Cluster = domain.ResultSucceeded, cur.Name
-		e.Details = map[string]any{"entity": "cluster", "operation": "environment_from_secret", "id": cur.Name, "before": clusterSummary(cur), "after": clusterSummary(upd)}
+		e.Details = map[string]any{"entity": "cluster", "operation": op, "id": cur.Name, "before": clusterSummary(cur), "after": clusterSummary(upd)}
 		var err error
 		ev, err = s.audit.RecordIn(ctx, r, e)
 		return err
 	})
 	if err != nil {
-		s.logger.Error("could not set a cluster's environment from its Secret", zap.String("cluster", cur.Name), zap.Error(err))
-		return
+		s.logger.Error("could not update a cluster from its Secret", zap.String("cluster", cur.Name), zap.String("operation", op), zap.Error(err))
+		return cur
 	}
 	s.audit.Publish(ev)
 	s.policy.Changed(ctx)
-	s.logger.Info("cluster environment set from its Secret", zap.String("cluster", cur.Name), zap.String("environment", env))
+	s.logger.Info("cluster updated from its Secret", zap.String("cluster", cur.Name), zap.String("operation", op),
+		zap.String("environment", upd.Environment), zap.Bool("protected", upd.Protected))
+	return upd
 }
 
 // syncFromStore registers every cluster the credential store lists. It backs

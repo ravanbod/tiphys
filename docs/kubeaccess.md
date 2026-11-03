@@ -57,7 +57,20 @@ graph are matched in memory too); the only selector is
   addresses (Ingress and LoadBalancer Service status) and Gateways → Ingresses,
   HTTPRoutes and GRPCRoutes → Services → the workloads of the running pods each
   Service selects (Pod → ReplicaSet → Deployment/Rollout, else the pod's
-  controller). ClusterIP Services no Ingress or route reaches are left out.
+  controller). Services no Ingress or route reaches are included too, with
+  no edge into them (the UI shows them as in-cluster only, on request).
+  Istio ambient waypoints (`traffic_waypoint.go`): the Services Istio deploys
+  for a waypoint (`gateway.networking.k8s.io/gateway-name` plus
+  `gateway.istio.io/managed: istio.io-mesh-controller` or the
+  `istio-waypoint` class label) become a `Waypoint` node with the ready pods
+  they select, and are not drawn as Services. Each other Service is bound by
+  its `istio.io/use-waypoint` (and `-namespace`) label, else the Namespace's
+  (`get` on the Namespace; `none` opts out); the waypoint connects to the
+  routes whose parentRef is that Service (mesh routes, labelled with the
+  Service and port) or, without any, to the Service. The waypoint Gateway is
+  read like the others; problems: not found, not class `istio-waypoint`, not
+  programmed, no running or ready pods (this namespace only), and on the
+  Service a waypoint whose `istio.io/waypoint-for` is `workload` or `none`.
   Gateway API objects are read with the dynamic client (`v1`, falling back to
   `v1beta1`/`v1alpha2`); a cluster without the CRDs simply has no routes. The
   Gateways routes attach to are read with `get` for their class, addresses and
@@ -91,6 +104,22 @@ graph are matched in memory too); the only selector is
   without Complete or Failed means timed out or cancelled. Deadline 0 means the
   Deployment's `progressDeadlineSeconds`, else 600 s. A Rollout counts as done
   only when `status.restartedAt >= spec.restartAt` and the phase is Healthy.
+- **WatchNamespace** lists the namespace's pods (and the events' resource
+  version), then watches pods and events from there and reopens the watches
+  when they end (after a new list when the version expired, with backoff up to
+  30 s; an outage is logged once) until the context ends. Pods and events are
+  attributed to workloads like `podBelongs` (ReplicaSet and Job owners are read
+  once and remembered); others are dropped. Changes: pods added, removed,
+  updated (phase, readiness) and restarted (restart count up, with the last
+  termination reason and exit code); after a pod change the owning workload is
+  read at every tick (2 s) for 10 s, since its controller counts a ready or
+  updated pod only after the pod changed: a new revision (Deployment revision annotation,
+  StatefulSet `updateRevision`, DaemonSet generation, Rollout
+  `currentPodHash` + `restartAt`) starts a rollout that is polled every tick
+  until complete or failed (at most 15 min); other count changes are sent as
+  `workload`. Events: warnings and a CronJob's `SuccessfulCreate`/
+  `SawCompletedJob` and a Job's `Completed`, each event at most every 30 s.
+  Needs only the `get/list/watch` rules the chart already has.
 - **RunCronJob** builds the Job from `spec.jobTemplate` only. **WatchJob** only
   watches Jobs controlled by a CronJob and reports it in `JobInfo.CronJob`; the
   caller must check that name against the grant, because the port does not pass
@@ -164,7 +193,8 @@ TIPHYS_TEST_ADMIN_KUBECONFIG=/tmp/admin.kubeconfig \
 ```
 
 They cover logs, exec (with resize), restart of Deployment, StatefulSet,
-DaemonSet and Rollout with progress, RunCronJob (owner, annotations, Forbid),
+DaemonSet and Rollout with progress, the namespace watch seeing that rollout
+(new and removed pods, started, complete), RunCronJob (owner, annotations, Forbid),
 and the defense-in-depth criteria called directly as `tiphys:user`: image change
 and other edits rejected by admission, Job without CronJob owner rejected,
 Secrets forbidden, the connector unable to impersonate anyone else, protected

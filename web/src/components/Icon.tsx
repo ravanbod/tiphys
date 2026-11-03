@@ -34,6 +34,7 @@ const PATHS = {
   edit: <path d="M2.5 13.5l.6-3L11 2.6a1.4 1.4 0 012 2L5.1 12.5zM9.8 3.8l2 2" />,
   refresh: <path d="M13.5 8a5.5 5.5 0 11-1.6-3.9M13.5 2.5v3h-3" />,
   menu: <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />,
+  belloff: <path d="M4.5 11.5V7.5a3.5 3.5 0 015.6-2.8M11.5 7.5v4l1.5 1.5H3M6.5 14h3M2.5 2.5l11 11" />,
 } as const;
 
 export type IconName = keyof typeof PATHS;

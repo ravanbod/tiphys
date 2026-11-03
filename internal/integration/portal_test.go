@@ -33,10 +33,10 @@ func TestAuthentication(t *testing.T) {
 	if status, m, _ := bad.do("POST", wl+"/restart", nil); status != 403 || errCode(m) != "csrf" {
 		t.Fatalf("csrf: %d %v", status, m)
 	}
-	// Auditors cannot use developer endpoints; users cannot use admin ones.
+	// Auditors without grants see no apps; users cannot use admin endpoints.
 	aud := e.login(e.audID)
-	if status, m, _ := aud.get("/api/v1/apps"); status != 403 || errCode(m) != "forbidden_role" {
-		t.Fatalf("auditor apps: %d %v", status, m)
+	if status, l := aud.list("/api/v1/apps"); status != 200 || len(l) != 0 {
+		t.Fatalf("auditor apps: %d %v", status, l)
 	}
 	if status, _, _ := dev.get("/api/v1/admin/users"); status != 403 {
 		t.Fatalf("user admin users: %d", status)
@@ -499,6 +499,53 @@ func TestAccessRequestApprovalCreatesGrant(t *testing.T) {
 	}
 }
 
+func TestProtectedClusterIsHiddenFromRequests(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	c, err := e.store.Repos().Clusters.Get(ctx, "prod-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Protected = true
+	if err := e.store.Repos().Clusters.Update(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	e.policy.Changed(ctx)
+
+	// Pickers: gone for users, still there for admins.
+	if _, l := dev.list("/api/v1/catalog/clusters"); namesOf(l, "name")["prod-1"] {
+		t.Fatalf("user sees a protected cluster: %v", l)
+	}
+	if _, l := admin.list("/api/v1/catalog/clusters"); !namesOf(l, "name")["prod-1"] {
+		t.Fatalf("admin must see a protected cluster: %v", l)
+	}
+	if status, _, raw := dev.get("/api/v1/catalog/clusters/prod-1/namespaces"); status != 200 || strings.TrimSpace(string(raw)) != "[]" {
+		t.Fatalf("user namespaces of a protected cluster: %d %s", status, raw)
+	}
+	if status, _, raw := admin.get("/api/v1/catalog/clusters/prod-1/namespaces"); status != 200 || !strings.Contains(string(raw), `"payments-api"`) {
+		t.Fatalf("admin namespaces of a protected cluster: %d %s", status, raw)
+	}
+	if status, _, _ := dev.get("/api/v1/catalog/clusters/prod-1/namespaces/payments-api/workloads"); status != 404 {
+		t.Fatalf("user workloads of a protected cluster: %d", status)
+	}
+	// Requests are refused.
+	status, m, _ := dev.do("POST", "/api/v1/access-requests", map[string]any{
+		"scope":   map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "search-api"},
+		"actions": []string{"logs"}, "reason": "debugging"})
+	if status != 422 {
+		t.Fatalf("request on a protected cluster: %d %v", status, m)
+	}
+	// Grants still work.
+	if status, _ := dev.list("/api/v1/clusters/prod-1/namespaces/payments-api/workloads"); status != 200 {
+		t.Fatalf("grant on a protected cluster: %d", status)
+	}
+	if _, l := dev.list("/api/v1/namespaces"); !namesOf(l, "namespace")["payments-api"] {
+		t.Fatalf("granted namespace of a protected cluster: %v", l)
+	}
+}
+
 func TestStaleArgoCacheFailsClosed(t *testing.T) {
 	e := newEnv(t)
 	dev := e.login(e.devID)
@@ -932,11 +979,11 @@ func TestBreakGlassCanBeTurnedOffAndLogsStayOpen(t *testing.T) {
 
 	setBreakGlass := func(on bool) {
 		t.Helper()
-		_, cur, _ := admin.get("/api/v1/admin/settings")
-		cur["breakGlassEnabled"] = on
-		if status, m, _ := admin.do("PUT", "/api/v1/admin/settings", cur); status != 200 || m["breakGlassEnabled"] != on {
-			t.Fatalf("set breakGlassEnabled=%v: %d %v", on, status, m)
+		mode := "off"
+		if on {
+			mode = "self"
 		}
+		setBreakGlassMode(t, admin, mode, nil)
 	}
 	denied := func(path string) bool {
 		ws, _, err := dev.dialWS(path)
@@ -978,7 +1025,7 @@ func TestBreakGlassCanBeTurnedOffAndLogsStayOpen(t *testing.T) {
 		t.Fatalf("start while off: %d %v", status, m)
 	}
 	_, me, _ := dev.get("/api/v1/me")
-	if s, _ := me["settings"].(map[string]any); s["breakGlassEnabled"] != false || me["breakGlass"] != nil {
+	if s, _ := me["settings"].(map[string]any); s["breakGlassMode"] != "off" || me["breakGlass"] != nil {
 		t.Fatalf("me while off: %v / %v", me["settings"], me["breakGlass"])
 	}
 	// Exec is closed outside the window, logs still open.
@@ -1000,4 +1047,383 @@ func TestBreakGlassCanBeTurnedOffAndLogsStayOpen(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		return ws2.control("ready") != nil
 	})
+}
+
+func setBreakGlassMode(t *testing.T, admin *client, mode string, more map[string]any) {
+	t.Helper()
+	_, cur, _ := admin.get("/api/v1/admin/settings")
+	cur["breakGlassMode"] = mode
+	for k, v := range more {
+		cur[k] = v
+	}
+	if status, m, _ := admin.do("PUT", "/api/v1/admin/settings", cur); status != 200 || m["breakGlassMode"] != mode {
+		t.Fatalf("set breakGlassMode=%s: %d %v", mode, status, m)
+	}
+}
+
+func TestBreakGlassNeedsApproval(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	other := e.login(e.otherID)
+	admin.do("POST", "/api/v1/admin/time-windows", map[string]any{
+		"name": "prod hours", "scopeKind": "environment", "scopeValue": "prod", "actions": []string{"exec"},
+		"daysOfWeek": []int{6, 0, 1, 2, 3}, "startTime": "09:00", "endTime": "18:00", "timezone": "Asia/Tehran",
+		"effect": "allow_inside", "enabled": true})
+	start := time.Date(2026, 10, 21, 20, 0, 0, 0, tehran)
+	e.setTime(start)
+	setBreakGlassMode(t, admin, "approval", map[string]any{"breakGlassRequestMaxAgeMinutes": 30})
+	exec := wl + "/pods/payments-api-abc/exec"
+	execReady := func() bool {
+		ws, _, err := dev.dialWS(exec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 3*time.Second, "refusal or ready", func() bool { return ws.control("end") != nil || ws.control("ready") != nil })
+		return ws.control("ready") != nil
+	}
+	request := func(c *client) (int, map[string]any) {
+		status, m, _ := c.do("POST", "/api/v1/break-glass/requests", map[string]any{"reason": "production incident INC-9, payments down", "durationMinutes": 30})
+		return status, m
+	}
+	decide := func(id any, verb string, body map[string]any) (int, map[string]any) {
+		status, m, _ := admin.do("POST", fmt.Sprintf("/api/v1/break-glass/requests/%v/%s", id, verb), body)
+		return status, m
+	}
+	pendingID := func() any {
+		_, me, _ := dev.get("/api/v1/me")
+		r, _ := me["breakGlassRequest"].(map[string]any)
+		if r == nil {
+			return nil
+		}
+		return r["id"]
+	}
+
+	// Starting one directly is refused; it must be requested.
+	if status, m, _ := dev.do("POST", "/api/v1/break-glass", map[string]any{"reason": "production incident INC-9, payments down"}); status != 409 || errCode(m) != "break_glass_approval_required" {
+		t.Fatalf("start in approval mode: %d %v", status, m)
+	}
+	if status, m, _ := dev.do("POST", "/api/v1/break-glass/requests", map[string]any{"reason": "too short"}); status != 422 {
+		t.Fatalf("short reason: %d %v", status, m)
+	}
+	status, req := request(dev)
+	if status != 201 || req["status"] != "pending" || req["durationMinutes"] != float64(30) {
+		t.Fatalf("request: %d %v", status, req)
+	}
+	if status, m := request(dev); status != 409 {
+		t.Fatalf("second pending request: %d %v", status, m)
+	}
+	if id := pendingID(); id != req["id"] {
+		t.Fatalf("me.breakGlassRequest: %v", id)
+	}
+	if execReady() {
+		t.Fatal("a pending request must not open exec")
+	}
+	if _, ov, _ := admin.get("/api/v1/admin/overview"); ov["pendingBreakGlassRequests"] != float64(1) {
+		t.Fatalf("overview: %v", ov)
+	}
+	if status, _, _ := dev.do("POST", fmt.Sprintf("/api/v1/break-glass/requests/%v/approve", req["id"]), nil); status != 403 {
+		t.Fatalf("developer approving: %d", status)
+	}
+
+	// The admin approves it for longer than asked (at most the maximum); it starts now.
+	if status, m := decide(req["id"], "approve", map[string]any{"durationMinutes": 241}); status != 422 {
+		t.Fatalf("approving beyond the maximum: %d %v", status, m)
+	}
+	status, m := decide(req["id"], "approve", map[string]any{"durationMinutes": 90, "note": "go"})
+	if status != 200 || m["status"] != "approved" || m["approvedMinutes"] != float64(90) || m["breakGlassId"] == nil {
+		t.Fatalf("approve: %d %v", status, m)
+	}
+	if status, _ := decide(req["id"], "approve", nil); status != 409 {
+		t.Fatalf("approving twice: %d", status)
+	}
+	if pendingID() != nil {
+		t.Fatal("me.breakGlassRequest after approval")
+	}
+	waitFor(t, 6*time.Second, "exec open under the approved break-glass", execReady)
+	_, page, _ := admin.get(fmt.Sprintf("/api/v1/audit?breakGlassId=%v&eventType=break_glass.start", m["breakGlassId"]))
+	items, _ := page["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("break_glass.start events: %v", page)
+	}
+	ev := items[0].(map[string]any)
+	if d := ev["details"].(map[string]any); ev["username"] != "reza" || d["owner"] != "sara" || d["minutes"] != float64(90) || d["requestedMinutes"] != float64(30) {
+		t.Fatalf("break_glass.start: %v", ev)
+	}
+	if got, _ := time.Parse(time.RFC3339, fmt.Sprint(ev["details"].(map[string]any)["expiresAt"])); !got.Equal(start.Add(90 * time.Minute)) {
+		t.Fatalf("expiresAt: %v", ev["details"])
+	}
+	// No new request while it is active.
+	if status, _ := request(dev); status != 409 {
+		t.Fatalf("request while active: %d", status)
+	}
+	if status, _, _ := dev.do("POST", fmt.Sprintf("/api/v1/break-glass/%v/end", m["breakGlassId"]), nil); status != 204 {
+		t.Fatalf("end: %d", status)
+	}
+
+	// Rejected.
+	_, req = request(dev)
+	if status, m := decide(req["id"], "reject", map[string]any{"note": "use the runbook"}); status != 200 || m["status"] != "rejected" || m["decisionNote"] != "use the runbook" {
+		t.Fatalf("reject: %d %v", status, m)
+	}
+	if pendingID() != nil || execReady() {
+		t.Fatal("rejected request still pending or opened exec")
+	}
+
+	// Cancelled by the requester, never by someone else.
+	_, req = request(dev)
+	cancel := fmt.Sprintf("/api/v1/break-glass/requests/%v/cancel", req["id"])
+	if status, _, _ := other.do("POST", cancel, nil); status != 403 {
+		t.Fatalf("someone else cancelling: %d", status)
+	}
+	if status, m, _ := dev.do("POST", cancel, nil); status != 200 || m["status"] != "cancelled" {
+		t.Fatalf("cancel: %d %v", status, m)
+	}
+
+	// Expired after the admin-set age: gone from me, cannot be approved.
+	_, req = request(dev)
+	e.setTime(start.Add(31 * time.Minute))
+	if pendingID() != nil {
+		t.Fatal("expired request still pending")
+	}
+	if status, _ := decide(req["id"], "approve", nil); status != 409 {
+		t.Fatalf("approving an expired request: %d", status)
+	}
+	if _, list := admin.list("/api/v1/break-glass/requests"); len(list) != 4 || list[0]["status"] != "expired" {
+		t.Fatalf("requests: %v", list)
+	}
+	if status, list := admin.list("/api/v1/break-glass/requests?status=pending"); status != 200 || len(list) != 0 {
+		t.Fatalf("pending requests: %d %v", status, list)
+	}
+
+	// Switching to off refuses requests and approvals.
+	_, req = request(dev)
+	setBreakGlassMode(t, admin, "off", nil)
+	if status, m := decide(req["id"], "approve", nil); status != 403 || errCode(m) != "break_glass_disabled" {
+		t.Fatalf("approve while off: %d %v", status, m)
+	}
+	if status, m := request(other); status != 403 || errCode(m) != "break_glass_disabled" {
+		t.Fatalf("request while off: %d %v", status, m)
+	}
+}
+
+func TestClusterAndEnvironmentGrants(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	arash := e.login(e.otherID)
+	ws := "/api/v1/clusters/prod-1/namespaces/search-api/workloads"
+	if status, _ := arash.list(ws); status != 403 {
+		t.Fatalf("before any grant: %d", status)
+	}
+	grant := func(scope map[string]any) string {
+		t.Helper()
+		status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+			"holder": map[string]any{"kind": "user", "id": e.otherID}, "scope": scope, "actions": []string{"logs"}})
+		if status != 201 && status != 200 {
+			t.Fatalf("create grant %v: %d %v", scope, status, m)
+		}
+		return itoa(int64(m["id"].(float64)))
+	}
+
+	// prod-1 is labeled prod: an environment grant covers all its namespaces,
+	// and they show under "By namespace" without an empty namespace entry.
+	id := grant(map[string]any{"kind": "environment", "environment": "prod"})
+	if status, _ := arash.list(ws); status != 200 {
+		t.Fatalf("environment grant: %d", status)
+	}
+	_, nss := arash.list("/api/v1/namespaces")
+	got := namesOf(nss, "namespace")
+	if !got["live-only"] || !got["search-api"] || got[""] {
+		t.Fatalf("namespaces with environment grant: %v", got)
+	}
+	if status, _ := arash.list("/api/v1/clusters/stg-1/namespaces/search-api/workloads"); status != 403 {
+		t.Fatalf("environment grant reached staging: %d", status)
+	}
+	if status, _, _ := admin.do("DELETE", "/api/v1/admin/grants/"+id, nil); status != 204 {
+		t.Fatalf("delete: %d", status)
+	}
+	if status, _ := arash.list(ws); status != 403 {
+		t.Fatalf("after delete: %d", status)
+	}
+
+	grant(map[string]any{"kind": "cluster", "cluster": "prod-1"})
+	if status, _ := arash.list(ws); status != 200 {
+		t.Fatalf("cluster grant: %d", status)
+	}
+	if status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+		"holder": map[string]any{"kind": "user", "id": e.otherID}, "scope": map[string]any{"kind": "environment", "environment": "unlabeled"},
+		"actions": []string{"logs"}}); status != 422 {
+		t.Fatalf("unlabeled environment: %d %v", status, m)
+	}
+
+	// Users cannot request them.
+	for _, scope := range []map[string]any{{"kind": "cluster", "cluster": "prod-1"}, {"kind": "environment", "environment": "prod"}} {
+		status, m, _ := arash.do("POST", "/api/v1/access-requests", map[string]any{
+			"scope": scope, "actions": []string{"logs"}, "durationHours": 24, "reason": "need the whole thing"})
+		if status != 422 {
+			t.Fatalf("request %v: %d %v", scope, status, m)
+		}
+	}
+}
+
+// An auditor works like a user (grants, requests, break-glass) and also reads
+// audit data; only admins decide requests.
+func TestAuditorWorksLikeAUser(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	arash := e.login(e.otherID)
+	aud := e.login(e.audID)
+	ws := "/api/v1/clusters/prod-1/namespaces/search-api/workloads"
+	if status, m, _ := aud.get(ws); status != 403 || errDetailReason(m) != "no_grant" {
+		t.Fatalf("auditor without grant: %d %v", status, m)
+	}
+	// Another user's request is not on the auditor's My access page.
+	if status, m, _ := arash.do("POST", "/api/v1/access-requests", map[string]any{
+		"scope":   map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "billing"},
+		"actions": []string{"logs"}, "durationHours": 1, "reason": "someone else's request"}); status != 201 {
+		t.Fatalf("other request: %d %v", status, m)
+	}
+	status, m, _ := aud.do("POST", "/api/v1/access-requests", map[string]any{
+		"scope":   map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "search-api"},
+		"actions": []string{"logs", "restart"}, "durationHours": 24, "reason": "checking search after the incident"})
+	if status != 201 {
+		t.Fatalf("auditor request: %d %v", status, m)
+	}
+	id := itoa(int64(m["id"].(float64)))
+	if status, _, _ := aud.do("POST", "/api/v1/access-requests/"+id+"/approve", nil); status != 403 {
+		t.Fatalf("auditor must not approve, even their own: %d", status)
+	}
+	if status, _, _ := aud.do("POST", "/api/v1/access-requests/"+id+"/reject", nil); status != 403 {
+		t.Fatalf("auditor must not reject: %d", status)
+	}
+	status, my, _ := aud.get("/api/v1/my/access")
+	if status != 200 || len(my["requests"].([]any)) != 1 {
+		t.Fatalf("auditor my access: %d %v", status, my)
+	}
+	if status, m, _ := admin.do("POST", "/api/v1/access-requests/"+id+"/approve", map[string]any{"note": "ok"}); status != 200 {
+		t.Fatalf("approve: %d %v", status, m)
+	}
+	// With the grant the auditor works like a user, within the grant only.
+	if status, l := aud.list(ws); status != 200 || len(l) == 0 {
+		t.Fatalf("auditor with grant: %d %v", status, l)
+	}
+	if status, _, _ := aud.do("POST", wl+"/restart", nil); status != 403 {
+		t.Fatalf("auditor outside the grant: %d", status)
+	}
+	if status, _ := aud.list("/api/v1/audit"); status != 200 {
+		t.Fatalf("auditor still reads audit: %d", status)
+	}
+	if status, _, _ := aud.do("POST", "/api/v1/admin/teams", map[string]any{"name": "x"}); status != 403 {
+		t.Fatalf("auditor must not write config: %d", status)
+	}
+	// Break-glass is open to auditors too.
+	if status, m, _ := aud.do("POST", "/api/v1/break-glass", map[string]any{"reason": "production incident 4711, need exec now", "minutes": 30}); status != 201 && status != 200 {
+		t.Fatalf("auditor break-glass: %d %v", status, m)
+	}
+}
+
+// An admin may grant more (or fewer) actions than requested, within what the
+// scope allows; the audit event records both.
+func TestApproveAddsToTheSameScopeGrant(t *testing.T) {
+	e := newEnv(t)
+	arash := e.login(e.otherID)
+	admin := e.login(e.adminID)
+	scope := map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "search-api"}
+	approve := func(actions []string, hours int, body map[string]any) map[string]any {
+		t.Helper()
+		status, m, _ := arash.do("POST", "/api/v1/access-requests", map[string]any{
+			"scope": scope, "actions": actions, "durationHours": hours, "reason": "debugging search latency"})
+		if status != 201 {
+			t.Fatalf("request: %d %v", status, m)
+		}
+		status, m, _ = admin.do("POST", "/api/v1/access-requests/"+itoa(int64(m["id"].(float64)))+"/approve", body)
+		if status != 200 {
+			t.Fatalf("approve: %d %v", status, m)
+		}
+		return m
+	}
+	grant := func(id any) map[string]any {
+		t.Helper()
+		_, l := admin.list("/api/v1/admin/grants/covering?cluster=prod-1&namespace=search-api")
+		for _, g := range l {
+			if g["id"] == id {
+				return g
+			}
+		}
+		t.Fatalf("no grant %v in %v", id, l)
+		return nil
+	}
+
+	first := approve([]string{"logs"}, 24, nil)["resultingGrantId"]
+	// Lasting longer: added to that grant, which now lasts as long.
+	m := approve([]string{"restart"}, 48, nil)
+	g := grant(first)
+	if m["resultingGrantId"] != first || fmt.Sprint(g["actions"]) != "[logs restart]" ||
+		!strings.HasPrefix(fmt.Sprint(g["expiresAt"]), e.clock.Now().Add(48*time.Hour).UTC().Format("2006-01-02T15")) {
+		t.Fatalf("merged: %v, grant %v", m, g)
+	}
+	_, page, _ := admin.get("/api/v1/audit?eventType=access_request.decide")
+	details := page["items"].([]any)[0].(map[string]any)["details"].(map[string]any)
+	if details["merged"] != true || fmt.Sprint(details["before"].(map[string]any)["actions"]) != "[logs]" ||
+		fmt.Sprint(details["after"].(map[string]any)["actions"]) != "[logs restart]" {
+		t.Fatalf("audit details: %v", details)
+	}
+	// Shorter: exec must not last 48 h, so it gets its own grant.
+	if m := approve([]string{"exec"}, 8, nil); m["resultingGrantId"] == first || fmt.Sprint(grant(m["resultingGrantId"])["actions"]) != "[exec]" {
+		t.Fatalf("shorter: %v", m)
+	}
+	// The admin may ask for a separate grant.
+	if m := approve([]string{"run-job"}, 72, map[string]any{"separate": true}); m["resultingGrantId"] == first {
+		t.Fatalf("separate: %v", m)
+	}
+	if fmt.Sprint(grant(first)["actions"]) != "[logs restart]" {
+		t.Fatalf("first grant changed: %v", grant(first))
+	}
+}
+
+func TestApproveWithOtherActions(t *testing.T) {
+	e := newEnv(t)
+	arash := e.login(e.otherID)
+	admin := e.login(e.adminID)
+	request := func(scope map[string]any) string {
+		t.Helper()
+		status, m, _ := arash.do("POST", "/api/v1/access-requests", map[string]any{
+			"scope": scope, "actions": []string{"logs"}, "durationHours": 24, "reason": "debugging search latency"})
+		if status != 201 {
+			t.Fatalf("request: %d %v", status, m)
+		}
+		return itoa(int64(m["id"].(float64)))
+	}
+
+	id := request(map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "search-api"})
+	status, m, _ := admin.do("POST", "/api/v1/access-requests/"+id+"/approve", map[string]any{"actions": []string{"logs", "sync"}})
+	if status != 200 || fmt.Sprint(m["actions"]) != "[logs sync]" {
+		t.Fatalf("approve with sync: %d %v", status, m)
+	}
+	status, l := admin.list("/api/v1/admin/grants/covering?cluster=prod-1&namespace=search-api")
+	found := false
+	for _, gr := range l {
+		if gr["id"] == m["resultingGrantId"] {
+			found = fmt.Sprint(gr["actions"]) == "[logs sync]"
+		}
+	}
+	if status != 200 || !found {
+		t.Fatalf("grant actions: %d %v", status, l)
+	}
+	_, page, _ := admin.get("/api/v1/audit?eventType=access_request.decide")
+	items, _ := page["items"].([]any)
+	if len(items) == 0 {
+		t.Fatalf("audit: %v", page)
+	}
+	details := items[0].(map[string]any)["details"].(map[string]any)
+	if fmt.Sprint(details["requestedActions"]) != "[logs]" || fmt.Sprint(details["actions"]) != "[logs sync]" {
+		t.Fatalf("audit details: %v", details)
+	}
+
+	// sync never fits a workloads scope, approved or not.
+	id = request(map[string]any{"kind": "workloads", "cluster": "prod-1", "namespace": "search-api",
+		"workloads": []map[string]any{{"kind": "Deployment", "name": "search-api"}}})
+	if status, m, _ := admin.do("POST", "/api/v1/access-requests/"+id+"/approve", map[string]any{"actions": []string{"logs", "sync"}}); status != 422 {
+		t.Fatalf("sync on workloads: %d %v", status, m)
+	}
 }

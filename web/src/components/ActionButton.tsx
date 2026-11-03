@@ -6,6 +6,7 @@ import { useBreakGlass } from '../context/breakglass';
 import { explainDecision } from '../lib/decision';
 import { Icon } from './Icon';
 import type { IconName } from './Icon';
+import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 export interface ActionButtonProps {
   action: Action;
@@ -29,11 +30,11 @@ export interface ActionButtonProps {
 export function ActionButton({
   action, decision, label, icon, target, to, onClick, size = 'md', plain, hint = 'tip', forceDisabled,
 }: ActionButtonProps) {
-  const { role, me } = useAuth();
+  const { usesGrants, me } = useAuth();
   const bg = useBreakGlass();
   const tipId = useId();
   const sm = size === 'sm' ? ' sm' : '';
-  const exp = explainDecision(decision, { action, target, canBreakGlass: role === 'user' && me.settings.breakGlassEnabled });
+  const exp = explainDecision(decision, { action, target, canBreakGlass: usesGrants && breakGlassOn(me) });
   const disabledText = forceDisabled ?? exp?.text;
 
   if (!disabledText) {
@@ -58,7 +59,7 @@ export function ActionButton({
       {cta === 'breakglass' && (
         <div style={{ marginTop: 6 }}>
           <button type="button" className="linklike" onClick={() => bg.open({ action, target, environment: decision?.environment })}>
-            Use break-glass
+            {breakGlassLabel(me)}
           </button>
         </div>
       )}

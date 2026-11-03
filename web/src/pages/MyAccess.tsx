@@ -14,9 +14,11 @@ import { useToast } from '../context/toast';
 import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { explainDecision } from '../lib/decision';
+import { mergeTarget, sameScope } from '../lib/requestMerge';
 import { SYNC_SCOPE_HINT, actionOptionLabel } from '../lib/grantForm';
 import { fmtDateTime, fmtDay, fmtHours, fmtReopens, fmtWhen } from '../lib/time';
 import { ARGO_UI } from '../lib/features';
+import { breakGlassOn } from '../lib/breakGlass';
 
 const ALL_ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
 const DURATIONS: { value: number | 'perm'; label: string; hours: number | null }[] = [
@@ -42,7 +44,7 @@ function availability(g: MyAccessGrant, wls: WorkloadSummary[] | undefined, now:
 }
 
 export function MyAccess() {
-  const { me } = useAuth();
+  const { me, usesGrants } = useAuth();
   const toast = useToast();
   const bg = useBreakGlass();
   const now = useNow(60000);
@@ -89,7 +91,7 @@ export function MyAccess() {
       if (me.argo.stale) return { state: 'closed', text: 'Paused', why: 'Argo CD data is out of date' };
       return projectApps.some((a) => g.actions.some((x) => a.access.includes(x))) ? { state: 'open' } : projectApps.length ? { state: 'closed', text: 'Not available now', why: 'Closed by a time window' } : { state: 'unknown' };
     }
-    return availability(g, wls[`${g.scope.cluster}/${g.scope.namespace}`], now, me.role === 'user' && me.settings.breakGlassEnabled);
+    return availability(g, wls[`${g.scope.cluster}/${g.scope.namespace}`], now, usesGrants && breakGlassOn(me));
   }
 
   return (
@@ -159,7 +161,7 @@ export function MyAccess() {
         </div>
 
         <RequestForm
-          formRef={formRef} reasonRef={reasonRef}
+          formRef={formRef} reasonRef={reasonRef} grants={d.grants} now={now}
           onSent={() => { toast('Request sent. An administrator will review it.'); data.reload(); setTab('requests'); const n = new URLSearchParams(sp); n.delete('request'); setSp(n, { replace: true }); }}
           onCancel={() => { const n = new URLSearchParams(sp); n.delete('request'); setSp(n, { replace: true }); }}
         />
@@ -184,7 +186,14 @@ function RequestRow({ r, now }: { r: AccessRequest; now: number }) {
   );
 }
 
-function RequestForm({ formRef, reasonRef, onSent, onCancel }: { formRef: React.RefObject<HTMLElement>; reasonRef: React.RefObject<HTMLTextAreaElement>; onSent: () => void; onCancel: () => void }) {
+/**
+ * Where the scope matches grants the user already has, their actions are
+ * shown as held and only new ones are requested; the hint says whether
+ * approval adds to the user's own grant (see lib/requestMerge) or creates one.
+ */
+function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
+  formRef: React.RefObject<HTMLElement>; reasonRef: React.RefObject<HTMLTextAreaElement>; grants: MyAccessGrant[]; now: number; onSent: () => void; onCancel: () => void;
+}) {
   const [kind, setKind] = useState<ScopeView['kind']>('namespace');
   const [project, setProject] = useState('');
   const [cluster, setCluster] = useState('');
@@ -206,6 +215,15 @@ function RequestForm({ formRef, reasonRef, onSent, onCancel }: { formRef: React.
   useEffect(() => { setNamespace(nss.data?.[0] ?? ''); setPicked([]); }, [nss.data]);
   useEffect(() => { setPicked([]); }, [namespace]);
 
+  const scope: ScopeView | null = kind === 'argo_project' ? (project ? { kind, argoProject: project } : null)
+    : !cluster || !namespace ? null : kind === 'namespace' ? { kind, cluster, namespace } : picked.length ? { kind, cluster, namespace, workloads: picked } : null;
+  const same = scope ? grants.filter((g) => !g.expired && sameScope(g.scope, scope)) : [];
+  const held = new Set(same.flatMap((g) => g.actions));
+  const hours = DURATIONS.find((x) => x.value === dur)!.hours;
+  const target = scope ? mergeTarget(grants, scope, hours === null ? null : now + hours * 3600_000, now) : null;
+  const longer = same.find((g) => g.holder.kind === 'user');
+  const wanted = actions.filter((a) => !held.has(a));
+
   const toggleAction = (a: Action) => setActions((x) => (x.includes(a) ? x.filter((y) => y !== a) : [...x, a]));
   const togglePick = (w: CatalogWorkload) => setPicked((x) => (x.some((y) => y.kind === w.kind && y.name === w.name) ? x.filter((y) => !(y.kind === w.kind && y.name === w.name)) : [...x, w]));
 
@@ -213,9 +231,9 @@ function RequestForm({ formRef, reasonRef, onSent, onCancel }: { formRef: React.
     e.preventDefault();
     setBusy(true);
     setErr(null);
-    const scope: ScopeView = kind === 'argo_project' ? { kind, argoProject: project } : kind === 'namespace' ? { kind, cluster, namespace } : { kind, cluster, namespace, workloads: picked };
+    const sent: ScopeView = scope ?? (kind === 'argo_project' ? { kind, argoProject: project } : kind === 'namespace' ? { kind, cluster, namespace } : { kind, cluster, namespace, workloads: picked });
     try {
-      await api.createAccessRequest({ scope, actions, durationHours: DURATIONS.find((x) => x.value === dur)!.hours, reason: reason.trim() });
+      await api.createAccessRequest({ scope: sent, actions: wanted, durationHours: hours, reason: reason.trim() });
       setReason('');
       onSent();
     } catch (ex) {
@@ -262,13 +280,24 @@ function RequestForm({ formRef, reasonRef, onSent, onCancel }: { formRef: React.
             {ALL_ACTIONS.map((a) => {
               // Sync applies to whole Argo CD apps, which a workloads scope cannot cover.
               const off = a === 'sync' && kind === 'workloads' && !actions.includes(a);
+              const has = held.has(a);
               return (
-                <label key={a} className="chk" title={off ? SYNC_SCOPE_HINT : undefined}>
-                  <input type="checkbox" checked={actions.includes(a)} disabled={off} onChange={() => toggleAction(a)} />{actionOptionLabel(a)}
+                <label key={a} className="chk" title={has ? 'You already have this here' : off ? SYNC_SCOPE_HINT : undefined}>
+                  <input type="checkbox" checked={has || actions.includes(a)} disabled={has || off} onChange={() => toggleAction(a)} />{actionOptionLabel(a)}
                 </label>
               );
             })}
           </div>
+          {same.length > 0 && (
+            <span className="hint" role="note">
+              You already have {[...held].join(', ')} here.{' '}
+              {target
+                ? `This request adds to that grant, which then ${hours === null ? 'becomes permanent' : `lasts ${DURATIONS.find((x) => x.value === dur)!.label} from approval`}.`
+                : longer
+                  ? 'Your grant here lasts longer than this request, so it becomes a separate grant.'
+                  : 'You have it through a team; this request becomes a grant of your own.'}
+            </span>
+          )}
           {fe('actions')}
         </fieldset>
         <div className="f">Duration
@@ -281,7 +310,7 @@ function RequestForm({ formRef, reasonRef, onSent, onCancel }: { formRef: React.
         {err != null && !Object.keys(fields).length && <div className="banner red" role="alert">{errorText(err)}</div>}
         <div className="row" style={{ justifyContent: 'flex-end' }}>
           <button type="button" className="btn" onClick={onCancel}>Cancel</button>
-          <button type="submit" className="btn pri" disabled={busy || !reason.trim() || actions.length === 0}>Send request</button>
+          <button type="submit" className="btn pri" disabled={busy || !reason.trim() || wanted.length === 0}>Send request</button>
         </div>
       </form>
     </aside>

@@ -30,6 +30,20 @@ describe('grant form', () => {
       holder: { kind: 'user', id: 3 }, scope: g.scope, actions: ['logs', 'exec'], expiresAt: '2026-11-30T14:30:00Z', note: 'hi',
     });
   });
+  it('handles cluster and environment scopes', () => {
+    const base = { ...emptyGrantForm(), holderId: 1, cluster: 'prod-1', namespace: 'stale', environment: 'prod', workloads: ['Deployment/a'] };
+    expect(validateGrantForm({ ...base, scopeKind: 'cluster', cluster: '' }, NOW)).toEqual({ cluster: 'Choose a cluster.' });
+    expect(validateGrantForm({ ...base, scopeKind: 'environment', environment: '' }, NOW)).toEqual({ environment: 'Choose an environment.' });
+    expect(validateGrantForm({ ...base, scopeKind: 'cluster', actions: ['sync'] }, NOW)).toEqual({});
+    // Fields left over from another kind are not sent.
+    expect(grantInputFromForm({ ...base, scopeKind: 'cluster' }).scope).toEqual({ kind: 'cluster', cluster: 'prod-1' });
+    expect(grantInputFromForm({ ...base, scopeKind: 'environment' }).scope).toEqual({ kind: 'environment', environment: 'prod' });
+    const g: GrantView = {
+      id: 6, holder: { kind: 'team', id: 2, name: 'Ops' }, scope: { kind: 'environment', environment: 'staging' },
+      actions: ['logs'], expiresAt: null, note: '', expired: false, createdBy: 'x', createdAt: '', environment: 'staging',
+    };
+    expect(grantInputFromForm(formFromGrant(g)).scope).toEqual(g.scope);
+  });
   it('phrases actions', () => {
     expect(actionPhrase(['exec', 'logs'])).toBe('read logs and exec');
     expect(actionPhrase(['logs', 'exec', 'restart'])).toBe('read logs, exec and restart');

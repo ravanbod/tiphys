@@ -121,6 +121,12 @@ export function Clusters() {
                   <tr key={c.name} className={c.usable ? undefined : 'off'}>
                     <td className="mono">
                       <b>{c.name}</b>
+                      {c.protected && (
+                        <>
+                          {' '}
+                          <span className="tag" title="Set by the tiphys/protected annotation of the cluster's Secret: hidden from access requests, grants on it still work">Protected</span>
+                        </>
+                      )}
                     </td>
                     <td>
                       {c.environmentFromSecret ? (

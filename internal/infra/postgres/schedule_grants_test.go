@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -104,6 +105,42 @@ func TestGrants(t *testing.T) {
 	}
 }
 
+func TestClusterAndEnvironmentGrants(t *testing.T) {
+	f := newFixture(t)
+	u := f.user("u", domain.RoleUser)
+	f.cluster("c1")
+	logs := []domain.Action{domain.ActionLogs}
+
+	gc, err := f.r.Grants.Create(f.ctx, domain.Grant{HolderKind: domain.HolderUser, UserID: u.ID,
+		Scope: domain.Scope{Kind: domain.ScopeCluster, Cluster: "c1"}, Actions: logs})
+	must(t, err)
+	if !reflect.DeepEqual(gc.Scope, domain.Scope{Kind: domain.ScopeCluster, Cluster: "c1"}) {
+		t.Fatalf("cluster grant: %+v", gc.Scope)
+	}
+	ge, err := f.r.Grants.Create(f.ctx, domain.Grant{HolderKind: domain.HolderUser, UserID: u.ID,
+		Scope: domain.Scope{Kind: domain.ScopeEnvironment, Environment: "prod"}, Actions: logs})
+	must(t, err)
+	if !reflect.DeepEqual(ge.Scope, domain.Scope{Kind: domain.ScopeEnvironment, Environment: "prod"}) {
+		t.Fatalf("environment grant: %+v", ge.Scope)
+	}
+	// Switching kinds clears the other kind's columns.
+	ge.Scope = nsScope("c1", "pay")
+	must(t, f.r.Grants.Update(f.ctx, ge))
+	got, err := f.r.Grants.Get(f.ctx, ge.ID)
+	must(t, err)
+	if got.Scope.Environment != "" || got.Scope.Kind != domain.ScopeNamespace {
+		t.Fatalf("after switch: %+v", got.Scope)
+	}
+	_, err = f.r.Grants.Create(f.ctx, domain.Grant{HolderKind: domain.HolderUser, UserID: u.ID,
+		Scope: domain.Scope{Kind: domain.ScopeCluster, Cluster: "nope"}, Actions: logs})
+	isErr(t, err, application.ErrNotFound)
+	// A cluster grant keeps the cluster from being deleted.
+	must(t, f.r.Grants.Delete(f.ctx, ge.ID))
+	isErr(t, f.r.Clusters.Delete(f.ctx, "c1"), application.ErrConflict)
+	must(t, f.r.Grants.Delete(f.ctx, gc.ID))
+	must(t, f.r.Clusters.Delete(f.ctx, "c1"))
+}
+
 func TestGrantConstraints(t *testing.T) {
 	f := newFixture(t)
 	u := f.user("u", domain.RoleUser)
@@ -124,6 +161,11 @@ func TestGrantConstraints(t *testing.T) {
 		"namespace scope no cluster": {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeNamespace, Namespace: "x"}, Actions: logs},
 		"namespace scope w/ project": {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeNamespace, Cluster: "c1", Namespace: "x", ArgoProject: "p"}, Actions: logs},
 		"bad scope kind":             {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: "everything"}, Actions: logs},
+		"cluster scope with ns":      {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeCluster, Cluster: "c1", Namespace: "x"}, Actions: logs},
+		"cluster scope with env":     {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeCluster, Cluster: "c1", Environment: "prod"}, Actions: logs},
+		"env scope without env":      {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeEnvironment}, Actions: logs},
+		"env scope with cluster":     {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeEnvironment, Environment: "prod", Cluster: "c1"}, Actions: logs},
+		"namespace scope with env":   {HolderKind: domain.HolderUser, UserID: u.ID, Scope: domain.Scope{Kind: domain.ScopeNamespace, Cluster: "c1", Namespace: "x", Environment: "prod"}, Actions: logs},
 		"no actions":                 {HolderKind: domain.HolderUser, UserID: u.ID, Scope: argo},
 		"unknown action":             {HolderKind: domain.HolderUser, UserID: u.ID, Scope: argo, Actions: []domain.Action{"delete"}},
 	}

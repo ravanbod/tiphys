@@ -27,8 +27,15 @@ import type { GrantForm } from '../../lib/grantForm';
 import { fmtDateTime, fmtDay, fmtSpan } from '../../lib/time';
 import { ARGO_UI } from '../../lib/features';
 
-const SCOPE_KINDS: GrantForm['scopeKind'][] = ARGO_UI ? ['argo_project', 'namespace', 'workloads'] : ['namespace', 'workloads'];
-const FORM_FIELDS = ['holder', 'scope', 'argoProject', 'cluster', 'namespace', 'workloads', 'actions', 'expiresAt', 'note'];
+const SCOPE_KINDS: GrantForm['scopeKind'][] = [...(ARGO_UI ? ['argo_project' as const] : []), 'environment', 'cluster', 'namespace', 'workloads'];
+const FORM_FIELDS = ['holder', 'scope', 'argoProject', 'environment', 'cluster', 'namespace', 'workloads', 'actions', 'expiresAt', 'note'];
+const WHERE_HINT: Record<GrantForm['scopeKind'], string> = {
+  argo_project: 'Argo project (all clusters)',
+  environment: 'Environment (every namespace labeled with it, all clusters)',
+  cluster: 'Cluster (every namespace, also future ones)',
+  namespace: 'Cluster → namespace',
+  workloads: 'Cluster → namespace → workloads',
+};
 
 function uniq(xs: (string | undefined | null)[]): string[] {
   return Array.from(new Set(xs.filter((x): x is string => !!x))).sort();
@@ -58,6 +65,7 @@ interface Pickers {
   users: UserView[];
   clusters: CatalogCluster[];
   argoProjects: string[];
+  environments: string[];
 }
 
 function GrantEditor({
@@ -92,7 +100,7 @@ function GrantEditor({
     setLocalFields({});
   }, [formId]);
 
-  const needsNs = form.scopeKind !== 'argo_project';
+  const needsNs = form.scopeKind === 'namespace' || form.scopeKind === 'workloads';
   const namespaces = useApi(() => api.catalogNamespaces(form.cluster), [form.cluster], { enabled: needsNs && !!form.cluster });
   const workloads = useApi(
     () => api.catalogWorkloads(form.cluster, form.namespace),
@@ -162,6 +170,12 @@ function GrantEditor({
       {form.holderKind === 'team' ? 'Team' : 'User'} <b>{holderName ?? '…'}</b> can {actionPhrase(form.actions)} for{' '}
       {form.scopeKind === 'argo_project' && (
         <>every namespace of Argo project <span className="mono">{form.argoProject || '…'}</span> on all clusters</>
+      )}
+      {form.scopeKind === 'environment' && (
+        <>every namespace in environment <span className="mono">{form.environment || '…'}</span> on all clusters</>
+      )}
+      {form.scopeKind === 'cluster' && (
+        <>every namespace on cluster <span className="mono">{form.cluster || '…'}</span>, including new ones</>
       )}
       {form.scopeKind === 'namespace' && (
         <>namespace <span className="mono">{form.namespace || '…'}</span> on cluster <span className="mono">{form.cluster || '…'}</span></>
@@ -254,7 +268,7 @@ function GrantEditor({
         </div>
 
         <div className="f" role="group" aria-label="Where">
-          <span>3 · Where <span className="hint">{form.scopeKind === 'argo_project' ? 'Argo project (all clusters)' : form.scopeKind === 'namespace' ? 'Cluster → namespace' : 'Cluster → namespace → workloads'}</span></span>
+          <span>3 · Where <span className="hint">{WHERE_HINT[form.scopeKind]}</span></span>
           {form.scopeKind === 'argo_project' ? (
             <>
               <select
@@ -271,6 +285,45 @@ function GrantEditor({
                 ))}
               </select>
               <FieldError msg={fieldError(fields, 'argoProject', 'scope.argoProject')} />
+            </>
+          ) : form.scopeKind === 'environment' ? (
+            <>
+              <select
+                className="sel"
+                style={{ height: 30 }}
+                aria-label="Environment"
+                aria-invalid={fields.environment ? true : undefined}
+                value={form.environment}
+                onChange={(e) => set({ environment: e.target.value })}
+              >
+                <option value="">Choose an environment…</option>
+                {uniq([...pickers.environments, form.environment]).map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+              <FieldError msg={fieldError(fields, 'environment', 'scope.environment')} />
+            </>
+          ) : form.scopeKind === 'cluster' ? (
+            <>
+              <select
+                className="sel"
+                style={{ height: 30 }}
+                aria-label="Cluster"
+                aria-invalid={fields.cluster ? true : undefined}
+                value={form.cluster}
+                onChange={(e) => set({ cluster: e.target.value, namespace: '', workloads: [] })}
+              >
+                <option value="">Choose a cluster…</option>
+                {uniq([...pickers.clusters.map((c) => c.name), form.cluster]).map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              {clusterEnv && (
+                <span className="row" style={{ gap: 6, fontWeight: 400 }}>
+                  Environment <EnvBadge env={clusterEnv} />
+                </span>
+              )}
+              <FieldError msg={fieldError(fields, 'cluster', 'scope.cluster')} />
             </>
           ) : (
             <>
@@ -335,7 +388,7 @@ function GrantEditor({
           )}
           <span className="hint row" style={{ gap: 6 }}>
             <Icon name="lock" size={13} />
-            Protected namespaces (kube-system, argocd) are hidden from pickers.
+            {needsNs ? 'Protected namespaces (kube-system, argocd) are hidden from pickers.' : 'Protected namespaces (kube-system, argocd) are never covered.'}
           </span>
         </div>
 
@@ -659,6 +712,7 @@ export function Grants() {
   const users = useApi(() => api.users(), []);
   const catClusters = useApi(() => api.catalogClusters(), [], { enabled: isAdmin });
   const catProjects = useApi(() => api.argoProjects(), [], { enabled: isAdmin && ARGO_UI });
+  const overrides = useApi(() => api.environmentOverrides(), [], { enabled: isAdmin });
   const now = Date.now();
 
   // Filter options: catalog (admins) plus everything seen in listed grants, so auditors still get options.
@@ -678,6 +732,9 @@ export function Grants() {
     users: users.data ?? [],
     clusters: catClusters.data ?? [],
     argoProjects: catProjects.data ?? [],
+    // Every environment a namespace can have: cluster labels and overrides.
+    environments: uniq([...(catClusters.data ?? []).map((c) => c.environment), ...(overrides.data ?? []).map((o) => o.environment)])
+      .filter((e) => e !== 'unlabeled'),
   };
 
   const edit = (g: GrantView) => {

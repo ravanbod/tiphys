@@ -20,6 +20,7 @@ import { describeEnd } from '../lib/endReason';
 import type { EndInfo } from '../lib/endReason';
 import { workloadUrl } from '../lib/routes';
 import { fmtCountdown, fmtTime, msUntil } from '../lib/time';
+import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 type Phase = 'connect' | 'session' | 'ended';
 
@@ -28,7 +29,7 @@ export function ExecPage() {
   const kind = kindFromSegment(kindSeg);
   const [sp, setSp] = useSearchParams();
   const nav = useNavigate();
-  const { me } = useAuth();
+  const { me, usesGrants } = useAuth();
   const bg = useBreakGlass();
   const ref = useMemo(() => ({ cluster, namespace: ns, kind, name }), [cluster, ns, kind, name]);
   // Debug: the shell runs in a new debug container that shares the chosen container's processes.
@@ -123,7 +124,7 @@ export function ExecPage() {
   async function refreshDecision() {
     try {
       const w = await api.workload(ref);
-      const e = explainDecision(w.access.exec, { action: 'exec', target: name, canBreakGlass: me.role === 'user' && me.settings.breakGlassEnabled });
+      const e = explainDecision(w.access.exec, { action: 'exec', target: name, canBreakGlass: usesGrants && breakGlassOn(me) });
       if (e) setConnectErr(e.text);
       wl.reload();
     } catch (e) { setConnectErr(errorText(e)); }
@@ -138,7 +139,7 @@ export function ExecPage() {
 
   const prod = isProd(data.environment);
   const execInfo = data.access.exec;
-  const denial = explainDecision(execInfo, { action: 'exec', target: name, canBreakGlass: me.role === 'user' && me.settings.breakGlassEnabled });
+  const denial = explainDecision(execInfo, { action: 'exec', target: name, canBreakGlass: usesGrants && breakGlassOn(me) });
 
   if (phase === 'connect') {
     return (
@@ -151,6 +152,7 @@ export function ExecPage() {
           prod={prod} denial={denial?.text ?? null} cta={denial?.cta ?? 'none'} error={connectErr} podsError={podsQ.error}
           onCancel={() => nav(workloadUrl(ref))} onConnect={connect} busy={connecting}
           onBreakGlass={() => bg.open({ action: 'exec', target: name, environment: data.environment })}
+          breakGlassLabel={breakGlassLabel(me)}
         />
       </div>
     );
@@ -213,8 +215,8 @@ export function ExecPage() {
               </div>
               <div className="ft">
                 <Link className="btn" to={workloadUrl(ref)}>Back to pods</Link>
-                {end.suggestBreakGlass && me.role === 'user' && me.settings.breakGlassEnabled && !me.breakGlass && (
-                  <button type="button" className="btn dng" onClick={() => bg.open({ action: 'exec', target: name, environment: data.environment })}>Use break-glass</button>
+                {end.suggestBreakGlass && usesGrants && breakGlassOn(me) && !me.breakGlass && (
+                  <button type="button" className="btn dng" onClick={() => bg.open({ action: 'exec', target: name, environment: data.environment })}>{breakGlassLabel(me)}</button>
                 )}
                 {end.canReconnect && <button type="button" className="btn act" onClick={() => { setPhase('connect'); setConnecting(false); }}><Icon name="restart" />Reconnect</button>}
               </div>
@@ -230,7 +232,7 @@ function ConnectDialog(p: {
   wl: WorkloadDetail; info: DecisionInfo; pod: string; pods: string[]; onPod: (n: string) => void; containers: string[]; container: string; onContainer: (c: string) => void;
   debugEnabled: boolean; debug: boolean; onDebug: (d: boolean) => void;
   shell: '/bin/sh' | '/bin/bash'; onShell: (s: '/bin/sh' | '/bin/bash') => void; prod: boolean; denial: string | null; cta: 'request' | 'breakglass' | 'none';
-  error: string | null; podsError: unknown; onCancel: () => void; onConnect: () => void; busy: boolean; onBreakGlass: () => void;
+  error: string | null; podsError: unknown; onCancel: () => void; onConnect: () => void; busy: boolean; onBreakGlass: () => void; breakGlassLabel: string;
 }) {
   const blocked = !!p.denial;
   const canConnect = !blocked && !!p.pod && !!p.container && !p.busy;
@@ -253,7 +255,7 @@ function ConnectDialog(p: {
         <div className="banner red" role="alert" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
           <span>{p.denial}</span>
           {p.cta === 'request' && <Link to="/access?request=1">Request access</Link>}
-          {p.cta === 'breakglass' && <button type="button" className="linklike blue" onClick={p.onBreakGlass}>Use break-glass</button>}
+          {p.cta === 'breakglass' && <button type="button" className="linklike blue" onClick={p.onBreakGlass}>{p.breakGlassLabel}</button>}
         </div>
       )}
       {p.error && !blocked && <div className="banner red" role="alert">{p.error}</div>}

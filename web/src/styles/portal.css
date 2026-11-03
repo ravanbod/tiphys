@@ -168,6 +168,7 @@ input.sw:checked{background:var(--ac)}input.sw:checked:after{left:15px}
 .tf-n small{font-size:11px;color:var(--tx3);overflow-wrap:anywhere}
 .tf-n small.r{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tf-n .p{font-size:11px;color:var(--red)}
+.tf-sep{margin-top:8px;padding-top:6px;border-top:1px dashed var(--ln);font-size:11px;color:var(--tx3)}
 .tf-more{align-self:flex-start;padding:0;border:0;background:none;font:inherit;font-size:11px;color:var(--ac);cursor:pointer}
 .tf-more:hover{text-decoration:underline}
 

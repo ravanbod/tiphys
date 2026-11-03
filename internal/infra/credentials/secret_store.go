@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,9 @@ const (
 	// EnvironmentAnnotation optionally sets the cluster's environment label;
 	// when present it wins over the Clusters page.
 	EnvironmentAnnotation = "tiphys/environment"
+	// ProtectedAnnotation set to "true" hides the cluster from access
+	// requests; grants on it still work.
+	ProtectedAnnotation = "tiphys/protected"
 	// KubeconfigKey is the Secret key that holds the kubeconfig.
 	KubeconfigKey = "kubeconfig"
 )
@@ -156,6 +160,35 @@ func (s *SecretStore) Environment(ctx context.Context, cluster string) (string, 
 	}
 	env := strings.TrimSpace(secs[0].Annotations[EnvironmentAnnotation])
 	return env, env != "", nil
+}
+
+// Protected reports whether the Secret Get uses has tiphys/protected set to
+// true. Any other value counts as not protected; one that is not a boolean is
+// reported once.
+func (s *SecretStore) Protected(ctx context.Context, cluster string) (bool, error) {
+	if err := validName(cluster); err != nil {
+		return false, err
+	}
+	secs, err := s.secretsFor(ctx, cluster)
+	if err != nil {
+		return false, err
+	}
+	if len(secs) == 0 {
+		return false, application.ErrNotFound
+	}
+	v, ok := secs[0].Annotations[ProtectedAnnotation]
+	if !ok {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		if _, seen := s.warned.LoadOrStore(secs[0].Name+"/"+ProtectedAnnotation+"="+v, struct{}{}); !seen {
+			s.logger.Warn("ignoring an invalid protected annotation, the cluster is not protected",
+				zap.String("secret", secs[0].Name), zap.String("annotation", ProtectedAnnotation), zap.String("value", v))
+		}
+		return false, nil
+	}
+	return b, nil
 }
 
 // List returns the names of all annotated clusters.

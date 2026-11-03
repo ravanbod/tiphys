@@ -9,6 +9,7 @@ import '@fontsource/ibm-plex-mono/600.css';
 import '@xterm/xterm/css/xterm.css';
 import './styles/portal.css';
 import './styles/app.css';
+import './styles/live.css';
 import { App } from './App';
 
 async function boot() {

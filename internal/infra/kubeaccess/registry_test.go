@@ -72,6 +72,10 @@ func (m *memStore) Environment(ctx context.Context, c string) (string, bool, err
 	_, err := m.Get(ctx, c)
 	return "", false, err
 }
+func (m *memStore) Protected(ctx context.Context, c string) (bool, error) {
+	_, err := m.Get(ctx, c)
+	return false, err
+}
 func (m *memStore) Watch(ctx context.Context, f func(string)) error {
 	m.mu.Lock()
 	m.onChange = f

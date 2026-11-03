@@ -92,6 +92,50 @@ func TestDecide_Scopes(t *testing.T) {
 	}
 }
 
+func TestDecide_ClusterAndEnvironmentScopes(t *testing.T) {
+	now := wed1000
+	f := fixture{
+		argo:    testArgo(now.Add(-time.Hour)), // stale: these scopes do not depend on Argo
+		protect: []string{"kube-system"},
+		clEnv:   map[string]string{"prod-1": "production", "prod-2": "staging"},
+		prjEnv:  map[string]string{"payments": "staging"},
+		nsEnv:   map[ClusterNS]string{{"prod-2", "hotfix"}: "production"},
+		grants: []Grant{
+			teamGrant(1, 10, Scope{Kind: ScopeCluster, Cluster: "prod-2"}, ActionLogs),
+			teamGrant(2, 10, Scope{Kind: ScopeEnvironment, Environment: "production"}, ActionExec),
+		},
+	}
+	p := f.policy()
+	api := WorkloadRef{KindDeployment, "api"}
+	cases := []struct {
+		name   string
+		target Target
+		action Action
+		allow  bool
+		reason Reason
+	}{
+		{"cluster grant allows any namespace", Target{Cluster: "prod-2", Namespace: "anything"}, ActionLogs, true, ReasonAllowed},
+		{"cluster grant allows workloads", Target{Cluster: "prod-2", Namespace: "anything", Workload: api}, ActionLogs, true, ReasonAllowed},
+		{"cluster grant misses other cluster", Target{Cluster: "prod-1", Namespace: "anything"}, ActionLogs, false, ReasonNoGrant},
+		{"cluster grant never covers protected", Target{Cluster: "prod-2", Namespace: "kube-system"}, ActionLogs, false, ReasonProtectedNamespace},
+		{"environment from cluster label", Target{Cluster: "prod-1", Namespace: "anything", Workload: api}, ActionExec, true, ReasonAllowed},
+		{"environment from namespace override", Target{Cluster: "prod-2", Namespace: "hotfix"}, ActionExec, true, ReasonAllowed},
+		{"project override moves namespace out", Target{Cluster: "prod-1", Namespace: "payments-api"}, ActionExec, false, ReasonNoGrant},
+		{"environment misses other environment", Target{Cluster: "prod-2", Namespace: "anything"}, ActionExec, false, ReasonNoGrant},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Decide(p, dev, c.target, c.action, now)
+			if d.Allowed != c.allow || d.Reason != c.reason {
+				t.Fatalf("got allowed=%v reason=%s, want allowed=%v reason=%s", d.Allowed, d.Reason, c.allow, c.reason)
+			}
+		})
+	}
+	if p.GrantReaches(f.grants[0], Target{Cluster: "prod-2"}) {
+		t.Error("a cluster grant must not reach a target without namespace")
+	}
+}
+
 func TestGrantReaches(t *testing.T) {
 	f := fixture{argo: testArgo(wed1000)}
 	p := f.policy()
@@ -175,8 +219,21 @@ func TestDecide_RolesAndProtected(t *testing.T) {
 	if d := Decide(p, Subject{ID: 2, Role: RoleAdmin}, ordinary, ActionExec, now); !d.Allowed || d.Reason != ReasonAdmin {
 		t.Errorf("admin: %+v", d)
 	}
-	if d := Decide(p, Subject{ID: 3, Role: RoleAuditor}, ordinary, ActionLogs, now); d.Allowed || d.Reason != ReasonRole {
-		t.Errorf("auditor: %+v", d)
+	// Auditors work like users: grants decide.
+	if d := Decide(p, Subject{ID: 3, Role: RoleAuditor}, ordinary, ActionLogs, now); d.Allowed || d.Reason != ReasonNoGrant {
+		t.Errorf("auditor without grant: %+v", d)
+	}
+	withGrant := fixture{grants: []Grant{
+		{ID: 1, HolderKind: HolderUser, UserID: 3, Scope: Scope{Kind: ScopeNamespace, Cluster: "c", Namespace: "ns"}, Actions: []Action{ActionExec}},
+	}}.policy()
+	if d := Decide(withGrant, Subject{ID: 3, Role: RoleAuditor}, ordinary, ActionExec, now); !d.Allowed || d.Reason != ReasonAllowed {
+		t.Errorf("auditor with grant: %+v", d)
+	}
+	if d := Decide(withGrant, Subject{ID: 3, Role: RoleAuditor}, ordinary, ActionRestart, now); d.Allowed || d.Reason != ReasonNoGrant {
+		t.Errorf("auditor beyond grant: %+v", d)
+	}
+	if d := Decide(withGrant, Subject{ID: 3, Role: "robot"}, ordinary, ActionExec, now); d.Allowed || d.Reason != ReasonRole {
+		t.Errorf("unknown role: %+v", d)
 	}
 	if d := Decide(p, Subject{ID: 2, Role: RoleAdmin, Disabled: true}, ordinary, ActionLogs, now); d.Allowed || d.Reason != ReasonUserDisabled {
 		t.Errorf("disabled admin: %+v", d)
@@ -496,6 +553,12 @@ func TestScopeValidate(t *testing.T) {
 		{Kind: ScopeNamespace, Cluster: "c", Namespace: "Bad_NS"},
 		{Kind: ScopeWorkloads, Cluster: "c", Namespace: "n"},
 		{Kind: ScopeWorkloads, Cluster: "c", Namespace: "n", Workloads: []WorkloadRef{{"Pod", "x"}}},
+		{Kind: ScopeCluster},
+		{Kind: ScopeCluster, Cluster: "c", Namespace: "n"},
+		{Kind: ScopeEnvironment},
+		{Kind: ScopeEnvironment, Environment: UnlabeledEnvironment},
+		{Kind: ScopeEnvironment, Environment: "prod", Cluster: "c"},
+		{Kind: ScopeNamespace, Cluster: "c", Namespace: "n", Environment: "prod"},
 		{Kind: "nope"},
 	}
 	for i, s := range bad {
@@ -503,9 +566,15 @@ func TestScopeValidate(t *testing.T) {
 			t.Errorf("case %d should be invalid: %+v", i, s)
 		}
 	}
-	good := Scope{Kind: ScopeWorkloads, Cluster: "c", Namespace: "n", Workloads: []WorkloadRef{{KindCronJob, "nightly"}}}
-	if err := good.Validate(); err != nil {
-		t.Errorf("valid scope: %v", err)
+	good := []Scope{
+		{Kind: ScopeWorkloads, Cluster: "c", Namespace: "n", Workloads: []WorkloadRef{{KindCronJob, "nightly"}}},
+		{Kind: ScopeCluster, Cluster: "c"},
+		{Kind: ScopeEnvironment, Environment: "prod"},
+	}
+	for _, s := range good {
+		if err := s.Validate(); err != nil {
+			t.Errorf("valid scope %+v: %v", s, err)
+		}
 	}
 }
 
@@ -594,7 +663,9 @@ func TestDecideApp(t *testing.T) {
 		{"an app deploying nowhere known is denied", nil,
 			Subject{ID: 2, Role: RoleAdmin}, ArgoApp{Name: "orphan", Project: "payments", Namespace: "x"},
 			false, ReasonAppScope, ClusterNS{"", "x"}},
-		{"auditor", nil, Subject{ID: 3, Role: RoleAuditor}, worker, false, ReasonRole, ClusterNS{"prod-1", "payments-worker"}},
+		{"auditor without grant", nil, Subject{ID: 3, Role: RoleAuditor}, worker, false, ReasonNoGrant, ClusterNS{"prod-1", "payments-worker"}},
+		{"auditor with the grants of a user", []Grant{teamGrant(1, 10, Scope{Kind: ScopeArgoProject, ArgoProject: "payments"}, ActionSync)},
+			Subject{ID: 3, Role: RoleAuditor, TeamIDs: []int64{10}}, worker, true, ReasonAllowed, ClusterNS{"prod-1", "payments-worker"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

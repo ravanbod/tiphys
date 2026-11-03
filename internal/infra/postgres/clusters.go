@@ -14,13 +14,13 @@ type clusterRepo struct{ q dbtx }
 var _ application.ClusterRepository = clusterRepo{}
 
 const clusterCols = `id, name, environment, kubeconfig_secret, kubernetes_version, last_check_at,
-	reachable, privilege_check_ok, admission_mode, created_at, updated_at, updated_by`
+	reachable, privilege_check_ok, admission_mode, protected, created_at, updated_at, updated_by`
 
 func scanCluster(row pgx.CollectableRow) (domain.Cluster, error) {
 	var c domain.Cluster
 	var mode string
 	err := row.Scan(&c.ID, &c.Name, &c.Environment, &c.KubeconfigSecret, &c.KubernetesVersion,
-		&c.LastCheckAt, &c.Reachable, &c.PrivilegeCheckOK, &mode, &c.CreatedAt, &c.UpdatedAt, &c.UpdatedBy)
+		&c.LastCheckAt, &c.Reachable, &c.PrivilegeCheckOK, &mode, &c.Protected, &c.CreatedAt, &c.UpdatedAt, &c.UpdatedBy)
 	c.AdmissionMode = domain.AdmissionMode(mode)
 	return c, err
 }
@@ -49,11 +49,11 @@ func (r clusterRepo) Create(ctx context.Context, c domain.Cluster) (domain.Clust
 	}
 	rows, err := r.q.Query(ctx, `
 		INSERT INTO clusters (name, environment, kubeconfig_secret, kubernetes_version, last_check_at,
-			reachable, privilege_check_ok, admission_mode, updated_by)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			reachable, privilege_check_ok, admission_mode, protected, updated_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING `+clusterCols,
 		c.Name, c.Environment, c.KubeconfigSecret, c.KubernetesVersion, c.LastCheckAt,
-		c.Reachable, c.PrivilegeCheckOK, string(c.AdmissionMode), c.UpdatedBy)
+		c.Reachable, c.PrivilegeCheckOK, string(c.AdmissionMode), c.Protected, c.UpdatedBy)
 	if err != nil {
 		return domain.Cluster{}, mapErr(err, "create cluster")
 	}
@@ -66,11 +66,11 @@ func (r clusterRepo) Create(ctx context.Context, c domain.Cluster) (domain.Clust
 func (r clusterRepo) Update(ctx context.Context, c domain.Cluster) error {
 	tag, err := r.q.Exec(ctx, `
 		UPDATE clusters SET environment = $2, kubeconfig_secret = $3, kubernetes_version = $4,
-			last_check_at = $5, reachable = $6, privilege_check_ok = $7, admission_mode = $8,
-			updated_at = now(), updated_by = COALESCE(NULLIF($9, ''), updated_by)
+			last_check_at = $5, reachable = $6, privilege_check_ok = $7, admission_mode = $8, protected = $9,
+			updated_at = now(), updated_by = COALESCE(NULLIF($10, ''), updated_by)
 		WHERE name = $1`,
 		c.Name, c.Environment, c.KubeconfigSecret, c.KubernetesVersion, c.LastCheckAt,
-		c.Reachable, c.PrivilegeCheckOK, string(c.AdmissionMode), c.UpdatedBy)
+		c.Reachable, c.PrivilegeCheckOK, string(c.AdmissionMode), c.Protected, c.UpdatedBy)
 	return affected(tag, err, "update cluster")
 }
 

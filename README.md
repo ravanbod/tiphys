@@ -132,6 +132,7 @@ metadata:
   annotations:
     tiphys/cluster: staging-1            # the cluster name (same as in Argo CD)
     tiphys/environment: staging          # optional: the cluster's environment
+    tiphys/protected: "true"             # optional: hide it from access requests
 type: Opaque
 stringData:
   kubeconfig: |
@@ -149,7 +150,12 @@ stringData:
 - The environment comes from the optional `tiphys/environment` annotation.
   While it is there it cannot be changed on the Clusters page, and changing it
   in the Secret changes the cluster (audited). Without it the environment is
-  set on the Clusters page. If a Secret is deleted
+  set on the Clusters page.
+- `tiphys/protected: "true"` hides the cluster from access requests: users and
+  auditors do not see it (or its namespaces) in the request form and requests
+  for it are refused, while admins still grant on it and grants work as
+  usual. It always follows the annotation (audited); removing the annotation
+  lifts it. If a Secret is deleted
   outside the portal the cluster stays, shown as "No credential", so its
   grants and history are kept; with UI registration off, delete the Secret
   first and then the cluster on the Clusters page.

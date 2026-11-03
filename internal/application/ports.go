@@ -43,6 +43,7 @@ type Repositories struct {
 	Clusters     ClusterRepository
 	Requests     AccessRequestRepository
 	BreakGlass   BreakGlassRepository
+	BGRequests   BreakGlassRequestRepository
 	ExecSessions ExecSessionRepository
 	Audit        AuditRepository
 	Settings     SettingsRepository
@@ -163,6 +164,21 @@ type BreakGlassRepository interface {
 	ListActive(ctx context.Context, t time.Time) ([]domain.BreakGlass, error)
 	// List returns recent break-glasses, newest first.
 	List(ctx context.Context, limit int) ([]domain.BreakGlass, error)
+}
+
+type BreakGlassRequestRepository interface {
+	Get(ctx context.Context, id int64) (domain.BreakGlassRequest, error)
+	// Create fails with ErrConflict if the user already has a pending request.
+	Create(ctx context.Context, r domain.BreakGlassRequest) (domain.BreakGlassRequest, error)
+	// List returns requests newest first. A zero userID means all users; an
+	// empty status means all statuses.
+	List(ctx context.Context, userID int64, status domain.RequestStatus, limit int) ([]domain.BreakGlassRequest, error)
+	// Decide sets the status and decision fields (approvedMinutes and
+	// breakGlassID only when approving). It fails with ErrConflict if the
+	// request is no longer pending.
+	Decide(ctx context.Context, id int64, status domain.RequestStatus, decidedBy, note string, approvedMinutes *int, breakGlassID *int64, at time.Time) error
+	// ExpirePendingBefore marks pending requests created before t as expired.
+	ExpirePendingBefore(ctx context.Context, t time.Time) (int64, error)
 }
 
 // ExecSessionFilter selects exec sessions. Zero fields are ignored.
@@ -558,6 +574,35 @@ type RolloutStatus struct {
 	Message                            string
 }
 
+// ChangeType says what a NamespaceChange is. The values are part of the API.
+type ChangeType string
+
+const (
+	ChangePodAdded        ChangeType = "pod_added"
+	ChangePodRemoved      ChangeType = "pod_removed"
+	ChangePodUpdated      ChangeType = "pod_updated"   // phase, readiness or terminating
+	ChangePodRestarted    ChangeType = "pod_restarted" // a container restarted
+	ChangeWorkload        ChangeType = "workload"      // the workload changed; Status is set when it was read
+	ChangeRolloutStarted  ChangeType = "rollout_started"
+	ChangeRolloutComplete ChangeType = "rollout_complete"
+	ChangeRolloutFailed   ChangeType = "rollout_failed"
+	ChangeEvent           ChangeType = "event" // a warning, or a CronJob's Job starting or finishing
+)
+
+// NamespaceChange is one change in a watched namespace, attributed to the
+// workload it belongs to.
+type NamespaceChange struct {
+	Workload  domain.WorkloadRef
+	Type      ChangeType
+	Pod       string
+	Phase     string         // pod changes: the pod's phase ("Terminating" while deleted)
+	Container string         // pod_restarted
+	Reason    string         // pod_restarted: how the container last ended (OOMKilled, Error, ...)
+	ExitCode  *int32         // pod_restarted
+	Status    *RolloutStatus // workload and rollout changes
+	Event     *EventInfo     // event
+}
+
 // ClusterProbe is the result of validating a kubeconfig or running the
 // periodic check.
 type ClusterProbe struct {
@@ -636,6 +681,10 @@ type ClusterAccess interface {
 	// WatchJob emits job status until it finishes, ctx is done or the
 	// timeout passes; the channel is closed at the end.
 	WatchJob(ctx context.Context, actor KubeActor, cluster, namespace, job string, timeout time.Duration) (<-chan JobInfo, error)
+	// WatchNamespace streams what changes in the namespace's workloads (pods,
+	// rollouts, notable events) until ctx is done; the channel is closed at
+	// the end. Changes that belong to no workload are dropped.
+	WatchNamespace(ctx context.Context, actor KubeActor, cluster, namespace string) (<-chan NamespaceChange, error)
 
 	// --- cluster lifecycle (not tied to a user action) ---
 
@@ -665,6 +714,10 @@ type CredentialStore interface {
 	// Secret's tiphys/environment annotation); ok is false when it carries
 	// none. ErrNotFound when there is no credential.
 	Environment(ctx context.Context, cluster string) (environment string, ok bool, err error)
+	// Protected reports whether the credential marks the cluster protected
+	// (the Secret's tiphys/protected annotation is "true"): hidden from access
+	// requests. ErrNotFound when there is no credential.
+	Protected(ctx context.Context, cluster string) (bool, error)
 	// Watch calls onChange(cluster) whenever a credential is added, changed
 	// or removed, until ctx is done.
 	Watch(ctx context.Context, onChange func(cluster string)) error

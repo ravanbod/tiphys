@@ -1,0 +1,49 @@
+/* Live updates: the top bar mark, row and value animations, change toasts */
+.live{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid var(--ln);border-radius:13px;background:var(--sf);color:var(--tx2);font:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
+.live:hover{background:var(--sf2)}
+.live.is-live{border-color:color-mix(in srgb,var(--grn) 45%,var(--ln));color:var(--grn)}
+.live[aria-pressed="true"]{color:var(--tx3);border-color:var(--ln)}
+.live-dot{position:relative;width:8px;height:8px;border-radius:50%;background:var(--tx3);flex:none}
+.live.is-live .live-dot{background:var(--grn)}
+.live.is-live .live-dot:after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--grn);animation:live-ping 1.8s cubic-bezier(0,0,.2,1) infinite}
+.live.is-connecting .live-dot,.live.is-down .live-dot{background:var(--prod);animation:live-blink 1.2s ease-in-out infinite}
+.live[aria-pressed="true"] .live-dot:after{animation:none}
+
+.tbl tr.live-changed td{animation:live-flash 1.6s ease-out}
+.tbl tr.live-enter td{animation:live-enter .45s cubic-bezier(.2,.8,.2,1),live-flash 1.6s ease-out}
+.tbl tr.live-leave td{animation:live-leave .4s ease-in forwards;pointer-events:none}
+.bump{display:inline-block;animation:live-bump .6s cubic-bezier(.3,1.5,.6,1)}
+
+.toast-slot:empty{display:none}
+.ltoasts{display:flex;flex-direction:column;gap:6px}
+.ltoasts-bar{display:flex;align-items:center;gap:10px;align-self:flex-end;font-size:11.5px;color:var(--tx3);padding:4px 10px;background:var(--sf);border:1px solid var(--ln);border-radius:14px;box-shadow:0 4px 14px rgba(10,14,20,.12);animation:toast-in .3s ease-out}
+.ltoasts-bar .grow{display:none}
+.ltoasts-bar .linklike{display:inline-flex;align-items:center;gap:4px;color:var(--tx2);font-weight:500}
+.ltoasts-more{font-weight:600;color:var(--tx2)}
+.ltoast{display:flex;align-items:flex-start;gap:10px;background:var(--sf);color:var(--tx);border:1px solid var(--ln);border-left:3px solid var(--ac);border-radius:8px;padding:9px 10px 9px 12px;box-shadow:0 8px 24px rgba(10,14,20,.16);font-size:12.5px;animation:toast-in .4s cubic-bezier(.2,.9,.25,1.15)}
+.ltoast.ok{border-left-color:var(--grn)}
+.ltoast.err{border-left-color:var(--red)}
+.ltoast.leaving{animation:toast-out .25s ease-in forwards}
+.ltoast .dot{margin-top:5px}
+.ltoast-body{flex:1;min-width:0}
+.app .ltoast-t{color:var(--tx);font-weight:600;font-size:12.5px;text-decoration:none;overflow-wrap:anywhere}
+.app .ltoast-t:hover{text-decoration:underline}
+.ltoast-n{margin-left:6px;padding:0 6px;border-radius:8px;background:var(--sf2);color:var(--tx2);font-size:11px;font-weight:600}
+.ltoast-d{color:var(--tx3);margin-top:2px;overflow-wrap:anywhere}
+.ltoast-x{background:none;border:0;padding:2px;color:var(--tx3);cursor:pointer;border-radius:4px;display:flex}
+.ltoast-x:hover{background:var(--sf2);color:var(--tx)}
+
+@keyframes live-ping{0%{transform:scale(1);opacity:.65}80%,100%{transform:scale(2.6);opacity:0}}
+@keyframes live-blink{50%{opacity:.35}}
+@keyframes live-flash{0%,35%{background:var(--acbg)}100%{background:transparent}}
+@keyframes live-enter{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+@keyframes live-leave{to{opacity:0;transform:translateX(12px)}}
+@keyframes live-bump{0%{transform:scale(1)}35%{transform:scale(1.25);color:var(--ac)}100%{transform:scale(1)}}
+@keyframes toast-in{from{opacity:0;transform:translateX(28px) scale(.96)}to{opacity:1;transform:none}}
+@keyframes toast-out{to{opacity:0;transform:translateX(28px) scale(.96)}}
+
+@media (prefers-reduced-motion:reduce){
+  .live-dot,.live-dot:after,.tbl tr[class*="live-"] td,.bump,.ltoast,.ltoasts-bar{animation:none!important}
+  .tbl tr.live-changed td,.tbl tr.live-enter td{background:var(--acbg)}
+  .tbl tr.live-leave td{opacity:.4}
+}

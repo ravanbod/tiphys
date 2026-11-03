@@ -1,7 +1,7 @@
 import { del, get, patch, post, put, request, requestText } from './client';
 import { kindSegment, qs, seg } from './query';
 import type {
-  AccessCheckInput, AccessGrant, AccessRequest, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoStatus, AuditFilters, AuditPage, BreakGlass,
+  AccessCheckInput, AccessGrant, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
   CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CronJobSummary, DecisionExplain,
   EnvironmentOverride, EnvironmentOverrideInput, ExecSessionDetail, ExecSessionView, GrantFilters, GrantInput,
   GrantView, HolidayInput, HolidayView, K8sEvent, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
@@ -89,12 +89,18 @@ export const api = {
   myAccess: () => get<MyAccess>('/my/access'),
   accessRequests: (status?: string) => get<AccessRequest[]>(`/access-requests${qs({ status })}`),
   createAccessRequest: (b: CreateAccessRequest) => post<AccessRequest>('/access-requests', b),
-  approveRequest: (id: number, b: { note?: string; durationHours?: number | null }) =>
+  approveRequest: (id: number, b: { note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean }) =>
     post<AccessRequest>(`/access-requests/${id}/approve`, b),
   rejectRequest: (id: number, b: { note?: string }) => post<AccessRequest>(`/access-requests/${id}/reject`, b),
   startBreakGlass: (b: { reason: string; durationMinutes?: number }) => post<BreakGlass>('/break-glass', b),
   endBreakGlass: (id: number) => post<BreakGlass>(`/break-glass/${id}/end`),
   breakGlasses: () => get<BreakGlass[]>('/break-glass'),
+  requestBreakGlass: (b: { reason: string; durationMinutes?: number }) => post<BreakGlassRequest>('/break-glass/requests', b),
+  breakGlassRequests: (status?: string) => get<BreakGlassRequest[]>(`/break-glass/requests${qs({ status })}`),
+  approveBreakGlassRequest: (id: number, b: { note?: string; durationMinutes?: number }) =>
+    post<BreakGlassRequest>(`/break-glass/requests/${id}/approve`, b),
+  rejectBreakGlassRequest: (id: number, b: { note?: string }) => post<BreakGlassRequest>(`/break-glass/requests/${id}/reject`, b),
+  cancelBreakGlassRequest: (id: number) => post<BreakGlassRequest>(`/break-glass/requests/${id}/cancel`),
 
   // ---- sessions, audit
   sessions: (f: SessionFilters = {}) => get<ExecSessionView[]>(`/sessions${qs(f)}`),

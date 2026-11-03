@@ -122,12 +122,24 @@ func (h *Handler) Me(c *gin.Context) {
 		bg = &d
 	}
 	st := h.svc.Settings.Get()
+	var bgReq *breakGlassRequestDTO
+	if p.User.Role.UsesGrants() && st.BreakGlassMode.Enabled() {
+		r, err := h.svc.BreakGlass.PendingFor(c.Request.Context(), p.User.ID)
+		if err != nil {
+			h.writeError(c, err)
+			return
+		}
+		if r != nil {
+			d := toBreakGlassRequest(*r, st.BreakGlassRequestMaxAgeMin)
+			bgReq = &d
+		}
+	}
 	argo := toArgoStatus(h.svc.Argo.Status())
 	argo.AppCount, argo.ProjectCount, argo.LastError = 0, 0, nil
 	c.JSON(http.StatusOK, meDTO{
 		ID: p.User.ID, Username: p.User.Username, DisplayName: p.User.DisplayName, Role: p.User.Role, Teams: teams,
-		CSRFToken: p.CSRFToken, BreakGlass: bg, Argo: argo,
-		Settings: meSettingsDTO{BreakGlassEnabled: st.BreakGlassEnabled, BreakGlassDefaultMinutes: st.BreakGlassDefaultMin, BreakGlassMaxMinutes: st.BreakGlassMaxMinutes,
+		CSRFToken: p.CSRFToken, BreakGlass: bg, BreakGlassRequest: bgReq, Argo: argo,
+		Settings: meSettingsDTO{BreakGlassMode: st.BreakGlassMode, BreakGlassDefaultMinutes: st.BreakGlassDefaultMin, BreakGlassMaxMinutes: st.BreakGlassMaxMinutes,
 			ExecIdleTimeoutMinutes: st.ExecIdleTimeoutMinutes, ExecMaxSessionMinutes: st.ExecMaxSessionMinutes,
 			ClusterRegistration: h.opts.ClusterRegistrationFromUI, DebugEnabled: h.opts.DebugEnabled, ArgoURL: h.opts.ArgoPublicURL,
 			LocalUsers: h.svc.Auth.LocalUsersEnabled()},
@@ -162,9 +174,10 @@ func (h *Handler) workloadRef(c *gin.Context) (domain.WorkloadRef, bool) {
 	return domain.WorkloadRef{Kind: k, Name: c.Param("name")}, true
 }
 
-// userOnly rejects auditors on developer endpoints.
-func (h *Handler) userOrAdmin() gin.HandlerFunc {
-	return h.requireRoles(domain.RoleUser, domain.RoleAdmin)
+// worker admits everyone who works on workloads: users and auditors through
+// their grants (decided per request), admins everywhere.
+func (h *Handler) worker() gin.HandlerFunc {
+	return h.requireRoles(domain.RoleUser, domain.RoleAuditor, domain.RoleAdmin)
 }
 
 func (h *Handler) Apps(c *gin.Context) {
@@ -456,12 +469,16 @@ func (h *Handler) CatalogProjects(c *gin.Context) {
 
 func (h *Handler) CatalogClusters(c *gin.Context) {
 	snap := h.svc.Policy.Current()
+	p := principal(c)
 	type row struct {
 		Name        string `json:"name"`
 		Environment string `json:"environment"`
 	}
 	out := []row{}
 	for _, cl := range snap.Clusters {
+		if h.svc.Access.HiddenCluster(p, cl.Name) {
+			continue
+		}
 		out = append(out, row{Name: cl.Name, Environment: cl.Environment})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -484,6 +501,10 @@ func (h *Handler) CatalogWorkloads(c *gin.Context) {
 	}
 	if h.svc.Access.IsProtected(ns) {
 		h.writeError(c, &application.DeniedError{Decision: domain.Decision{Reason: domain.ReasonProtectedNamespace}})
+		return
+	}
+	if h.svc.Access.HiddenCluster(p, cluster) {
+		h.writeError(c, application.ErrNotFound)
 		return
 	}
 	infos, err := h.svc.Kube.ListWorkloads(c.Request.Context(), p.KubeActor(nil), cluster, ns)
@@ -528,7 +549,7 @@ func (h *Handler) MyAccess(c *gin.Context) {
 	for _, id := range snap.TeamIDsByUser[p.User.ID] {
 		teams = append(teams, idName{ID: id, Name: snap.Teams[id].Name})
 	}
-	reqs, err := h.svc.Requests.List(c.Request.Context(), p, "")
+	reqs, err := h.svc.Requests.ListOwn(c.Request.Context(), p)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -648,11 +669,11 @@ func (h *Handler) ApproveRequest(c *gin.Context) {
 	}
 	raw := map[string]any{}
 	_ = c.ShouldBindJSON(&raw)
-	var narrow []domain.Action
+	var actions []domain.Action
 	if l, ok := raw["actions"].([]any); ok {
 		for _, v := range l {
 			if str, ok := v.(string); ok {
-				narrow = append(narrow, domain.Action(str))
+				actions = append(actions, domain.Action(str))
 			}
 		}
 	}
@@ -664,7 +685,8 @@ func (h *Handler) ApproveRequest(c *gin.Context) {
 		n := int(f)
 		in.DurationHours = &n
 	}
-	r, err := h.svc.Requests.Approve(c.Request.Context(), principal(c), id, in.Note, override, in.DurationHours, narrow)
+	separate, _ := raw["separate"].(bool)
+	r, err := h.svc.Requests.Approve(c.Request.Context(), principal(c), id, in.Note, override, in.DurationHours, actions, separate)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -716,6 +738,85 @@ func (h *Handler) EndBreakGlass(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) RequestBreakGlass(c *gin.Context) {
+	var in struct {
+		Reason          string `json:"reason"`
+		DurationMinutes int    `json:"durationMinutes"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		h.writeError(c, application.Invalid("body", "invalid JSON body"))
+		return
+	}
+	r, err := h.svc.BreakGlass.Request(c.Request.Context(), principal(c), in.Reason, in.DurationMinutes)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, toBreakGlassRequest(r, h.svc.Settings.Get().BreakGlassRequestMaxAgeMin))
+}
+
+func (h *Handler) ListBreakGlassRequests(c *gin.Context) {
+	list, err := h.svc.BreakGlass.Requests(c.Request.Context(), principal(c), domain.RequestStatus(c.Query("status")))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	maxAge := h.svc.Settings.Get().BreakGlassRequestMaxAgeMin
+	out := make([]breakGlassRequestDTO, len(list))
+	for i, r := range list {
+		out[i] = toBreakGlassRequest(r, maxAge)
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) ApproveBreakGlassRequest(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		Note            string `json:"note"`
+		DurationMinutes int    `json:"durationMinutes"` // 0: as requested
+	}
+	_ = c.ShouldBindJSON(&in)
+	r, err := h.svc.BreakGlass.Approve(c.Request.Context(), principal(c), id, in.Note, in.DurationMinutes)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toBreakGlassRequest(r, h.svc.Settings.Get().BreakGlassRequestMaxAgeMin))
+}
+
+func (h *Handler) RejectBreakGlassRequest(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		Note string `json:"note"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	r, err := h.svc.BreakGlass.Reject(c.Request.Context(), principal(c), id, in.Note)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toBreakGlassRequest(r, h.svc.Settings.Get().BreakGlassRequestMaxAgeMin))
+}
+
+func (h *Handler) CancelBreakGlassRequest(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	r, err := h.svc.BreakGlass.Cancel(c.Request.Context(), principal(c), id)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toBreakGlassRequest(r, h.svc.Settings.Get().BreakGlassRequestMaxAgeMin))
 }
 
 func (h *Handler) ListBreakGlass(c *gin.Context) {

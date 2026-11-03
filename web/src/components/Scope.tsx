@@ -4,19 +4,23 @@ export const SCOPE_KIND_LABEL: Record<ScopeView['kind'], string> = {
   argo_project: 'Argo project',
   namespace: 'Namespace',
   workloads: 'Workloads',
+  cluster: 'Cluster',
+  environment: 'Environment',
 };
 
-/** Main identifier of a scope: project name, namespace, or "N in namespace". */
+/** Main identifier of a scope: project, environment, cluster, namespace, or "N in namespace". */
 export function scopeName(s: ScopeView): string {
   if (s.kind === 'argo_project') return s.argoProject ?? '';
+  if (s.kind === 'environment') return s.environment ?? '';
+  if (s.kind === 'cluster') return s.cluster ?? '';
   if (s.kind === 'namespace') return s.namespace ?? '';
   const n = s.workloads?.length ?? 0;
   return n === 1 ? (s.workloads?.[0].name ?? '') : `${n} in ${s.namespace ?? ''}`;
 }
 
-/** Cluster text for a scope ("all clusters" for Argo project scopes). */
+/** Cluster text for a scope ("all clusters" for Argo project and environment scopes). */
 export function scopeCluster(s: ScopeView): string {
-  return s.kind === 'argo_project' ? 'all clusters' : (s.cluster ?? '');
+  return s.kind === 'argo_project' || s.kind === 'environment' ? 'all clusters' : (s.cluster ?? '');
 }
 
 /** `[Argo project] payments` as in the grant tables. */
@@ -32,6 +36,8 @@ export function ScopeCell({ scope, struck }: { scope: ScopeView; struck?: boolea
 /** Plain-language sentence part, e.g. "Argo project payments (all clusters)". */
 export function describeScope(s: ScopeView): string {
   if (s.kind === 'argo_project') return `Argo project ${s.argoProject} (all clusters)`;
+  if (s.kind === 'environment') return `every namespace in environment ${s.environment} (all clusters)`;
+  if (s.kind === 'cluster') return `every namespace on cluster ${s.cluster}`;
   if (s.kind === 'namespace') return `namespace ${s.namespace} on cluster ${s.cluster}`;
   const names = (s.workloads ?? []).map((w) => w.name).join(', ');
   return `${s.workloads?.length ?? 0} workload(s) (${names}) in namespace ${s.namespace} on cluster ${s.cluster}`;

@@ -4,15 +4,16 @@ import { useBreakGlass } from '../context/breakglass';
 import { explainDecision } from '../lib/decision';
 import { Icon } from './Icon';
 import { Link } from 'react-router-dom';
+import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 const LABEL: Record<Action, string> = { logs: 'Logs', exec: 'Exec', restart: 'Restart', 'run-job': 'Run', sync: 'Sync' };
 
 /** Visible reasons for every denied action on a workload (so disabled buttons are never a mystery). */
 export function AccessHints({ access, target, actions }: { access: Partial<Record<Action, DecisionInfo>>; target: string; actions: Action[] }) {
-  const { role, me } = useAuth();
+  const { usesGrants, me } = useAuth();
   const bg = useBreakGlass();
   const rows = actions
-    .map((a) => ({ a, e: explainDecision(access[a], { action: a, target, canBreakGlass: role === 'user' && me.settings.breakGlassEnabled }) }))
+    .map((a) => ({ a, e: explainDecision(access[a], { action: a, target, canBreakGlass: usesGrants && breakGlassOn(me) }) }))
     .filter((x) => x.e);
   if (rows.length === 0) return null;
   return (
@@ -23,7 +24,7 @@ export function AccessHints({ access, target, actions }: { access: Partial<Recor
           <b>{LABEL[a]}:</b> <span>{e!.text}</span>
           {e!.cta === 'request' && <Link to="/access?request=1">Request access</Link>}
           {e!.cta === 'breakglass' && (
-            <button type="button" className="linklike blue" onClick={() => bg.open({ action: a, target, environment: access[a]?.environment ?? '' })}>Use break-glass</button>
+            <button type="button" className="linklike blue" onClick={() => bg.open({ action: a, target, environment: access[a]?.environment ?? '' })}>{breakGlassLabel(me)}</button>
           )}
         </li>
       ))}

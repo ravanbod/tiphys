@@ -1,10 +1,11 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { api } from '../../api';
-import type { RocketEvent, SettingsView } from '../../api';
+import type { BreakGlassMode, RocketEvent, SettingsView } from '../../api';
 import { AdminErrorBanner, FieldError, ReadOnlyNote } from '../../components/AdminPieces';
 import { ErrorBanner, Loading } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
 import { PageHeader } from '../../components/PageHeader';
+import { Seg } from '../../components/Seg';
 import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
 import { useApi } from '../../hooks/useApi';
@@ -16,12 +17,13 @@ type NumKey =
   | 'execIdleTimeoutMinutes'
   | 'breakGlassDefaultMinutes'
   | 'breakGlassMaxMinutes'
+  | 'breakGlassRequestMaxAgeMinutes'
   | 'retentionAuditDays'
   | 'retentionRecordingsDays';
 
 const NUM_KEYS: NumKey[] = [
   'execMaxSessionMinutes', 'execIdleTimeoutMinutes', 'breakGlassDefaultMinutes', 'breakGlassMaxMinutes',
-  'retentionAuditDays', 'retentionRecordingsDays',
+  'breakGlassRequestMaxAgeMinutes', 'retentionAuditDays', 'retentionRecordingsDays',
 ];
 
 const NUM_LABEL: Record<NumKey, string> = {
@@ -29,20 +31,28 @@ const NUM_LABEL: Record<NumKey, string> = {
   execIdleTimeoutMinutes: 'Idle timeout',
   breakGlassDefaultMinutes: 'Break-glass default duration',
   breakGlassMaxMinutes: 'Break-glass maximum duration',
+  breakGlassRequestMaxAgeMinutes: 'Requests expire after',
   retentionAuditDays: 'Audit events',
   retentionRecordingsDays: 'Session recordings',
 };
 
 const EVENTS: { key: RocketEvent; label: string; recommended?: boolean }[] = [
   { key: 'break_glass_started', label: 'Break-glass started', recommended: true },
+  { key: 'break_glass_requested', label: 'Break-glass requested', recommended: true },
   { key: 'request_created', label: 'Access request created' },
   { key: 'request_decided', label: 'Access request decided' },
   { key: 'exec_in_prod', label: 'Exec opened in prod' },
   { key: 'admin_changes', label: 'Admin changes to grants or roles' },
 ];
 
+const MODE_TEXT: Record<BreakGlassMode, string> = {
+  off: 'Off: nobody can start break-glass, and ones already active stop working as soon as you save, ending sessions that depended on them. Exec, restart and run-job stay closed outside their windows.',
+  self: 'Users can override time windows and holidays for a limited time, with a reason, without approval. The platform team is notified.',
+  approval: 'Users request break-glass with a reason and a duration; it starts when an admin approves it on the Access requests page, for that duration or one the admin sets. Break-glasses already active keep working.',
+};
+
 interface Draft {
-  breakGlassEnabled: boolean;
+  breakGlassMode: BreakGlassMode;
   nums: Record<NumKey, string>;
   webhookUrl: string;
   channel: string;
@@ -54,7 +64,7 @@ function toDraft(s: SettingsView): Draft {
   NUM_KEYS.forEach((k) => {
     nums[k] = String(s[k]);
   });
-  return { breakGlassEnabled: s.breakGlassEnabled, nums, webhookUrl: s.rocket.webhookUrl, channel: s.rocket.channel, events: { ...s.rocket.events } };
+  return { breakGlassMode: s.breakGlassMode, nums, webhookUrl: s.rocket.webhookUrl, channel: s.rocket.channel, events: { ...s.rocket.events } };
 }
 
 function validate(d: Draft): Record<string, string> {
@@ -70,7 +80,7 @@ function validate(d: Draft): Record<string, string> {
 }
 
 function toSettings(d: Draft, base: SettingsView): SettingsView {
-  const out: SettingsView = { ...base, breakGlassEnabled: d.breakGlassEnabled, rocket: { webhookUrl: d.webhookUrl.trim(), channel: d.channel.trim(), events: { ...d.events } } };
+  const out: SettingsView = { ...base, breakGlassMode: d.breakGlassMode, rocket: { webhookUrl: d.webhookUrl.trim(), channel: d.channel.trim(), events: { ...d.events } } };
   NUM_KEYS.forEach((k) => {
     out[k] = Number(d.nums[k]);
   });
@@ -79,7 +89,7 @@ function toSettings(d: Draft, base: SettingsView): SettingsView {
 
 function sameDraft(a: Draft, b: Draft): boolean {
   return (
-    a.breakGlassEnabled === b.breakGlassEnabled &&
+    a.breakGlassMode === b.breakGlassMode &&
     NUM_KEYS.every((k) => a.nums[k].trim() === b.nums[k].trim()) &&
     a.webhookUrl.trim() === b.webhookUrl.trim() &&
     a.channel.trim() === b.channel.trim() &&
@@ -113,9 +123,9 @@ export function Settings() {
     setDraft((d) => d && { ...d, nums: { ...d.nums, [k]: v } });
   };
 
-  const setBreakGlass = (on: boolean) => {
+  const setBreakGlass = (mode: BreakGlassMode) => {
     save.clear();
-    setDraft((d) => d && { ...d, breakGlassEnabled: on });
+    setDraft((d) => d && { ...d, breakGlassMode: mode });
   };
 
   const submit = async () => {
@@ -187,23 +197,25 @@ export function Settings() {
           <div className="card">
             <div className="hd">Break-glass</div>
             <div className="bd col" style={{ gap: 8 }}>
-              <label className="row">
-                <input
-                  className="sw"
-                  type="checkbox"
-                  role="switch"
-                  checked={draft.breakGlassEnabled}
-                  disabled={!isAdmin}
-                  onChange={(e) => setBreakGlass(e.target.checked)}
-                />
-                <span>Allow break-glass</span>
-              </label>
+              <Seg
+                label="Break-glass"
+                style={{ alignSelf: 'flex-start' }}
+                disabled={!isAdmin}
+                value={draft.breakGlassMode}
+                onChange={setBreakGlass}
+                options={[
+                  { value: 'off', label: 'Off' },
+                  { value: 'self', label: 'Immediate' },
+                  { value: 'approval', label: 'Requires approval' },
+                ]}
+              />
               <div className="muted" style={{ fontSize: 12 }}>
-                {draft.breakGlassEnabled
-                  ? 'Users can override time windows and holidays for a limited time, with a reason, and the platform team is notified.'
-                  : 'Off: nobody can start break-glass, and ones already active stop working as soon as you save, ending sessions that depended on them. Exec, restart and run-job stay closed outside their windows.'}
+                {MODE_TEXT[draft.breakGlassMode]}
                 {' '}Reading logs is never limited by time windows, so it never needs break-glass.
               </div>
+              {draft.breakGlassMode === 'approval' && (
+                <NumField k="breakGlassRequestMaxAgeMinutes" unit="minutes" value={draft.nums.breakGlassRequestMaxAgeMinutes} error={errs('breakGlassRequestMaxAgeMinutes')} readOnly={!isAdmin} onChange={setNum} />
+              )}
             </div>
           </div>
 

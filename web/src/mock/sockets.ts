@@ -1,4 +1,4 @@
-import type { EndReason, ServerControl } from '../api/types';
+import type { EndReason, K8sEvent, ServerControl } from '../api/types';
 import { kindFromSegment } from '../api/query';
 import { CSRF, MIN, currentUser, getDb } from './db';
 import { decide } from './decide';
@@ -380,8 +380,88 @@ class FakeEventSource {
   }
 }
 
+/**
+ * GET /live: every few seconds something happens in one of the followed
+ * namespaces (a container restart, a rollout, a warning, a CronJob run). The
+ * mock data is changed to match, so the refetches show it.
+ */
+class FakeLiveSource {
+  readyState = 0;
+  onerror: Listener | null = null;
+  private ls: Record<string, ((e: MessageEvent) => void)[]> = {};
+  private timers: number[] = [];
+  private keys: string[];
+  private rolling = new Set<string>();
+  constructor(url: string) {
+    this.keys = new URL(url, window.location.href).searchParams.getAll('ns');
+    this.timers.push(window.setTimeout(() => this.start(), 250));
+  }
+  addEventListener(t: string, fn: (e: MessageEvent) => void) { (this.ls[t] ??= []).push(fn); }
+  removeEventListener(t: string, fn: (e: MessageEvent) => void) { this.ls[t] = (this.ls[t] ?? []).filter((f) => f !== fn); }
+  close() { this.readyState = 2; this.timers.forEach((t) => window.clearTimeout(t)); }
+  private emit(type: string, data: unknown) {
+    if (this.readyState === 2) return;
+    for (const f of this.ls[type] ?? []) f(new MessageEvent(type, { data: JSON.stringify(data) }));
+  }
+  private later(ms: number, fn: () => void) { this.timers.push(window.setTimeout(fn, ms)); }
+  private start() {
+    const d = getDb();
+    this.readyState = 1;
+    this.emit('ready', { namespaces: this.keys.map((k) => {
+      const [cluster, namespace] = k.split('/');
+      return { cluster, namespace, ...(d.namespaces.some((n) => n.cluster === cluster && n.namespace === namespace) ? {} : { error: 'not_found' }) };
+    }) });
+    this.later(2500, () => this.tick());
+  }
+  private tick() {
+    this.later(5000 + Math.random() * 4000, () => this.tick());
+    const d = getDb();
+    const nss = this.keys.map((k) => d.namespaces.find((n) => `${n.cluster}/${n.namespace}` === k)).filter((n) => !!n);
+    const n = nss[Math.floor(Math.random() * nss.length)];
+    if (!n) return;
+    const wls = n.workloads.filter((w) => w.kind !== 'CronJob' && w.desired > 0 && !this.rolling.has(w.name));
+    const crons = n.workloads.filter((w) => w.kind === 'CronJob');
+    const w = wls[Math.floor(Math.random() * wls.length)];
+    const r = Math.random();
+    const at = (c: { kind: string; name: string }) => ({ cluster: n.cluster, namespace: n.namespace, kind: c.kind, name: c.name });
+    if (crons.length && (r > 0.85 || !w)) {
+      const cj = crons[Math.floor(Math.random() * crons.length)];
+      const job = `${cj.name}-${Math.floor(Date.now() / 60000)}`;
+      const ev: K8sEvent = { type: 'Normal', reason: 'SuccessfulCreate', message: `Created job ${job}`, object: `CronJob/${cj.name}`, count: 1, firstSeen: iso(Date.now()), lastSeen: iso(Date.now()) };
+      this.emit('change', { ...at(cj), type: 'event', event: ev });
+      return;
+    }
+    if (!w) return;
+    const pod0 = w.kind === 'StatefulSet' ? `${w.name}-0` : `${w.name}-7d9c6b5f4-2kq8x`;
+    if (r < 0.4) {
+      w.liveRestarts = (w.liveRestarts ?? 0) + 1;
+      this.emit('change', { ...at(w), type: 'pod_restarted', pod: pod0, phase: 'Running', container: 'app', reason: 'OOMKilled', exitCode: 137 });
+    } else if (r < 0.7) {
+      const status = (updated: number, ready: number, complete = false) => ({ desired: w.desired, updated, ready, available: ready, complete, failed: false, message: complete ? 'rollout complete' : `${updated} of ${w.desired} replicas updated` });
+      const surge = `${w.name}-5c8f7d6b9-n3w7p`;
+      this.rolling.add(w.name);
+      w.liveSurge = true;
+      this.emit('change', { ...at(w), type: 'rollout_started', status: status(0, w.ready) });
+      this.emit('change', { ...at(w), type: 'pod_added', pod: surge, phase: 'Pending' });
+      this.later(3000, () => this.emit('change', { ...at(w), type: 'pod_updated', pod: surge, phase: 'Running' }));
+      this.later(5500, () => {
+        w.liveSurge = false;
+        this.rolling.delete(w.name);
+        this.emit('change', { ...at(w), type: 'pod_removed', pod: surge });
+        this.emit('change', { ...at(w), type: 'rollout_complete', status: status(w.desired, w.ready, true) });
+      });
+    } else {
+      const now = iso(Date.now());
+      const ev: K8sEvent = { type: 'Warning', reason: 'BackOff', message: `Back-off restarting failed container app in pod ${pod0}`, object: `Pod/${pod0}`, count: 1, firstSeen: now, lastSeen: now };
+      w.liveEvents = [ev, ...(w.liveEvents ?? [])].slice(0, 10);
+      this.emit('change', { ...at(w), type: 'event', pod: pod0, event: ev });
+    }
+  }
+}
+
 export function makePatchedEventSource(Real: typeof EventSource): typeof EventSource {
   const P = function (url: string | URL, init?: EventSourceInit) {
+    if (String(url).includes('/api/v1/live')) return new FakeLiveSource(String(url));
     if (String(url).includes('/api/v1/operations/')) return new FakeEventSource(String(url));
     return new Real(url, init);
   } as unknown as typeof EventSource;

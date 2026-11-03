@@ -118,7 +118,7 @@ export function buildSteps(
   } else if (reason === 'user_disabled') {
     steps.push({ id: 'user', tone: 'err', title: 'User disabled', detail: 'A disabled user cannot do anything.' });
   } else if (reason === 'role') {
-    steps.push({ id: 'user', tone: 'err', title: 'Role does not allow it', detail: `Role ${d.userRole}: auditors cannot use workloads.` });
+    steps.push({ id: 'user', tone: 'err', title: 'Role does not allow it', detail: `Role ${d.userRole} cannot use workloads.` });
   } else {
     steps.push({
       id: 'user', tone: 'ok', title: 'User and role',

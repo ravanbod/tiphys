@@ -3,6 +3,7 @@ package kubeaccess
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -14,6 +15,10 @@ import (
 )
 
 const maxPollErrors = 3
+
+// deploymentRevision is the annotation the Deployment controller increments
+// with every new pod template.
+const deploymentRevision = "deployment.kubernetes.io/revision"
 
 // WatchRollout polls the workload and emits a status whenever it changes,
 // until the rollout completes, fails, ctx is done or the deadline passes. At
@@ -101,6 +106,15 @@ func (a *Access) progressDeadline(ctx context.Context, c *clients, w application
 }
 
 func (a *Access) rolloutStatus(ctx context.Context, c *clients, w application.KubeWorkloadTarget) (application.RolloutStatus, error) {
+	s, _, err := a.rolloutState(ctx, c, w)
+	return s, err
+}
+
+// rolloutState reads the workload's rollout status and its revision, which
+// changes with every new pod template or restart: the Deployment revision,
+// the StatefulSet update revision, the DaemonSet generation, the Rollout's
+// pod hash and restartAt.
+func (a *Access) rolloutState(ctx context.Context, c *clients, w application.KubeWorkloadTarget) (application.RolloutStatus, string, error) {
 	ctx, cancel := callCtx(ctx)
 	defer cancel()
 	ns, name := w.Namespace, w.Workload.Name
@@ -108,28 +122,34 @@ func (a *Access) rolloutStatus(ctx context.Context, c *clients, w application.Ku
 	case domain.KindDeployment:
 		o, err := c.kube.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return application.RolloutStatus{}, a.fail("get deployment", w.Cluster, err)
+			return application.RolloutStatus{}, "", a.fail("get deployment", w.Cluster, err)
 		}
-		return deploymentStatus(o), nil
+		return deploymentStatus(o), o.Annotations[deploymentRevision], nil
 	case domain.KindStatefulSet:
 		o, err := c.kube.AppsV1().StatefulSets(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return application.RolloutStatus{}, a.fail("get statefulset", w.Cluster, err)
+			return application.RolloutStatus{}, "", a.fail("get statefulset", w.Cluster, err)
 		}
-		return statefulSetStatus(o), nil
+		return statefulSetStatus(o), o.Status.UpdateRevision, nil
 	case domain.KindDaemonSet:
 		o, err := c.kube.AppsV1().DaemonSets(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return application.RolloutStatus{}, a.fail("get daemonset", w.Cluster, err)
+			return application.RolloutStatus{}, "", a.fail("get daemonset", w.Cluster, err)
 		}
-		return daemonSetStatus(o), nil
+		return daemonSetStatus(o), strconv.FormatInt(o.Generation, 10), nil
 	default: // Rollout
 		o, err := c.dyn.Resource(rolloutGVR).Namespace(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			return application.RolloutStatus{}, a.fail("get rollout", w.Cluster, err)
+			return application.RolloutStatus{}, "", a.fail("get rollout", w.Cluster, err)
 		}
-		return rolloutStatusOf(o), nil
+		return rolloutStatusOf(o), rolloutRevision(o), nil
 	}
+}
+
+func rolloutRevision(o *unstructured.Unstructured) string {
+	hash, _, _ := unstructured.NestedString(o.Object, "status", "currentPodHash")
+	restartAt, _, _ := unstructured.NestedString(o.Object, "spec", "restartAt")
+	return hash + "/" + restartAt
 }
 
 // The status functions follow kubectl rollout status.

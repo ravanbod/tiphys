@@ -7,6 +7,7 @@ import { ErrorBanner } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { Crumbs } from '../components/PageHeader';
 import { useAuth } from '../context/auth';
+import { useLive } from '../context/live';
 import { useSetShellCtx } from '../context/shell';
 import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
@@ -37,12 +38,16 @@ export function LogsPage() {
   const { cluster = '', ns = '', kind: kindSeg = '', name = '' } = useParams();
   const kind = kindFromSegment(kindSeg);
   const [sp, setSp] = useSearchParams();
-  const { me } = useAuth();
+  const { me, usesGrants } = useAuth();
   const now = useNow(1000);
   const ref = useMemo(() => ({ cluster, namespace: ns, kind, name }), [cluster, ns, kind, name]);
   const wl = useApi(() => api.workload(ref), [ref, me.breakGlass?.id]);
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
-  const podsQ = useApi(() => api.pods(ref), [ref], { poll: 15000 });
+  // New pods (a rollout, a job run) appear in the picker as they start.
+  const live = useLive(ref, (changes) => {
+    if (changes.length === 0 || changes.some((c) => c.type !== 'event')) podsQ.reload();
+  });
+  const podsQ = useApi(() => api.pods(ref), [ref], { poll: live ? 60000 : 15000 });
   const pods = podsQ.data ?? [];
   const pod = sp.get('pod') || pods[0]?.name || '';
   const podObj = pods.find((p) => p.name === pod);
@@ -122,7 +127,7 @@ export function LogsPage() {
         if (!info.opened) {
           setStatus('error');
           void api.workload(ref).then((w) => {
-            const e = explainDecision(w.access.logs, { action: 'logs', target: name, canBreakGlass: me.role === 'user' });
+            const e = explainDecision(w.access.logs, { action: 'logs', target: name, canBreakGlass: usesGrants });
             setMsg(e ? e.text : 'Could not open the log stream.');
           }).catch((e) => setMsg(errorText(e)));
         } else {

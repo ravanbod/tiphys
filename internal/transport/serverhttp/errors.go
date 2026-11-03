@@ -83,6 +83,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		abort(c, http.StatusForbidden, "forbidden_role", "Your role does not allow this.", nil)
 	case errors.Is(err, application.ErrBreakGlassDisabled):
 		abort(c, http.StatusForbidden, "break_glass_disabled", "Break-glass is turned off.", nil)
+	case errors.Is(err, application.ErrBreakGlassApprovalRequired):
+		abort(c, http.StatusConflict, "break_glass_approval_required", "Break-glass needs an admin's approval: request it instead.", nil)
 	case errors.Is(err, application.ErrUserDisabled):
 		abort(c, http.StatusForbidden, "user_disabled", "Your account is disabled.", nil)
 	case errors.Is(err, application.ErrNotFound):

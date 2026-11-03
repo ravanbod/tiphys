@@ -16,7 +16,7 @@ var _ application.GrantRepository = grantRepo{}
 const grantSelect = `
 	SELECT g.id, g.holder_kind, COALESCE(g.team_id, 0), COALESCE(g.user_id, 0), g.scope_kind,
 		COALESCE(g.argo_project, ''), COALESCE(c.name, ''), COALESCE(g.namespace, ''),
-		g.actions, g.expires_at, g.note, g.created_by, g.created_at, g.updated_at, g.updated_by
+		COALESCE(g.environment, ''), g.actions, g.expires_at, g.note, g.created_by, g.created_at, g.updated_at, g.updated_by
 	FROM grants g LEFT JOIN clusters c ON c.id = g.cluster_id`
 
 func scanGrant(row pgx.CollectableRow) (domain.Grant, error) {
@@ -24,7 +24,7 @@ func scanGrant(row pgx.CollectableRow) (domain.Grant, error) {
 	var holder, scope string
 	var actions []string
 	err := row.Scan(&g.ID, &holder, &g.TeamID, &g.UserID, &scope,
-		&g.Scope.ArgoProject, &g.Scope.Cluster, &g.Scope.Namespace,
+		&g.Scope.ArgoProject, &g.Scope.Cluster, &g.Scope.Namespace, &g.Scope.Environment,
 		&actions, &g.ExpiresAt, &g.Note, &g.CreatedBy, &g.CreatedAt, &g.UpdatedAt, &g.UpdatedBy)
 	g.HolderKind = domain.HolderKind(holder)
 	g.Scope.Kind = domain.ScopeKind(scope)
@@ -116,11 +116,11 @@ func (r grantRepo) Create(ctx context.Context, g domain.Grant) (domain.Grant, er
 		team, user := holderCols(g)
 		err = tx.QueryRow(ctx, `
 			INSERT INTO grants (holder_kind, team_id, user_id, scope_kind, argo_project, cluster_id,
-				namespace, actions, expires_at, note, created_by, updated_by)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
+				namespace, environment, actions, expires_at, note, created_by, updated_by)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12)
 			RETURNING id`,
 			string(g.HolderKind), team, user, string(g.Scope.Kind), sc.argoProject, sc.clusterID,
-			sc.namespace, actionStrings(g.Actions), g.ExpiresAt, g.Note, g.CreatedBy).Scan(&id)
+			sc.namespace, nullStr(g.Scope.Environment), actionStrings(g.Actions), g.ExpiresAt, g.Note, g.CreatedBy).Scan(&id)
 		if err != nil {
 			return mapErr(err, "create grant")
 		}
@@ -141,11 +141,11 @@ func (r grantRepo) Update(ctx context.Context, g domain.Grant) error {
 		team, user := holderCols(g)
 		tag, err := tx.Exec(ctx, `
 			UPDATE grants SET holder_kind = $2, team_id = $3, user_id = $4, scope_kind = $5,
-				argo_project = $6, cluster_id = $7, namespace = $8, actions = $9, expires_at = $10,
-				note = $11, updated_at = now(), updated_by = $12
+				argo_project = $6, cluster_id = $7, namespace = $8, environment = $9, actions = $10,
+				expires_at = $11, note = $12, updated_at = now(), updated_by = $13
 			WHERE id = $1`,
 			g.ID, string(g.HolderKind), team, user, string(g.Scope.Kind), sc.argoProject, sc.clusterID,
-			sc.namespace, actionStrings(g.Actions), g.ExpiresAt, g.Note, g.UpdatedBy)
+			sc.namespace, nullStr(g.Scope.Environment), actionStrings(g.Actions), g.ExpiresAt, g.Note, g.UpdatedBy)
 		if err := affected(tag, err, "update grant"); err != nil {
 			return err
 		}

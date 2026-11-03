@@ -17,7 +17,9 @@ var _ application.SettingsRepository = settingsRepo{}
 const (
 	keyExecMax      = "exec.max_session_minutes"
 	keyExecIdle     = "exec.idle_timeout_minutes"
-	keyBGEnabled    = "break_glass.enabled"
+	keyBGEnabled    = "break_glass.enabled" // still written for the previous release: mode != off
+	keyBGMode       = "break_glass.mode"
+	keyBGReqMaxAge  = "break_glass.request_max_age_minutes"
 	keyBGDefault    = "break_glass.default_minutes"
 	keyBGMax        = "break_glass.max_minutes"
 	keyRetAudit     = "retention.audit_days"
@@ -43,8 +45,11 @@ func (r settingsRepo) Load(ctx context.Context) (domain.Settings, error) {
 	ints := map[string]*int{
 		keyExecMax: &s.ExecMaxSessionMinutes, keyExecIdle: &s.ExecIdleTimeoutMinutes,
 		keyBGDefault: &s.BreakGlassDefaultMin, keyBGMax: &s.BreakGlassMaxMinutes,
-		keyRetAudit: &s.RetentionAuditDays, keyRetRecording: &s.RetentionRecordingsDays,
+		keyBGReqMaxAge: &s.BreakGlassRequestMaxAgeMin,
+		keyRetAudit:    &s.RetentionAuditDays, keyRetRecording: &s.RetentionRecordingsDays,
 	}
+	var enabled *bool // break_glass.enabled, the mode before break_glass.mode existed
+	var mode string
 	for rows.Next() {
 		var key string
 		var raw []byte
@@ -58,7 +63,13 @@ func (r settingsRepo) Load(ctx context.Context) (domain.Settings, error) {
 			continue
 		}
 		if key == keyBGEnabled {
-			if err := json.Unmarshal(raw, &s.BreakGlassEnabled); err != nil {
+			if err := json.Unmarshal(raw, &enabled); err != nil {
+				return s, fmt.Errorf("load settings: key %s: %w", key, err)
+			}
+			continue
+		}
+		if key == keyBGMode {
+			if err := json.Unmarshal(raw, &mode); err != nil {
 				return s, fmt.Errorf("load settings: key %s: %w", key, err)
 			}
 			continue
@@ -75,7 +86,16 @@ func (r settingsRepo) Load(ctx context.Context) (domain.Settings, error) {
 		}
 		// Unknown keys are ignored so a newer version can add settings.
 	}
-	return s, mapErr(rows.Err(), "load settings")
+	if err := rows.Err(); err != nil {
+		return s, mapErr(err, "load settings")
+	}
+	switch {
+	case domain.BreakGlassMode(mode).Valid():
+		s.BreakGlassMode = domain.BreakGlassMode(mode)
+	case enabled != nil && !*enabled:
+		s.BreakGlassMode = domain.BreakGlassOff
+	}
+	return s, nil
 }
 
 func (r settingsRepo) Save(ctx context.Context, s domain.Settings, updatedBy string) error {
@@ -88,8 +108,9 @@ func (r settingsRepo) Save(ctx context.Context, s domain.Settings, updatedBy str
 		val any
 	}{
 		{keyExecMax, s.ExecMaxSessionMinutes}, {keyExecIdle, s.ExecIdleTimeoutMinutes},
-		{keyBGEnabled, s.BreakGlassEnabled},
+		{keyBGMode, s.BreakGlassMode}, {keyBGEnabled, s.BreakGlassMode.Enabled()},
 		{keyBGDefault, s.BreakGlassDefaultMin}, {keyBGMax, s.BreakGlassMaxMinutes},
+		{keyBGReqMaxAge, s.BreakGlassRequestMaxAgeMin},
 		{keyRetAudit, s.RetentionAuditDays}, {keyRetRecording, s.RetentionRecordingsDays},
 		{keyRocket, rocketJSON{WebhookURL: s.Rocket.WebhookURL, Channel: s.Rocket.Channel, Events: events}},
 	}

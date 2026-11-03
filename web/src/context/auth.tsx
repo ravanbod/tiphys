@@ -9,6 +9,8 @@ interface AuthCtx {
   isAdmin: boolean;
   isAuditor: boolean;
   isUser: boolean;
+  /** Works on workloads through grants (users and auditors); can request access and use break-glass. */
+  usesGrants: boolean;
   reload: () => Promise<void>;
 }
 const Ctx = createContext<AuthCtx | null>(null);
@@ -35,6 +37,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isAdmin: me.role === 'admin',
         isAuditor: me.role === 'auditor',
         isUser: me.role === 'user',
+        usesGrants: me.role === 'user' || me.role === 'auditor',
         reload: load,
       },
     [me, load],

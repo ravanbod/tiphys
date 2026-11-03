@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api, kindFromSegment } from '../api';
-import type { K8sEvent, Pod, WorkloadDetail } from '../api';
+import type { K8sEvent, LiveChange, Pod, WorkloadDetail } from '../api';
 import { AccessHints } from '../components/AccessHints';
 import { ActionButton } from '../components/ActionButton';
 import { BreakGlassMark, EnvBadge, KindTag, PhaseChip } from '../components/Badges';
+import { Bump } from '../components/Bump';
 import { CronJobsPanel } from '../components/CronJobsPanel';
 import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -12,7 +13,9 @@ import { RestartDialog, RunCronDialog } from '../components/OperationDialogs';
 import { Crumbs } from '../components/PageHeader';
 import { WhoHasAccess } from '../components/WhoHasAccess';
 import { useAuth } from '../context/auth';
+import { useLive } from '../context/live';
 import { useSetShellCtx } from '../context/shell';
+import { eventKey, eventSig, rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { closesSoonLabel, explainDecision } from '../lib/decision';
@@ -31,16 +34,28 @@ function Stat({ label, children, mono, small }: { label: string; children: React
 
 const NO_PODS: Pod[] = [];
 
+const podChange = (c: LiveChange) => c.type !== 'event';
+const eventChange = (c: LiveChange) => c.type === 'event' || c.type === 'pod_restarted';
+
 export function WorkloadDetailPage() {
   const { cluster = '', ns = '', kind: kindSeg = '', name = '' } = useParams();
   const kind = kindFromSegment(kindSeg);
   const [sp] = useSearchParams();
   // A CronJob has no Pods tab: it opens on its job history.
   const tab = sp.get('tab') === 'events' ? 'events' : sp.get('tab') === 'cronjobs' || kind === 'CronJob' ? 'cronjobs' : 'pods';
-  const { me } = useAuth();
+  const { me, usesGrants } = useAuth();
   const now = useNow(30000);
   const ref = { cluster, namespace: ns, kind, name };
-  const wl = useApi(() => api.workload(ref), [cluster, ns, kind, name, me.breakGlass?.id], { poll: 30000 });
+  // Live changes refresh what they touch; polling is the fallback.
+  const live = useLive({ cluster, namespace: ns, kind, name }, (changes) => {
+    const all = changes.length === 0;
+    if (all || changes.some(podChange)) {
+      wl.reload();
+      pods.reload();
+    }
+    if (all || changes.some(eventChange)) events.reload();
+  });
+  const wl = useApi(() => api.workload(ref), [cluster, ns, kind, name, me.breakGlass?.id], { poll: live ? 60000 : 30000 });
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
   const [restart, setRestart] = useState(false);
   const [running, setRunning] = useState(false);
@@ -49,7 +64,7 @@ export function WorkloadDetailPage() {
 
   const d = wl.data;
   const logsOk = !!d?.access.logs.allowed;
-  const pods = useApi(() => api.pods(ref), [cluster, ns, kind, name, logsOk, me.breakGlass?.id], { enabled: logsOk && kind !== 'CronJob' && tab !== 'cronjobs', poll: 10000 });
+  const pods = useApi(() => api.pods(ref), [cluster, ns, kind, name, logsOk, me.breakGlass?.id], { enabled: logsOk && kind !== 'CronJob' && tab !== 'cronjobs', poll: live ? 60000 : 10000 });
   const events = useApi(() => api.events(ref), [cluster, ns, kind, name, logsOk], { enabled: logsOk });
   const [sel, setSel] = useState<string | null>(null);
 
@@ -97,8 +112,8 @@ export function WorkloadDetailPage() {
 
       {!isCron && (
         <div className="row wrap">
-          <Stat label="Ready">{d.ready} / {d.desired}</Stat>
-          <Stat label="Updated">{d.updated} / {d.desired}</Stat>
+          <Stat label="Ready"><Bump value={`${d.ready} / ${d.desired}`} /></Stat>
+          <Stat label="Updated"><Bump value={`${d.updated} / ${d.desired}`} /></Stat>
           <Stat label="Strategy" small>{d.strategy}</Stat>
           <Stat label="Last rollout" small>{d.lastRolloutAt ? fmtRelative(d.lastRolloutAt, now) : '—'}</Stat>
           {d.images[0] && <Stat label="Image" mono small>{d.images[0]}</Stat>}
@@ -108,7 +123,7 @@ export function WorkloadDetailPage() {
       <div className="two">
         <div className="col grow" style={{ gap: 0, minWidth: 0 }}>
           <div className="tabs" role="tablist">
-            {!isCron && <Link role="tab" aria-selected={tab === 'pods'} className={tab === 'pods' ? 'on' : undefined} to="?tab=pods" replace>Pods {pods.data && <span className="c">{podList.length}</span>}</Link>}
+            {!isCron && <Link role="tab" aria-selected={tab === 'pods'} className={tab === 'pods' ? 'on' : undefined} to="?tab=pods" replace>Pods {pods.data && <span className="c"><Bump value={podList.length} /></span>}</Link>}
             <Link role="tab" aria-selected={tab === 'events'} className={tab === 'events' ? 'on' : undefined} to="?tab=events" replace>Events</Link>
             {isCron
               ? <Link role="tab" aria-selected={tab === 'cronjobs'} className={tab === 'cronjobs' ? 'on' : undefined} to="?tab=cronjobs" replace>Job history</Link>
@@ -119,14 +134,14 @@ export function WorkloadDetailPage() {
           ) : !logsOk ? (
             <div className="card" style={{ borderTop: 0, borderRadius: '0 0 8px 8px' }}>
               <div className="empty">
-                {explainDecision(d.access.logs, { action: 'logs', target: d.name, canBreakGlass: me.role === 'user' })?.text ?? 'Pods are not available.'}
+                {explainDecision(d.access.logs, { action: 'logs', target: d.name, canBreakGlass: usesGrants })?.text ?? 'Pods are not available.'}
               </div>
             </div>
           ) : tab === 'events' ? (
-            <EventsTable events={events.data} error={events.error} loading={events.loading} now={now} reload={events.reload} />
+            <EventsTable events={events.data} error={events.error} loading={events.loading} now={now} reload={events.reload} scope={`${cluster}/${ns}/${kind}/${name}`} />
           ) : (
             <PodsTable
-              pods={podList} loading={pods.loading && !pods.data} error={pods.error} reload={pods.reload} now={now} selected={selected?.name ?? null}
+              pods={pods.data} loading={pods.loading && !pods.data} error={pods.error} reload={pods.reload} now={now} selected={selected?.name ?? null}
               onSelect={setSel} wl={d}
             />
           )}
@@ -149,9 +164,10 @@ export function WorkloadDetailPage() {
 }
 
 function PodsTable({ pods, loading, error, reload, now, selected, onSelect, wl }: {
-  pods: Pod[]; loading: boolean; error: unknown; reload: () => void; now: number; selected: string | null; onSelect: (n: string) => void; wl: WorkloadDetail;
+  pods: Pod[] | undefined; loading: boolean; error: unknown; reload: () => void; now: number; selected: string | null; onSelect: (n: string) => void; wl: WorkloadDetail;
 }) {
   const { debugEnabled } = useAuth().me.settings;
+  const rows = useAnimatedList(pods, (p) => p.name, (p) => `${p.phase}|${p.ready}|${p.restarts}|${p.lastTermination}`, `${wl.cluster}/${wl.namespace}/${wl.kind}/${wl.name}`);
   if (loading) return <div className="card" style={{ borderTop: 0 }}><div style={{ padding: 16 }}><div className="skel" style={{ width: '80%', marginBottom: 8 }} /><div className="skel" style={{ width: '60%' }} /></div></div>;
   if (error) return <ErrorBanner error={error} onRetry={reload} />;
   const loc = { cluster: wl.cluster, namespace: wl.namespace, kind: wl.kind, name: wl.name };
@@ -161,13 +177,13 @@ function PodsTable({ pods, loading, error, reload, now, selected, onSelect, wl }
         <table className="tbl nowrap">
           <thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Restarts</th><th>Age</th><th>Node</th><th>Last termination</th><th style={{ textAlign: 'right' }}>Actions</th></tr></thead>
           <tbody>
-            {pods.length === 0 && <tr><td colSpan={8} className="empty">No pods.</td></tr>}
-            {pods.map((p) => (
-              <tr key={p.name} className={`click${selected === p.name ? ' sel' : ''}`} onClick={() => onSelect(p.name)}>
+            {rows.length === 0 && <tr><td colSpan={8} className="empty">No pods.</td></tr>}
+            {rows.map(({ item: p, anim }) => (
+              <tr key={p.name} className={rowClass(anim, `click${selected === p.name ? ' sel' : ''}`)} onClick={() => onSelect(p.name)}>
                 <td className="mono"><button type="button" className="linklike blue mono" style={{ fontWeight: 400 }} onClick={() => onSelect(p.name)} aria-label={`Details of ${p.name}`}>{p.name}</button></td>
                 <td><PhaseChip phase={p.phase} /></td>
-                <td className="mono">{p.ready}</td>
-                <td>{p.restarts > 0 ? <b>{p.restarts}</b> : 0}</td>
+                <td className="mono"><Bump value={p.ready} /></td>
+                <td>{p.restarts > 0 ? <b><Bump value={p.restarts} /></b> : 0}</td>
                 <td>{fmtAge(p.createdAt, now)}</td>
                 <td className="mono">{p.node}</td>
                 <td>{p.lastTermination ? <><span className="chip err">{p.lastTermination}</span> <span className="muted">{fmtRelative(p.lastTerminatedAt, now)}</span></> : <span className="muted">—</span>}</td>
@@ -187,7 +203,8 @@ function PodsTable({ pods, loading, error, reload, now, selected, onSelect, wl }
   );
 }
 
-function EventsTable({ events, error, loading, now, reload }: { events: K8sEvent[] | undefined; error: unknown; loading: boolean; now: number; reload: () => void }) {
+function EventsTable({ events, error, loading, now, reload, scope }: { events: K8sEvent[] | undefined; error: unknown; loading: boolean; now: number; reload: () => void; scope: string }) {
+  const rows = useAnimatedList(events, eventKey, eventSig, scope);
   if (loading && !events) return <Loading what="events" />;
   if (error) return <ErrorBanner error={error} onRetry={reload} />;
   return (
@@ -196,14 +213,14 @@ function EventsTable({ events, error, loading, now, reload }: { events: K8sEvent
         <table className="tbl nowrap">
           <thead><tr><th>Type</th><th>Reason</th><th>Message</th><th>Object</th><th>Count</th><th>Last seen</th></tr></thead>
           <tbody>
-            {(events ?? []).length === 0 && <tr><td colSpan={6} className="empty">No events.</td></tr>}
-            {(events ?? []).map((e, i) => (
-              <tr key={i}>
+            {rows.length === 0 && <tr><td colSpan={6} className="empty">No events.</td></tr>}
+            {rows.map(({ item: e, key, anim }) => (
+              <tr key={key} className={rowClass(anim)}>
                 <td><span className={`chip ${e.type === 'Warning' ? 'err' : ''}`}>{e.type}</span></td>
                 <td><b>{e.reason}</b></td>
                 <td className="wrapcell" style={{ minWidth: 240 }}>{e.message}</td>
                 <td className="mono">{e.object}</td>
-                <td>{e.count}</td>
+                <td><Bump value={e.count} /></td>
                 <td>{fmtRelative(e.lastSeen, now)}</td>
               </tr>
             ))}

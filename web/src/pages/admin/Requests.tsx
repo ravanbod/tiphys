@@ -8,7 +8,7 @@ import { ActionChips, Avatar, EnvBadge } from '../../components/Badges';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
 import { PageHeader } from '../../components/PageHeader';
-import { SCOPE_KIND_LABEL, ScopeCell, scopeName } from '../../components/Scope';
+import { SCOPE_KIND_LABEL, ScopeCell, scopeCluster, scopeName } from '../../components/Scope';
 import { Seg } from '../../components/Seg';
 import { FieldError, ReadOnlyNote } from '../../components/AdminBits';
 import '../../components/adminPages.css';
@@ -18,6 +18,9 @@ import { useApi } from '../../hooks/useApi';
 import { useMedia } from '../../hooks/useMedia';
 import { useNow } from '../../hooks/useNow';
 import { scopeEnvironment } from '../../lib/adminEnv';
+import { BreakGlassRequests } from './BreakGlassRequests';
+import { ACTIONS, SYNC_SCOPE_HINT, actionOptionLabel } from '../../lib/grantForm';
+import { mergeTarget, sameScope } from '../../lib/requestMerge';
 import { fmtDateTime, fmtHours, fmtWhen } from '../../lib/time';
 
 const DURATION_CHOICES = [1, 2, 4, 8, 24, 72, 168, 720];
@@ -133,7 +136,7 @@ function CurrentAccess({ req, user, ready }: { req: AccessRequest; user: UserVie
               {data.map((g) => (
                 <tr key={g.id}>
                   <td><ScopeCell scope={g.scope} /></td>
-                  <td className="mono">{g.scope.kind === 'argo_project' ? 'all clusters' : g.scope.cluster}</td>
+                  <td className="mono">{scopeCluster(g.scope)}</td>
                   <td><ActionChips actions={g.actions} /></td>
                   <td className="muted">{g.holder.kind === 'team' ? `via team ${g.holder.name}` : 'Direct'}</td>
                 </tr>
@@ -206,7 +209,44 @@ function DecidedCard({ req }: { req: AccessRequest }) {
   );
 }
 
-type ApproveBody = Parameters<typeof api.approveRequest>[1] & { actions?: Action[] };
+type ApproveBody = Parameters<typeof api.approveRequest>[1];
+
+const fmtExpiry = (iso: string | null) => (iso === null ? 'permanent' : `until ${fmtDateTime(iso)}`);
+
+/**
+ * What approving does with the requester's grants: add to their own grant on
+ * the same scope when it ends no later than the approved access (that grant
+ * then takes the new expiry), else create a new one.
+ */
+function GrantOutcome({ grants, target, actions, newEnd, separate, onSeparate, scope }: {
+  grants: GrantView[]; target: GrantView | null; actions: Action[]; newEnd: number | null; separate: boolean; onSeparate: (v: boolean) => void; scope: ScopeView;
+}) {
+  const longer = grants.find((g) => g.holder.kind === 'user' && !g.expired && sameScope(g.scope, scope));
+  const added = actions.filter((a) => !target?.actions.includes(a));
+  return (
+    <div className="f" role="group" aria-label="Resulting grant">
+      Grant
+      {target && !separate ? (
+        <div className="row wrap" style={{ gap: 6 }}>
+          Adds to <b>grant #{target.id}</b>
+          <ActionChips actions={target.actions} />
+          {added.length > 0 && <>+ <ActionChips actions={added} /></>}
+          <span className="muted">· {fmtExpiry(target.expiresAt)} → {fmtExpiry(newEnd === null ? null : new Date(newEnd).toISOString())}</span>
+        </div>
+      ) : (
+        <div className="muted">
+          Creates a new grant{!target && longer ? ` (grant #${longer.id} on this scope lasts longer than this access, so it stays as it is)` : ''}.
+        </div>
+      )}
+      {target && (
+        <label className="chk">
+          <input type="checkbox" checked={separate} onChange={(e) => onSeparate(e.target.checked)} />
+          Create a separate grant instead
+        </label>
+      )}
+    </div>
+  );
+}
 
 function DecisionCard({
   req, mobile, onDone,
@@ -219,14 +259,20 @@ function DecisionCard({
   const [error, setError] = useState<unknown>(null);
   const [noteErr, setNoteErr] = useState<string | undefined>();
   const [narrow, setNarrow] = useState(false);
+  const [separate, setSeparate] = useState(false);
   const durations = useMemo(() => durationOptions(req.durationHours), [req.durationHours]);
+  const now = useNow(60_000);
+  const own = useApi(() => api.grants({ holderKind: 'user', holderId: req.userId }), [req.userId]);
+  const newEnd = dur === 'perm' ? null : now + Number(dur) * 3600_000;
+  const target = own.data ? mergeTarget(own.data, req.scope, newEnd, now) : null;
 
-  const narrowed = actions.length !== req.actions.length;
+  const actionsChanged = actions.length !== req.actions.length || actions.some((a) => !req.actions.includes(a));
   const durChanged = dur !== durKey(req.durationHours);
-  const changed = narrowed || durChanged;
+  const changed = actionsChanged || durChanged;
 
+  // Any action may be granted, requested or not; sync never fits a workloads scope.
   const toggle = (a: Action) =>
-    setActions((cur) => (cur.includes(a) ? cur.filter((x) => x !== a) : req.actions.filter((x) => x === a || cur.includes(x))));
+    setActions((cur) => ACTIONS.filter((x) => (x === a ? !cur.includes(a) : cur.includes(x))));
 
   const fail = (e: unknown) => {
     setError(e);
@@ -240,11 +286,14 @@ function DecisionCard({
     const body: ApproveBody = {};
     if (note.trim()) body.note = note.trim();
     if (durChanged) body.durationHours = dur === 'perm' ? null : Number(dur);
-    if (narrowed) body.actions = actions;
+    if (actionsChanged) body.actions = actions;
+    if (target && separate) body.separate = true;
     try {
       const res = await api.approveRequest(req.id, body);
-      if (narrowed && res.actions.some((a) => !actions.includes(a))) {
-        toast('Approved, but the server granted more actions than you selected. Review the grant under Grants.', 'err');
+      if (actionsChanged && (res.actions.length !== actions.length || res.actions.some((a) => !actions.includes(a)))) {
+        toast('Approved, but the server granted other actions than you selected. Review the grant under Grants.', 'err');
+      } else if (target && res.resultingGrantId === target.id) {
+        toast(`Approved ${req.username}’s request: added to grant #${target.id}.`);
       } else {
         toast(`Approved ${req.username}’s request${changed ? ' with changes' : ''}.`);
       }
@@ -275,17 +324,25 @@ function DecisionCard({
     }
   };
 
+  const outcome = own.data && (
+    <GrantOutcome grants={own.data} target={target} actions={actions} newEnd={newEnd} separate={separate} onSeparate={setSeparate} scope={req.scope} />
+  );
+
   const narrowFields = (
     <div className="row wrap" style={{ gap: 24, alignItems: 'flex-end' }}>
       <div className="f" role="group" aria-label="Actions to grant">
         Actions
         <div className="row wrap" style={{ gap: 14 }}>
-          {req.actions.map((a) => (
-            <label key={a} className="chk" style={{ minHeight: mobile ? 44 : undefined }}>
-              <input type="checkbox" checked={actions.includes(a)} onChange={() => toggle(a)} />
-              {a}
-            </label>
-          ))}
+          {ACTIONS.map((a) => {
+            const off = a === 'sync' && req.scope.kind === 'workloads' && !actions.includes(a);
+            return (
+              <label key={a} className="chk" style={{ minHeight: mobile ? 44 : undefined }} title={off ? SYNC_SCOPE_HINT : undefined}>
+                <input type="checkbox" checked={actions.includes(a)} disabled={off} onChange={() => toggle(a)} />
+                {actionOptionLabel(a)}
+                {!req.actions.includes(a) && actions.includes(a) && <span className="chip info">added</span>}
+              </label>
+            );
+          })}
         </div>
       </div>
       <label className="f">
@@ -323,10 +380,11 @@ function DecisionCard({
           aria-expanded={narrow}
           onClick={() => setNarrow((v) => !v)}
         >
-          Narrow actions or duration{changed ? ' (changed)' : ''}
+          Change actions or duration{changed ? ' (changed)' : ''}
           <Icon name={narrow ? 'chevd' : 'chev'} />
         </button>
         {narrow && <div className="card"><div className="bd col">{narrowFields}</div></div>}
+        {outcome && <div className="card"><div className="bd col">{outcome}</div></div>}
         {error !== null && <ErrorBanner error={error} />}
         <div className="rq-bar">
           <label className="f">
@@ -347,9 +405,10 @@ function DecisionCard({
 
   return (
     <div className="card">
-      <div className="hd">Decision <small>Narrow before approving if you want to grant less</small></div>
+      <div className="hd">Decision <small>Change the actions or shorten the duration before approving if needed</small></div>
       <div className="bd col" style={{ gap: 14 }}>
         {narrowFields}
+        {outcome}
         <label className="f">
           <span>Note to requester <span className="hint">Required when rejecting</span></span>
           <textarea
@@ -449,6 +508,7 @@ export function Requests() {
   return (
     <>
       {header}
+      <BreakGlassRequests />
       <div className="row" style={{ alignItems: 'flex-start', gap: 16, flexWrap: mobile ? 'wrap' : 'nowrap' }}>
         {showList && (
           <div className="card" style={{ width: mobile ? '100%' : 430, flex: 'none', maxWidth: '100%' }}>

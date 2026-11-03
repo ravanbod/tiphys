@@ -1,13 +1,16 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
-import type { AppSummary, NamespaceSummary, WorkloadSummary } from '../api';
+import type { AppSummary, NamespaceSummary } from '../api';
 import { ActionChips, EnvBadge, HealthChip, KindTag, SyncChip } from '../components/Badges';
+import { Bump } from '../components/Bump';
 import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { PageHeader } from '../components/PageHeader';
 import { Seg } from '../components/Seg';
 import { useAuth } from '../context/auth';
+import { useLive } from '../context/live';
+import { rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
 import { starKey, useStars } from '../hooks/useStars';
 import { useLocalStorage } from '../hooks/useLocalStorage';
@@ -17,6 +20,10 @@ import { ARGO_UI } from '../lib/features';
 function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace: string; cols: number }) {
   const { me } = useAuth();
   const list = useApi(() => api.workloads(cluster, namespace), [cluster, namespace, me.breakGlass?.id]);
+  useLive({ cluster, namespace }, (changes) => {
+    if (changes.length === 0 || changes.some((c) => c.type !== 'event')) list.reload();
+  });
+  const rows = useAnimatedList(list.data, (w) => `${w.kind}/${w.name}`, (w) => `${w.ready}/${w.desired}|${w.suspended}`, `${cluster}/${namespace}`);
   if (list.loading && !list.data) {
     return <tr className="sub"><td /><td colSpan={cols - 1}><div className="skel" style={{ width: 240 }} /></td></tr>;
   }
@@ -30,17 +37,16 @@ function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace
       </tr>
     );
   }
-  const wls: WorkloadSummary[] = list.data ?? [];
-  if (wls.length === 0) return <tr className="sub"><td /><td colSpan={cols - 1} className="muted">No workloads you can use here.</td></tr>;
+  if (rows.length === 0) return <tr className="sub"><td /><td colSpan={cols - 1} className="muted">No workloads you can use here.</td></tr>;
   return (
     <>
-      {wls.map((w) => {
+      {rows.map(({ item: w, key, anim }) => {
         const loc = { cluster, namespace, kind: w.kind, name: w.name };
         return (
-          <tr className="sub" key={`${w.kind}/${w.name}`}>
+          <tr className={rowClass(anim, 'sub')} key={key}>
             <td />
             <td colSpan={2}><span className="row" style={{ paddingLeft: 24 }}><KindTag kind={w.kind} /><span className="mono">{w.name}</span></span></td>
-            <td colSpan={Math.max(1, cols - 5)}><span className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : `${w.ready}/${w.desired} ready`}</span></td>
+            <td colSpan={Math.max(1, cols - 5)}><span className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : <><Bump value={`${w.ready}/${w.desired}`} /> ready</>}</span></td>
             <td colSpan={2} style={{ textAlign: 'right' }}>
               <Link className="btn ghost sm" to={logsUrl(loc)}>Logs</Link>
               <Link className="btn ghost sm" to={workloadUrl(loc)}>Open</Link>

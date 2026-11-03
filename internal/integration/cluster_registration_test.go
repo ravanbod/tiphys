@@ -21,10 +21,13 @@ type memCreds struct {
 	mu    sync.Mutex
 	names map[string]bool
 	envs  map[string]string // tiphys/environment annotation, when set
+	prot  map[string]bool   // tiphys/protected annotation
 	subs  []func(string)
 }
 
-func newMemCreds() *memCreds { return &memCreds{names: map[string]bool{}, envs: map[string]string{}} }
+func newMemCreds() *memCreds {
+	return &memCreds{names: map[string]bool{}, envs: map[string]string{}, prot: map[string]bool{}}
+}
 
 func (m *memCreds) Put(context.Context, string, []byte) error { return errors.New("read-only") }
 func (m *memCreds) Delete(context.Context, string) error      { return errors.New("read-only") }
@@ -56,6 +59,15 @@ func (m *memCreds) Environment(_ context.Context, name string) (string, bool, er
 	return env, ok, nil
 }
 
+func (m *memCreds) Protected(_ context.Context, name string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.names[name] {
+		return false, application.ErrNotFound
+	}
+	return m.prot[name], nil
+}
+
 // setEnv changes the Secret's tiphys/environment annotation ("" removes it).
 func (m *memCreds) setEnv(name, env string) {
 	m.mu.Lock()
@@ -64,6 +76,17 @@ func (m *memCreds) setEnv(name, env string) {
 	} else {
 		m.envs[name] = env
 	}
+	subs := append([]func(string){}, m.subs...)
+	m.mu.Unlock()
+	for _, f := range subs {
+		f(name)
+	}
+}
+
+// setProtected changes the Secret's tiphys/protected annotation.
+func (m *memCreds) setProtected(name string, v bool) {
+	m.mu.Lock()
+	m.prot[name] = v
 	subs := append([]func(string){}, m.subs...)
 	m.mu.Unlock()
 	for _, f := range subs {
@@ -215,6 +238,44 @@ func TestClusterEnvironmentFromTheSecretAnnotation(t *testing.T) {
 	}
 	if _, err := svc.SetEnvironment(ctx, admin, "annotated", "staging"); err != nil {
 		t.Fatalf("set environment without the annotation: %v", err)
+	}
+}
+
+func TestClusterProtectedFromTheSecretAnnotation(t *testing.T) {
+	e := newEnv(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	creds := newMemCreds()
+	creds.prot["hidden"] = true
+	creds.set("hidden", true)
+	svc := application.NewClusterService(e.store, &loadedKube{fakeKube: e.kube, creds: creds}, creds, e.audit, e.policy, e.clock, zap.NewNop())
+	go svc.Run(ctx)
+
+	protected := func() bool { c, _ := e.store.Repos().Clusters.Get(ctx, "hidden"); return c.Protected }
+	inPolicy := func() bool { return e.policy.Current().Clusters["hidden"].Protected }
+
+	// A new cluster starts protected, and the policy snapshot knows.
+	waitFor(t, 5*time.Second, "cluster registered protected", func() bool { return protected() && inPolicy() })
+	// Removing the annotation lifts it, audited by the system with before and after.
+	creds.setProtected("hidden", false)
+	waitFor(t, 5*time.Second, "protection follows the annotation", func() bool { return !protected() && !inPolicy() })
+	evs, _ := e.store.Repos().Audit.List(ctx, application.AuditFilter{EventType: domain.EventAdminChange})
+	audited := false
+	for _, ev := range evs {
+		if ev.Details["operation"] == "protected_from_secret" && ev.Username == "system" && ev.Details["before"] != nil {
+			audited = true
+		}
+	}
+	if !audited {
+		t.Fatal("protected_from_secret was not audited")
+	}
+	creds.setProtected("hidden", true)
+	waitFor(t, 5*time.Second, "protected again", protected)
+	// A Secret that goes away leaves the cluster as it was.
+	creds.set("hidden", false)
+	time.Sleep(300 * time.Millisecond)
+	if !protected() {
+		t.Fatal("removing the Secret must keep the cluster protected")
 	}
 }
 

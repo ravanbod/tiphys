@@ -66,6 +66,10 @@ func ValidateSettings(v domain.Settings) *InvalidError {
 	pos("execIdleTimeoutMinutes", v.ExecIdleTimeoutMinutes, 24*60)
 	pos("breakGlassDefaultMinutes", v.BreakGlassDefaultMin, 24*60)
 	pos("breakGlassMaxMinutes", v.BreakGlassMaxMinutes, 24*60)
+	pos("breakGlassRequestMaxAgeMinutes", v.BreakGlassRequestMaxAgeMin, 7*24*60)
+	if !v.BreakGlassMode.Valid() {
+		fields["breakGlassMode"] = "must be off, self or approval"
+	}
 	pos("retentionAuditDays", v.RetentionAuditDays, 36500)
 	pos("retentionRecordingsDays", v.RetentionRecordingsDays, 36500)
 	if v.BreakGlassDefaultMin > v.BreakGlassMaxMinutes {

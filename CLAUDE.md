@@ -82,13 +82,43 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
 
 - **Argo cache older than 15 minutes** → project-scoped grants stop matching
   (reason `argo_stale`); namespace and workload grants are unaffected.
+- **Auditors work like users** (`Role.UsesGrants`): grants decide their
+  workload access, and they can request access and use break-glass; on top
+  they read audit, sessions and configuration. Only admins change
+  configuration and approve/reject requests. `/my/access` lists only the
+  caller's own requests (`AccessRequestService.ListOwn`).
+- **Cluster and environment grants** (admin only; access requests refuse them
+  with 422): `cluster` covers every namespace of a cluster, also later ones;
+  `environment` covers every namespace whose `Policy.Environment` (namespace
+  override → Argo project override → cluster label) matches, so it follows
+  label/override changes and ignores Argo staleness. `unlabeled` cannot be
+  granted; protected namespaces are never covered (migration 5).
+- **Approving adds to the same-scope grant**: `AccessRequestService.Approve`
+  adds the actions to the requester's own (never a team's) unexpired grant on
+  exactly the same scope (`Scope.Same`, workloads as a set) that ends no later
+  than the approved access, which then takes the new expiry (`mergeTarget`;
+  the longest such grant). A grant that outlasts it is left alone and a new
+  grant is created, so new actions never outlast what was approved; so does
+  `separate: true`. `web/src/lib/requestMerge.ts` mirrors the rule for the
+  admin's preview and the request form, which shows held actions as held.
 - **Break-glass** only overrides time windows and holidays; it is tagged on a
-  decision only when it actually overrode a closed window. The whole feature has
-  an on/off setting (`Settings.BreakGlassEnabled`, default on, Settings page):
-  off means `Start` returns `ErrBreakGlassDisabled` (403 `break_glass_disabled`),
+  decision only when it actually overrode a closed window. The feature has a
+  mode (`Settings.BreakGlassMode`, Settings page, `me.settings.breakGlassMode`):
+  `self` (default) starts it without approval; `off` means `Start`/`Request`/
+  `Approve` return `ErrBreakGlassDisabled` (403 `break_glass_disabled`),
   `PolicyService` attaches no break-glass to decisions (so active ones stop
   overriding windows and open streams that depended on them end), and the UI hides
-  it (`me.settings.breakGlassEnabled`).
+  it; `approval` makes `Start` return 409 `break_glass_approval_required` and
+  users send a request instead (`BreakGlassService.Request`, table
+  `break_glass_requests`, one pending per user). An admin approves it on the
+  Access requests page, which creates an ordinary `break_glass` row starting
+  then, for the requested or the admin's duration (up to the maximum), audited
+  as `break_glass.start` by the admin with `owner`; or rejects it; the requester
+  may cancel. Pending requests expire after `BreakGlassRequestMaxAgeMin`
+  (default 60, `BreakGlassService.Run` every 30 s; reads already show them
+  expired). The old `break_glass.enabled` key is still written (`mode != off`)
+  for the previous release, which therefore lets users self-start during a
+  rollout overlap.
 - **Logs are never limited by time windows or holidays** (`Policy.timeClosed` and
   `boundaries` return early for `logs`), so reading logs never needs break-glass,
   with the feature on or off. Rules that still list `logs` are ignored and the UI
@@ -160,7 +190,16 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   network view: `GET .../namespaces/{ns}/traffic` (`kubeaccess.NamespaceTraffic`)
   draws LB addresses and Gateways → Ingresses/HTTPRoutes/GRPCRoutes → Services →
   workloads from the cluster itself (not Argo), with a `problem` on nodes where
-  traffic may not get through. Authorized like namespace events (`logs` on the
+  traffic may not get through. Every Service of the namespace is in the
+  graph, and Istio ambient **waypoints** (Gateways of class `istio-waypoint`,
+  found by the labels Istio puts on their Service; bound by
+  `istio.io/use-waypoint`/`-namespace` on the Service, else the Namespace,
+  `none` opts out) lead to the routes attached to a Service they carry, or to
+  the Service itself. The UI shows everything no Address, Gateway, Ingress or
+  LoadBalancer/NodePort Service leads to under "Inside the cluster only"
+  dividers; "Hide in-cluster Services" hides it and its label then counts its
+  problems (`inClusterNodes` in `web/src/lib/traffic.ts`).
+  Authorized like namespace events (`logs` on the
   whole namespace). Needs the chart's `services`, `ingresses`, `httproutes`/
   `grpcroutes` and `gateways` (get only) rules; Gateways in protected namespaces
   are never read.
@@ -180,6 +219,19 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   get`): status/conditions/last operation and history (anyone who sees the
   namespace's apps), and the diff a sync would apply (`.../diff`, same right
   as the sync, audited as `argo.diff`; Secret contents are never shown).
+- **Live changes**: `GET /api/v1/live?ns=<cluster>/<ns>` (SSE, ≤10 namespaces,
+  ≤8 streams per user and pod) is one stream per browser tab
+  (`web/src/context/live.tsx`) for the namespaces the open page shows.
+  `kubeaccess.WatchNamespace` watches pods and events as `tiphys:user`,
+  attributes them to workloads by owner chain and detects rollouts (new
+  revision, then polled until complete); `WorkloadService.Live` needs a grant
+  in each namespace at connect and decides every change again
+  (`liveView`: details need `logs` on the workload). The stream is a
+  `StreamLive` in the `StreamManager` (no single target; ends after 10 min,
+  with the session or a disabled user) and the browser reconnects. Pages
+  refetch over REST on changes and poll slowly meanwhile; toasts are capped
+  at three, fold repeats and can be muted per page (memory only). No chart
+  change: the rules already allow watch.
 - **Argo apps on the namespace page** are shown although the rest of the Argo
   UI is behind `ARGO_UI = false` (`web/src/lib/features.ts`):
   `GET .../namespaces/{ns}/apps` returns every app whose destination or
@@ -204,7 +256,13 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   the UI: the row follows it on every watch event and sync (audited as
   `environment_from_secret`), `SetEnvironment` returns 409 while it is there,
   and the UI shows it read-only. Without it the environment is set in the UI
-  and kept when the annotation is removed. **The portal never writes, updates or deletes Secrets**:
+  and kept when the annotation is removed. `tiphys/protected: "true"` makes a
+  **protected cluster** (`Cluster.Protected`, audited as `protected_from_secret`,
+  always follows the annotation, kept if the Secret goes away): unlike protected
+  namespaces it is not part of `Decide`; it only hides the cluster from
+  non-admins' catalog pickers (`AccessService.HiddenCluster`) and
+  `AccessRequestService.Create` refuses it (422), so admins grant on it and
+  grants work as usual. **The portal never writes, updates or deletes Secrets**:
   `SecretStore.Put/Delete` always return `ErrReadOnly` and its Role is get/list/
   watch only; the operator manages the Secrets. `CLUSTER_REGISTRATION_FROM_UI=true`
   (local testing; config refuses it unless `CREDENTIAL_STORE=dir`) registers the

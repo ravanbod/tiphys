@@ -43,6 +43,9 @@ type WorkloadService struct {
 
 	nsMu    sync.Mutex
 	nsCache map[string]liveNamespaces
+
+	liveMu   sync.Mutex
+	liveOpen map[int64]int // open live streams per user
 }
 
 // liveNamespaces is a cluster's namespace list from Kubernetes, cached briefly
@@ -64,7 +67,7 @@ func NewWorkloadService(rootCtx context.Context, access *AccessService, kube Clu
 	return &WorkloadService{
 		access: access, kube: kube, argo: argo, audit: audit, streams: streams, ops: ops,
 		settings: settings, notify: notify, clock: clock, rootCtx: rootCtx, logger: logger,
-		nsCache: map[string]liveNamespaces{},
+		nsCache: map[string]liveNamespaces{}, liveOpen: map[int64]int{},
 	}
 }
 
@@ -151,9 +154,13 @@ func (s *WorkloadService) liveNamespaces(ctx context.Context, p Principal, clust
 }
 
 // CatalogNamespaces lists a cluster's namespaces for pickers: the ones read
-// from Kubernetes, protected namespaces removed.
+// from Kubernetes, protected namespaces removed; none of a protected cluster
+// for non-admins.
 func (s *WorkloadService) CatalogNamespaces(ctx context.Context, p Principal, cluster string) []string {
 	out := []string{}
+	if s.access.HiddenCluster(p, cluster) {
+		return out
+	}
 	for _, ns := range s.liveNamespaces(ctx, p, cluster) {
 		if !s.access.IsProtected(ns) {
 			out = append(out, ns)
@@ -206,7 +213,7 @@ func (s *WorkloadService) Namespaces(ctx context.Context, p Principal) []Namespa
 	// registered clusters.
 	snap := s.access.policy.Current()
 	for _, g := range snap.Policy.UserGrants(s.access.subjectOrZero(p.User.ID)) {
-		if _, ok := snap.Clusters[g.Scope.Cluster]; ok && g.Scope.Kind != domain.ScopeArgoProject {
+		if _, ok := snap.Clusters[g.Scope.Cluster]; ok && g.Scope.Namespace != "" {
 			add(g.Scope.Cluster, g.Scope.Namespace)
 		}
 	}

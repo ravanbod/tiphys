@@ -300,6 +300,35 @@ func TestE2ERestart(t *testing.T) {
 	}
 }
 
+func TestE2EWatchNamespaceSeesARollout(t *testing.T) {
+	e := newE2E(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	ch, err := e.a.WatchNamespace(ctx, e2eActor, "kind", e.ns)
+	if err != nil {
+		t.Fatalf("watch: %v", err)
+	}
+	web := domain.WorkloadRef{Kind: domain.KindDeployment, Name: "web"}
+	if err := e.a.Restart(ctx, e2eActor, e.target(web.Kind, web.Name)); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[application.ChangeType]bool{}
+	for c := range ch {
+		if c.Workload != web {
+			continue
+		}
+		seen[c.Type] = true
+		if c.Type == application.ChangeRolloutComplete {
+			break
+		}
+	}
+	for _, want := range []application.ChangeType{application.ChangePodAdded, application.ChangePodRemoved, application.ChangeRolloutStarted, application.ChangeRolloutComplete} {
+		if !seen[want] {
+			t.Errorf("no %s for %s (saw %v)", want, web, seen)
+		}
+	}
+}
+
 func TestE2ERunCronJob(t *testing.T) {
 	e := newE2E(t)
 	ctx := context.Background()

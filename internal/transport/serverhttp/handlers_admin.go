@@ -882,6 +882,7 @@ func (h *Handler) AdminOverview(c *gin.Context) {
 	ctx := c.Request.Context()
 	counts := h.svc.Streams.Counts()
 	pending, _ := h.svc.Requests.Pending(ctx)
+	pendingBG, _ := h.svc.BreakGlass.PendingCount(ctx)
 	bgs, _ := h.svc.BreakGlass.List(ctx, principal(c), 200)
 	now := time.Now()
 	activeBG := 0
@@ -892,6 +893,6 @@ func (h *Handler) AdminOverview(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"activeExecSessions": h.svc.Exec.ActiveCount(), "openLogStreams": counts[application.StreamLogs],
-		"pendingRequests": pending, "activeBreakGlasses": activeBG, "clustersUnreachable": h.svc.Clusters.UnreachableCount(ctx),
+		"pendingRequests": pending, "pendingBreakGlassRequests": pendingBG, "activeBreakGlasses": activeBG, "clustersUnreachable": h.svc.Clusters.UnreachableCount(ctx),
 	})
 }

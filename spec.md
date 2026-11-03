@@ -9,7 +9,7 @@ Tiphys is a brokered access portal: developers log in with Keycloak and read log
 **Goals**
 
 1. Replace Argo CD as the developers' path to logs and exec, and remove the \~7,000-line Argo RBAC policy from that use case.
-2. Grants by team or user, scoped to an Argo project, a namespace, or specific workloads.
+2. Grants by team or user, scoped to an Argo project, an environment, a cluster, a namespace, or specific workloads.
 3. Time windows, holidays and break-glass.
 4. A complete audit trail, including replayable exec sessions, that the portal itself cannot alter.
 5. Users never receive a kubeconfig, token or any credential that works against a cluster API server.
@@ -60,7 +60,7 @@ The portal connects to each API server directly, like Argo CD, using a token tha
 | Role | Can do |
 | --- | --- |
 | `user` | Use workloads per grants; request access; break-glass |
-| `auditor` | Read audit log, sessions and replays; read-only view of configuration |
+| `auditor` | Everything a `user` can (workloads per grants, access requests, break-glass), plus read the audit log, sessions and replays and a read-only view of configuration. Cannot change configuration or decide requests. |
 | `admin` | Everything, including configuration and terminating sessions |
 
 - Bootstrap: environment variable `TIPHYS_BOOTSTRAP_ADMINS` (comma-separated Keycloak usernames, case-insensitive) makes those users admins at every login, also when they already exist as regular users. `TIPHYS_ADMIN_GROUPS` (comma-separated Keycloak groups, read from the ID token's `groups` claim) does the same for group members. Both are audited as admin changes, never demote anyone, skip disabled users, and do not apply to local users. The portal database still holds the role; groups only grant it.
@@ -79,6 +79,8 @@ All decisions are made by one pure function in the portal, `Decide(user, target,
 - **Scope kinds**:
   - `argo_project`: every (cluster, namespace) that any Argo application in that project deploys to, on any cluster.
   - `namespace`: one namespace on one cluster.
+  - `cluster` (admin grants only, not requestable): every non-protected namespace of one cluster, including namespaces created later.
+  - `environment` (admin grants only, not requestable): every non-protected namespace whose environment (namespace override → Argo project override → cluster label) is the scope's. It follows label and override changes and does not depend on the Argo cache's age. `unlabeled` cannot be granted.
   - `workloads`: listed workloads (Deployment, StatefulSet, DaemonSet, Argo Rollout, CronJob) in one namespace on one cluster. Pods match when their owner chain resolves to a listed workload (Pod → ReplicaSet → Deployment/Rollout; Pod → StatefulSet; Pod → DaemonSet; Pod → Job → CronJob). A `workloads` scope cannot hold `sync`, since it cannot cover a whole application.
 
 ### Resolving Argo projects
@@ -104,16 +106,20 @@ Effective environment of a target, first match wins: namespace override → Argo
 
 ### Break-glass
 
-- A user with role `user` starts break-glass with a reason (≥ 20 characters) and a duration (default 60 minutes, at most the admin-set maximum). No approval.
+- A user with role `user` or `auditor` starts break-glass with a reason (≥ 20 characters) and a duration (default 60 minutes, at most the admin-set maximum).
+- The admin setting **break-glass mode** decides how it starts:
+  - `self` (default): the user starts it, no approval.
+  - `approval`: the user sends a break-glass request instead; it starts when an admin approves it, from that moment, for the requested duration or one the admin sets (shorter or longer, at most the maximum). The admin can also reject it (with a note); the requester can cancel it. A request not decided within the admin-set expiry (default 60 minutes) expires. A user has at most one pending request and none while a break-glass is active. Requests send a Rocket.Chat alert; the decision is sent to the requester too.
+  - `off`: see below.
 - While active, it overrides **only** time windows and holidays, for all of that user's grants. It never grants a scope or action the user lacks.
 - Starting it sends an immediate Rocket.Chat alert and writes an audit event. Every action taken under it is tagged with its id.
-- Admins can turn the whole feature off in the settings. Then nobody can start one, active ones stop overriding windows, and streams that depended on them end.
+- Admins can turn the whole feature off in the settings (mode `off`). Then nobody can start or request one, pending requests cannot be approved, active ones stop overriding windows, and streams that depended on them end. Switching between `self` and `approval` leaves active break-glasses and pending requests as they are.
 
 ### Evaluation order
 
 1. Target namespace is protected → **deny** `protected_namespace`.
 2. User disabled → **deny** `user_disabled`.
-3. Role `auditor` → **deny** `role`. Role `admin` → **allow** (skip 4–7).
+3. Role `admin` → **allow** (skip 4–7). Roles `user` and `auditor` continue; any other role → **deny** `role`.
 4. Collect grants held by the user directly or through any team; keep those not expired whose scope covers the target and whose actions include the action. None → **deny** `no_grant` (or `grant_expired` if only expired ones matched).
 5. Compute environment.
 6. Holiday or window closed? If not → **allow**.
@@ -140,7 +146,7 @@ All cluster access goes through the internal `kubeaccess` module (see Cluster co
 | `ListPods(workload)` | `logs` | list Pods, filtered by owner chain |
 | `Events(workload)` | `logs` | list Events for the workload and its pods |
 | `NamespaceEvents(ns)` | `logs` on the whole namespace | list Events of the namespace |
-| `NamespaceTraffic(ns)` | `logs` on the whole namespace | list Ingresses, HTTPRoutes, GRPCRoutes, Services, Pods, ReplicaSets; get the Gateways routes attach to |
+| `NamespaceTraffic(ns)` | `logs` on the whole namespace | list Ingresses, HTTPRoutes, GRPCRoutes, Services, Pods, ReplicaSets; get the Namespace (waypoint label), the Gateways routes attach to and the waypoints Services use |
 | `Logs(pod, container, opts)` | `logs` | GET `pods/log` |
 | `Exec(pod, container, shell)` | `exec` | CONNECT `pods/exec` (TTY, stdin) |
 | `Debug(pod, container, shell)` | `exec` | UPDATE `pods/ephemeralcontainers`, then CONNECT `pods/exec` |
@@ -190,7 +196,7 @@ Before every verb that names a pod, kubeaccess re-reads the pod and verifies its
 ### Namespace overview
 
 - **Events**: the newest 200 events of every object in the namespace (`NamespaceEvents`).
-- **Traffic**: how traffic from outside reaches the namespace, like Argo CD's network view: load balancer addresses and Gateways → Ingresses, HTTPRoutes and GRPCRoutes → Services → the workloads of the running pods each Service selects. Service selectors are matched in memory, never sent as selectors. A cluster without the Gateway API CRDs has no routes; Gateways in protected namespaces are never read; Services in other namespaces are shown but not followed. Boxes carry a problem when traffic may not get through (missing Service or Gateway, route not accepted, load balancer pending, no running or ready pods).
+- **Traffic**: how traffic from outside reaches the namespace, like Argo CD's network view: load balancer addresses and Gateways → Ingresses, HTTPRoutes and GRPCRoutes → Services → the workloads of the running pods each Service selects. Service selectors are matched in memory, never sent as selectors. A cluster without the Gateway API CRDs has no routes; Gateways in protected namespaces are never read; Services in other namespaces are shown but not followed. Istio ambient waypoints are drawn as entries of their own: a Service bound to one (`istio.io/use-waypoint` on the Service, else on the Namespace) is reached from the waypoint, through the HTTPRoutes attached to that Service when there are any; the waypoint's own Service and Deployment are not drawn, its box counts its pods. Everything no load balancer address, Gateway, Ingress or LoadBalancer/NodePort Service leads to (Services nothing exposes, waypoints and what they reach) comes last in each column under "Inside the cluster only"; "Hide in-cluster Services" hides it, and the toggle then counts its problems. Boxes carry a problem when traffic may not get through (missing Service or Gateway, route not accepted, load balancer pending, no running or ready pods).
 - **Argo CD applications** deploying to the namespace (destination or any resource there), with health, sync and last sync, from the Argo cache.
 
 ### Argo CD applications
@@ -211,7 +217,7 @@ The portal connects directly to each cluster's API server, the same way Argo CD 
 
 ### Credentials
 
-- Each cluster's kubeconfig (API server URL, CA, `tiphys-connector` token) is a Secret in the management cluster, in the portal's namespace, annotated `tiphys/cluster: <name>` (key `kubeconfig`). The name must match the cluster's name in Argo CD. An optional `tiphys/environment` annotation sets the cluster's environment and then wins over the admin UI.
+- Each cluster's kubeconfig (API server URL, CA, `tiphys-connector` token) is a Secret in the management cluster, in the portal's namespace, annotated `tiphys/cluster: <name>` (key `kubeconfig`). The name must match the cluster's name in Argo CD. An optional `tiphys/environment` annotation sets the cluster's environment and then wins over the admin UI. An optional `tiphys/protected: "true"` annotation makes it a protected cluster: users and auditors do not see it in the access request form and cannot request access to it, but admins still grant on it and those grants work as usual.
 - The operator creates, replaces and deletes these Secrets; **the portal never writes Secrets** (its Role is get/list/watch only). It watches them, so a change applies without restart. A cluster whose Secret goes away stays, shown as "No credential", so its grants and history are kept.
 - For local testing only, `CLUSTER_REGISTRATION_FROM_UI` lets admins add a cluster or replace its credential by pasting a kubeconfig, which is then written to a credential directory (never to a Secret).
 - **Privilege check**, on registration and every 5 minutes, using SelfSubjectAccessReview as the connector: it must be allowed to impersonate `tiphys:user`, and must be **denied** each of: get Secrets in `kube-system`, create Pods (any namespace, `kube-system`, `default`), add ephemeral containers to Pods in any namespace, impersonate `system:admin`, impersonate group `system:masters`. If any denied check passes, the credential is over-privileged: the portal refuses to use it and flags the cluster. This stops anyone from registering Argo CD's admin credential by mistake. A cluster is unusable until its check passes.
@@ -352,8 +358,8 @@ protected_namespaces (namespace UNIQUE)        -- applies to all clusters
 
 grants           (id, holder_kind CHECK (holder_kind IN ('team','user')),
                   team_id NULL, user_id NULL,
-                  scope_kind CHECK (scope_kind IN ('argo_project','namespace','workloads')),
-                  argo_project NULL, cluster_id NULL, namespace NULL,
+                  scope_kind CHECK (scope_kind IN ('argo_project','namespace','workloads','cluster','environment')),
+                  argo_project NULL, cluster_id NULL, namespace NULL, environment NULL,
                   actions TEXT[] CHECK (actions <@ ARRAY['logs','exec','restart','run-job','sync']),
                   expires_at NULL, note, created_by)
 grant_workloads  (grant_id, kind CHECK (kind IN ('Deployment','StatefulSet','DaemonSet','Rollout','CronJob')),
@@ -366,7 +372,7 @@ time_windows     (id, name, scope_kind CHECK (scope_kind IN ('global','environme
 holidays         (id, date, title, environments TEXT[])   -- empty = all environments
 
 break_glass      (id, user_id, reason, started_at, expires_at, ended_at NULL, ended_by NULL)
-access_requests  (id, user_id, scope fields as in grants, workloads JSONB, actions TEXT[],
+access_requests  (id, user_id, scope fields as in grants (no cluster/environment), workloads JSONB, actions TEXT[],
                   duration_hours NULL,           -- NULL = permanent
                   reason, status CHECK (status IN ('pending','approved','rejected','expired')),
                   decided_by NULL, decided_at NULL, decision_note NULL, resulting_grant_id NULL)
@@ -388,7 +394,7 @@ settings         (key PRIMARY KEY, value JSONB)
 **Rules**
 
 - Grant holder and scope fields are validated by CHECK constraints so that exactly the fields for the chosen kind are set.
-- Approving a request creates a grant in the same transaction.
+- Approving a request grants it in the same transaction: the actions are added to the requester's own unexpired grant on exactly the same scope when that grant ends no later than the approved access (the longest such grant; it then takes the new expiry), so the new actions never outlast what was approved; otherwise, or when the admin asks for a separate grant, a new grant is created. Team grants are never changed. The request form shows actions already held on the chosen scope as held and says which way approval will go; the admin sees the resulting grant before approving.
 - `audit_events` is **append-only** for the application's database role: grant it INSERT and SELECT only. Retention deletes run under a separate role used only by the retention job.
 - Expired grants are kept (the UI greys them out); a nightly job marks pending requests older than 7 days as `expired`.
 
@@ -396,7 +402,7 @@ settings         (key PRIMARY KEY, value JSONB)
 
 ### Audit events
 
-- Written for: login and logout; every `Decide` that ends in deny; every action started and its outcome (including Argo CD syncs); log views and downloads; Argo CD diff views; exec start and end; break-glass start and end; access requests and decisions; every admin change, with before and after values in `details`.
+- Written for: login and logout; every `Decide` that ends in deny; every action started and its outcome (including Argo CD syncs); log views and downloads; Argo CD diff views; exec start and end; break-glass requests, their decisions and cancellations, start and end (a start after approval is recorded with the approving admin as actor and the owner in `details`); access requests and decisions; every admin change, with before and after values in `details`.
 - Each event is written to PostgreSQL (for the UI) **and** pushed to Loki as one JSON line with label `app=tiphys`. The portal's Loki credentials can push but not delete. Loki is the copy that the portal cannot alter.
 - An action must not run if its "started" audit event cannot be written to PostgreSQL. A Loki push failure is retried in the background and does not block.
 - Kubernetes' own audit log (if enabled on the clusters) independently shows `tiphys:user` with the real username as an extra.
@@ -417,7 +423,7 @@ settings         (key PRIMARY KEY, value JSONB)
 
 ### Notifications (Rocket.Chat)
 
-- Incoming webhook URL and channel in settings; one toggle per event type: break-glass started, access request created, request decided (also sent to the requester as a direct message when possible), exec opened in prod, admin changes to roles or grants.
+- Incoming webhook URL and channel in settings; one toggle per event type: break-glass started, break-glass requested, access request created, request decided (also sent to the requester as a direct message when possible), exec opened in prod, admin changes to roles or grants.
 - Each message states who, what, where (cluster, namespace, workload), environment, reason if any, and a link to the matching portal page.
 - Sent asynchronously with up to 5 retries over 10 minutes. A notification failure is audited and never blocks the action.
 
@@ -504,6 +510,8 @@ settings         (key PRIMARY KEY, value JSONB)
 | Warning before forced close | 5 minutes |
 | Open session when a window closes | Warned, then terminated at close |
 | Break-glass duration | Default 60 minutes, maximum 240 (admin setting) |
+| Break-glass mode | `self` (no approval); `approval` and `off` are admin settings |
+| Break-glass request expiry | 60 minutes undecided (admin setting) |
 | Admins and time windows | Admins are not limited by time windows |
 | Retention defaults | Audit 365 days, recordings 180 days (admin settings) |
 | Log download cap | 50 MB per download |

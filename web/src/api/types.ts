@@ -41,9 +41,11 @@ export interface Me {
   teams: { id: number; name: string }[];
   csrfToken: string;
   breakGlass: BreakGlass | null;
+  /** The caller's pending break-glass request (mode `approval`). */
+  breakGlassRequest: BreakGlassRequest | null;
   settings: {
-    /** False when break-glass is turned off in the settings: the UI hides it. */
-    breakGlassEnabled: boolean;
+    /** `off`: the UI hides break-glass; `approval`: it is requested and an admin approves it. */
+    breakGlassMode: BreakGlassMode;
     breakGlassDefaultMinutes: number;
     breakGlassMaxMinutes: number;
     execIdleTimeoutMinutes: number;
@@ -58,6 +60,27 @@ export interface Me {
     localUsers: boolean;
   };
   argo: { fetchedAt: string | null; ageSeconds: number | null; stale: boolean };
+}
+
+/** How break-glass starts: not at all, by the user, or after an admin approves a request. */
+export type BreakGlassMode = 'off' | 'self' | 'approval';
+
+export interface BreakGlassRequest {
+  id: number;
+  userId: number;
+  username: string;
+  reason: string;
+  durationMinutes: number;
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
+  decidedBy: string | null;
+  decidedAt: string | null;
+  decisionNote: string | null;
+  /** Set when approved: the duration the admin approved (may differ from the request). */
+  approvedMinutes: number | null;
+  breakGlassId: number | null;
+  createdAt: string;
+  /** When a pending request expires undecided. */
+  expiresAt: string;
 }
 
 export interface BreakGlass {
@@ -344,11 +367,13 @@ export type ClientControl = { type: 'resize'; cols: number; rows: number } | { t
 
 // ---- access, requests, break-glass
 export interface ScopeView {
-  kind: 'argo_project' | 'namespace' | 'workloads';
+  /** cluster and environment are admin grants only, never requested. */
+  kind: 'argo_project' | 'namespace' | 'workloads' | 'cluster' | 'environment';
   argoProject?: string;
   cluster?: string;
   namespace?: string;
   workloads?: { kind: WorkloadKind; name: string }[];
+  environment?: string;
 }
 
 export interface MyAccessGrant {
@@ -573,6 +598,8 @@ export interface ClusterView {
   credentialLoaded: boolean;
   /** The Secret's tiphys/environment annotation sets the environment; not editable here. */
   environmentFromSecret: boolean;
+  /** The Secret's tiphys/protected annotation hides the cluster from access requests; grants on it still work. */
+  protected: boolean;
 }
 export interface EnvironmentOverride {
   id: number;
@@ -585,6 +612,7 @@ export interface EnvironmentOverride {
 export type EnvironmentOverrideInput = Omit<EnvironmentOverride, 'id'>;
 export type RocketEvent =
   | 'break_glass_started'
+  | 'break_glass_requested'
   | 'request_created'
   | 'request_decided'
   | 'exec_in_prod'
@@ -594,8 +622,10 @@ export interface SettingsView {
   execIdleTimeoutMinutes: number;
   breakGlassDefaultMinutes: number;
   breakGlassMaxMinutes: number;
-  /** Turns the whole break-glass feature on or off. Logs never need break-glass either way. */
-  breakGlassEnabled: boolean;
+  /** Off, started by users, or requested and approved by an admin. Logs never need break-glass either way. */
+  breakGlassMode: BreakGlassMode;
+  /** How long a break-glass request may wait for a decision before it expires. */
+  breakGlassRequestMaxAgeMinutes: number;
   retentionAuditDays: number;
   retentionRecordingsDays: number;
   rocket: { webhookUrl: string; channel: string; events: Record<RocketEvent, boolean> };
@@ -631,6 +661,39 @@ export interface AdminOverview {
   activeExecSessions: number;
   openLogStreams: number;
   pendingRequests: number;
+  pendingBreakGlassRequests: number;
   activeBreakGlasses: number;
   clustersUnreachable: number;
+}
+
+/** GET /live (Server-Sent Events): what changed in a followed namespace. */
+export type LiveChangeType =
+  | 'pod_added' | 'pod_removed' | 'pod_updated' | 'pod_restarted'
+  | 'workload' | 'rollout_started' | 'rollout_complete' | 'rollout_failed'
+  | 'event';
+export interface LiveStatus {
+  desired: number;
+  updated: number;
+  ready: number;
+  available: number;
+  complete: boolean;
+  failed: boolean;
+  message: string;
+}
+export interface LiveChange {
+  cluster: string;
+  namespace: string;
+  kind: WorkloadKind;
+  name: string;
+  type: LiveChangeType;
+  pod?: string;
+  phase?: string;
+  container?: string;
+  reason?: string;
+  exitCode?: number;
+  status?: LiveStatus;
+  event?: K8sEvent;
+}
+export interface LiveReady {
+  namespaces: { cluster: string; namespace: string; error?: 'denied' | 'invalid' | 'not_found' | 'cluster_error' }[];
 }

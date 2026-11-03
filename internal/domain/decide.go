@@ -347,13 +347,10 @@ func (p *Policy) evaluate(sub Subject, t Target, action Action, at time.Time) ev
 		return evaluation{Decision: Decision{Reason: ReasonUserDisabled}}
 	}
 	env := p.Environment(t.Cluster, t.Namespace)
-	switch sub.Role {
-	case RoleAuditor:
-		return evaluation{Decision: Decision{Reason: ReasonRole, Environment: env}}
-	case RoleAdmin:
+	switch {
+	case sub.Role == RoleAdmin:
 		return evaluation{Decision: Decision{Allowed: true, Reason: ReasonAdmin, Environment: env}}
-	case RoleUser:
-	default:
+	case !sub.Role.UsesGrants():
 		return evaluation{Decision: Decision{Reason: ReasonRole, Environment: env}}
 	}
 
@@ -413,6 +410,10 @@ func (p *Policy) grantCovers(g Grant, t Target) bool {
 		return t.Namespace != "" && p.argo.Covers(s.ArgoProject, t.Cluster, t.Namespace)
 	case ScopeNamespace:
 		return s.Cluster == t.Cluster && s.Namespace == t.Namespace
+	case ScopeCluster:
+		return t.Namespace != "" && s.Cluster == t.Cluster
+	case ScopeEnvironment:
+		return t.Namespace != "" && p.Environment(t.Cluster, t.Namespace) == s.Environment
 	case ScopeWorkloads:
 		if s.Cluster != t.Cluster || s.Namespace != t.Namespace || !t.HasWorkload() {
 			return false
@@ -714,7 +715,7 @@ func (p *Policy) holdsInNamespace(sub Subject, cluster, namespace string, a Acti
 	if p.evaluate(sub, Target{Cluster: cluster, Namespace: namespace}, a, now).HoldsGrant() {
 		return true
 	}
-	if sub.Role != RoleUser {
+	if !sub.Role.UsesGrants() {
 		return false
 	}
 	for _, g := range p.UserGrants(sub) {

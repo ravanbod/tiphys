@@ -160,8 +160,15 @@ func TestNamespaceTrafficFollowsIngressesRoutesAndServices(t *testing.T) {
 	edge("Service/shop/api", "Deployment/shop/api")
 	edge("Address//9.9.9.9", "Service/shop/lb")
 	edge("Service/shop/lb", "Deployment/shop/api")
-	if _, ok := nodes["Service/shop/internal"]; ok {
-		t.Fatal("a ClusterIP Service no route reaches must not be shown")
+	// A ClusterIP Service no route reaches is drawn without an entry.
+	edge("Service/shop/internal", "Deployment/shop/api")
+	if n := node("Service/shop/internal"); n.Ready != 1 || n.Total != 2 {
+		t.Fatalf("internal service: %+v", n)
+	}
+	for _, e := range g.Edges {
+		if e.To == "Service/shop/internal" {
+			t.Fatalf("edge into the internal service: %+v", e)
+		}
 	}
 
 	if n := node("Gateway/gw/public"); !slices.Equal(n.Details, []string{"class eg", "5.6.7.8"}) {
@@ -209,5 +216,97 @@ func TestNamespaceTrafficWithoutGatewayAPI(t *testing.T) {
 	}
 	if len(g.Nodes) != 1 || g.Nodes[0].Problem != "load balancer address pending" {
 		t.Fatalf("graph: %+v", g)
+	}
+}
+
+func TestNamespaceTrafficFollowsWaypoints(t *testing.T) {
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: testNS, Labels: map[string]string{labelUseWaypoint: "waypoint"}}}
+	wpSvc := service("waypoint", corev1.ServiceTypeClusterIP, map[string]string{labelGatewayName: "waypoint"}, "")
+	wpSvc.Labels = map[string]string{labelGatewayName: "waypoint", labelIstioManaged: istioMeshManaged}
+	wpPod := labelledPod("waypoint-1", ctrl("apps/v1", "ReplicaSet", "waypoint-abc"), "", true)
+	wpPod.Labels = map[string]string{labelGatewayName: "waypoint"}
+	labelled := func(s *corev1.Service, l map[string]string) *corev1.Service { s.Labels = l; return s }
+	r := newRig(t, ns, wpSvc, wpPod, replicaSet("waypoint-abc", ctrl("apps/v1", "Deployment", "waypoint")),
+		labelledPod("legacy-0", ctrl("apps/v1", "StatefulSet", "legacy"), "legacy", true),
+		service("reviews", corev1.ServiceTypeClusterIP, map[string]string{"app": "reviews"}, ""),
+		service("reviews-v1", corev1.ServiceTypeClusterIP, map[string]string{"app": "reviews"}, ""),
+		labelled(service("ratings", corev1.ServiceTypeClusterIP, map[string]string{"app": "ratings"}, ""), map[string]string{labelUseWaypoint: "waypoint"}),
+		labelled(service("details", corev1.ServiceTypeClusterIP, map[string]string{"app": "details"}, ""), map[string]string{labelUseWaypoint: "none"}),
+		labelled(service("legacy", corev1.ServiceTypeClusterIP, map[string]string{"app": "legacy"}, ""), map[string]string{labelUseWaypoint: "wl-only", labelUseWaypointNS: "mesh"}),
+		labelled(service("orders", corev1.ServiceTypeClusterIP, map[string]string{"app": "orders"}, ""), map[string]string{labelUseWaypoint: "gone"}),
+	)
+	waypoint := func(ns, name string, l map[string]string) *unstructured.Unstructured {
+		o := gatewayObj("Gateway", ns, name, map[string]any{"gatewayClassName": waypointClass}, map[string]any{"addresses": []any{map[string]any{"value": "10.0.0.9"}}})
+		o.SetLabels(l)
+		return o
+	}
+	for _, o := range []*unstructured.Unstructured{
+		waypoint(testNS, "waypoint", nil),
+		waypoint("mesh", "wl-only", map[string]string{labelWaypointFor: "workload"}),
+		gatewayObj("HTTPRoute", testNS, "reviews", map[string]any{
+			"parentRefs": []any{map[string]any{"group": "", "kind": "Service", "name": "reviews", "port": int64(9080)}},
+			"rules":      []any{map[string]any{"backendRefs": []any{map[string]any{"name": "reviews-v1", "port": int64(9080)}}}},
+		}, nil),
+	} {
+		gvr := map[string]schema.GroupVersionResource{"HTTPRoute": httpRouteGVRs[0], "Gateway": gatewayGVRs[0]}[o.GetKind()]
+		if _, err := r.dyn.Resource(gvr).Namespace(o.GetNamespace()).Create(context.Background(), o, metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	g, err := r.NamespaceTraffic(context.Background(), actor, "c1", testNS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := map[string]application.TrafficNode{}
+	for _, n := range g.Nodes {
+		nodes[n.ID] = n
+	}
+	edges := map[[2]string][]string{}
+	for _, e := range g.Edges {
+		edges[[2]string{e.From, e.To}] = e.Labels
+	}
+	const wp = "Waypoint/shop/waypoint"
+	if n := nodes[wp]; n.Ready != 1 || n.Total != 1 || n.Problem != "" || !slices.Equal(n.Details, []string{"10.0.0.9"}) {
+		t.Fatalf("waypoint: %+v", n)
+	}
+	for _, id := range []string{"Service/shop/waypoint", "Deployment/shop/waypoint"} {
+		if _, ok := nodes[id]; ok {
+			t.Fatalf("%s is drawn as the waypoint", id)
+		}
+	}
+	// The namespace's label binds reviews; its route is applied by the waypoint.
+	if l, ok := edges[[2]string{wp, "HTTPRoute/shop/reviews"}]; !ok || !slices.Equal(l, []string{"reviews:9080"}) {
+		t.Fatalf("waypoint -> route: %v %v", l, ok)
+	}
+	if _, ok := edges[[2]string{"HTTPRoute/shop/reviews", "Service/shop/reviews-v1"}]; !ok {
+		t.Fatal("route -> backend missing")
+	}
+	if n := nodes["Service/shop/reviews"]; !slices.Contains(n.Details, "via waypoint waypoint") || !slices.Contains(n.Details, "routed by HTTPRoute reviews") {
+		t.Fatalf("reviews: %+v", n)
+	}
+	if _, ok := edges[[2]string{wp, "Service/shop/reviews"}]; ok {
+		t.Fatal("a routed Service is reached through its route")
+	}
+	if n := nodes["HTTPRoute/shop/reviews"]; !slices.Equal(n.Details, []string{"for Service reviews:9080"}) {
+		t.Fatalf("route: %+v", n)
+	}
+	// Its own label binds ratings; none opts details out.
+	if _, ok := edges[[2]string{wp, "Service/shop/ratings"}]; !ok {
+		t.Fatal("waypoint -> ratings missing")
+	}
+	if n := nodes["Service/shop/details"]; slices.Contains(n.Details, "via waypoint waypoint") {
+		t.Fatalf("details opted out: %+v", n)
+	}
+	for k := range edges {
+		if k[1] == "Service/shop/details" {
+			t.Fatalf("edge into details: %v", k)
+		}
+	}
+	if n := nodes["Service/shop/legacy"]; n.Problem != "waypoint wl-only takes no Service traffic (waypoint-for: workload)" || !slices.Contains(n.Details, "via waypoint wl-only in mesh") {
+		t.Fatalf("legacy: %+v", n)
+	}
+	if n := nodes["Waypoint/shop/gone"]; n.Problem != "Waypoint not found" {
+		t.Fatalf("gone: %+v", n)
 	}
 }

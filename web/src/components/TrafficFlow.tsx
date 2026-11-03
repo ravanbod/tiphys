@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { TrafficGraph, TrafficNode, WorkloadKind } from '../api';
 import { KindTag } from './Badges';
@@ -9,6 +9,8 @@ const WORKLOAD_KINDS: string[] = ['Deployment', 'StatefulSet', 'DaemonSet', 'Rol
 
 interface Line { key: string; d: string; bad: boolean; title: string }
 
+const NONE: ReadonlySet<string> = new Set();
+
 /**
  * The namespace's traffic flow drawn like Argo CD's network view: entry
  * points → Ingresses and routes → Services → workloads. Boxes are laid out in
@@ -17,9 +19,12 @@ interface Line { key: string; d: string; bad: boolean; title: string }
  * path; clicking boxes pins theirs (clicking again, the background or Escape
  * unpins), and hovering only previews while nothing is pinned. A box's "+N more" shows all its rules; allOpen does so for every box,
  * and a box toggled on its own differs from allOpen until allOpen changes.
+ * The nodes in inCluster come last in their column, under a divider.
  */
-export function TrafficFlow({ graph, cluster, ns, allOpen }: { graph: TrafficGraph; cluster: string; ns: string; allOpen: boolean }) {
-  const cols = layoutTraffic(graph).map((nodes, i) => ({ title: TRAFFIC_COLUMNS[i], nodes })).filter((c) => c.nodes.length);
+export function TrafficFlow({ graph, cluster, ns, allOpen, inCluster = NONE }: {
+  graph: TrafficGraph; cluster: string; ns: string; allOpen: boolean; inCluster?: ReadonlySet<string>;
+}) {
+  const cols = layoutTraffic(graph, inCluster).map((nodes, i) => ({ title: TRAFFIC_COLUMNS[i], nodes })).filter((c) => c.nodes.length);
   const [toggled, setToggled] = useState({ allOpen, ids: new Set<string>() });
   if (toggled.allOpen !== allOpen) setToggled({ allOpen, ids: new Set() });
   const toggle = (id: string) => setToggled((t) => {
@@ -103,9 +108,10 @@ export function TrafficFlow({ graph, cluster, ns, allOpen }: { graph: TrafficGra
         {cols.map((c) => (
           <div key={c.title} className="tf-col">
             <div className="tf-hd">{c.title}</div>
-            {c.nodes.map((n) => (
+            {c.nodes.map((n, i) => (
+              <Fragment key={n.id}>
+              {inCluster.has(n.id) && !inCluster.has(c.nodes[i - 1]?.id ?? '') && <div className="tf-sep">Inside the cluster only</div>}
               <div
-                key={n.id}
                 ref={(el) => { if (el) boxes.current.set(n.id, el); else boxes.current.delete(n.id); }}
                 className={`tf-n${n.problem ? ' bad' : ''}${shown.includes(n.id) ? ' pin' : ''}${path && !path.nodes.has(n.id) ? ' dim' : ''}`}
                 onMouseEnter={() => setHover(n.id)}
@@ -115,6 +121,7 @@ export function TrafficFlow({ graph, cluster, ns, allOpen }: { graph: TrafficGra
               >
                 <NodeBody n={n} graph={graph} cluster={cluster} ns={ns} open={allOpen !== toggled.ids.has(n.id)} onToggle={() => toggle(n.id)} />
               </div>
+              </Fragment>
             ))}
           </div>
         ))}

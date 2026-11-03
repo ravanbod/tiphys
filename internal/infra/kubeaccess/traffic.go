@@ -45,7 +45,8 @@ var (
 )
 
 // NamespaceTraffic builds the graph from the namespace's Ingresses, HTTPRoutes,
-// GRPCRoutes and LoadBalancer/NodePort Services to the pods behind them. A
+// GRPCRoutes and LoadBalancer/NodePort Services to the pods behind them, plus
+// the Services nothing outside the cluster reaches (no edge into them). A
 // cluster without the Gateway API CRDs has no routes. Gateways in other
 // namespaces are read only for their class and addresses (never in protected
 // namespaces); Services in other namespaces are shown but not followed.
@@ -84,8 +85,6 @@ func (a *Access) NamespaceTraffic(ctx context.Context, actor application.KubeAct
 			addRoute(b, "GRPCRoute", r)
 		}
 	}
-	a.describeGateways(ctx, c, cluster, b)
-
 	svcs, err := c.kube.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return application.TrafficGraph{}, a.fail("list services", cluster, err)
@@ -98,7 +97,16 @@ func (a *Access) NamespaceTraffic(ctx context.Context, actor application.KubeAct
 	if err != nil {
 		return application.TrafficGraph{}, a.fail("list replicasets", cluster, err)
 	}
+	var nsLabels map[string]string
+	if o, err := c.kube.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{}); err != nil {
+		_ = a.fail("get namespace", cluster, err) // Services' own waypoint labels still count
+	} else {
+		nsLabels = o.Labels
+	}
 	b.services(svcs.Items, pods.Items, rss.Items)
+	b.waypoints(nsLabels, svcs.Items, pods.Items)
+	a.describeGateways(ctx, c, cluster, b)
+	b.connectWaypoints()
 	return b.graph(), nil
 }
 
@@ -118,11 +126,12 @@ func (a *Access) listGatewayAPI(ctx context.Context, c *clients, cluster, namesp
 	return nil, nil
 }
 
-// describeGateways reads the Gateways the routes attach to for their class,
-// addresses and Programmed condition. A Gateway that cannot be read (a
+// describeGateways reads the Gateways the routes attach to, and the
+// waypoints, for their class, addresses and Programmed condition (and a
+// waypoint's istio.io/waypoint-for). A Gateway that cannot be read (a
 // protected namespace, a chart without the gateways rule) keeps only its name.
 func (a *Access) describeGateways(ctx context.Context, c *clients, cluster string, b *trafficBuilder) {
-	for _, n := range b.nodesOf("Gateway") {
+	for _, n := range append(b.nodesOf("Gateway"), b.nodesOf("Waypoint")...) {
 		if !domain.ValidDNS1123Label(n.Namespace) || !domain.ValidDNS1123Subdomain(n.Name) || a.protected.IsProtected(n.Namespace) {
 			continue
 		}
@@ -135,7 +144,7 @@ func (a *Access) describeGateways(ctx context.Context, c *clients, cluster strin
 			}
 		}
 		if apierrors.IsNotFound(err) {
-			n.Problem = "Gateway not found"
+			n.Problem = n.Kind + " not found"
 			continue
 		}
 		if err != nil {
@@ -147,7 +156,12 @@ func (a *Access) describeGateways(ctx context.Context, c *clients, cluster strin
 			a.logger.Warn("unreadable gateway", zap.String("cluster", cluster), zap.String("gateway", n.ID), zap.Error(err))
 			continue
 		}
-		if gw.Spec.GatewayClassName != "" {
+		if n.Kind == "Waypoint" {
+			b.waypointFor[n.ID] = u.GetLabels()[labelWaypointFor]
+			if gw.Spec.GatewayClassName != waypointClass {
+				n.Problem = "not a waypoint: class " + gw.Spec.GatewayClassName
+			}
+		} else if gw.Spec.GatewayClassName != "" {
 			n.Details = append(n.Details, "class "+gw.Spec.GatewayClassName)
 		}
 		for _, addr := range gw.Status.Addresses {
@@ -155,7 +169,7 @@ func (a *Access) describeGateways(ctx context.Context, c *clients, cluster strin
 				n.Details = append(n.Details, addr.Value)
 			}
 		}
-		if cond := condition(gw.Status.Conditions, "Programmed"); cond != nil && cond.Status == metav1.ConditionFalse {
+		if cond := condition(gw.Status.Conditions, "Programmed"); cond != nil && cond.Status == metav1.ConditionFalse && n.Problem == "" {
 			n.Problem = "not programmed: " + condText(cond)
 		}
 	}
@@ -291,13 +305,24 @@ func condText(c *metav1.Condition) string {
 // --- graph building ---
 
 type trafficBuilder struct {
-	ns    string
-	nodes map[string]*application.TrafficNode
-	edges map[[2]string]*application.TrafficEdge
+	ns          string
+	nodes       map[string]*application.TrafficNode
+	edges       map[[2]string]*application.TrafficEdge
+	mesh        []meshParent      // routes attached to Services
+	bound       []waypointBinding // the namespace's Services that use a waypoint
+	waypointFor map[string]string // Waypoint node ID → its Gateway's istio.io/waypoint-for
 }
 
+// meshParent is a route attached to a Service; label names the Service (and port).
+type meshParent struct {
+	route, svc *application.TrafficNode
+	label      string
+}
+
+type waypointBinding struct{ svc, waypoint *application.TrafficNode }
+
 func newTrafficBuilder(ns string) *trafficBuilder {
-	return &trafficBuilder{ns: ns, nodes: map[string]*application.TrafficNode{}, edges: map[[2]string]*application.TrafficEdge{}}
+	return &trafficBuilder{ns: ns, nodes: map[string]*application.TrafficNode{}, edges: map[[2]string]*application.TrafficEdge{}, waypointFor: map[string]string{}}
 }
 
 // node returns the node, creating it on first use.
@@ -392,8 +417,25 @@ func addRoute[M matcher](b *trafficBuilder, kind string, r *gwRoute[M]) {
 	rn := b.node(kind, b.ns, r.Metadata.Name)
 	rn.Details = append(rn.Details, r.Spec.Hostnames...)
 	for _, p := range r.Spec.ParentRefs {
-		if p.Name == "" || p.groupKind(gatewayGK) != gatewayGK {
-			continue // mesh routes attach to Services, not Gateways
+		if p.Name == "" {
+			continue
+		}
+		if gk := p.groupKind(gatewayGK); gk.Kind == "Service" && (gk.Group == "" || gk.Group == "core") {
+			// A mesh route: the Service's waypoint applies it (connectWaypoints).
+			svc := b.node("Service", p.namespaceOr(b.ns), p.Name)
+			label := p.Name
+			if svc.Namespace != b.ns {
+				label = svc.Namespace + "/" + label
+			}
+			if p.Port != nil {
+				label += fmt.Sprintf(":%d", *p.Port)
+			}
+			rn.Details = append(rn.Details, "for Service "+label)
+			b.mesh = append(b.mesh, meshParent{route: rn, svc: svc, label: label})
+			continue
+		}
+		if p.groupKind(gatewayGK) != gatewayGK {
+			continue
 		}
 		var lbls []string
 		if p.SectionName != "" {
@@ -440,10 +482,14 @@ func (b *trafficBuilder) services(svcs []corev1.Service, pods []corev1.Pod, rss 
 	for i := range svcs {
 		s := &svcs[i]
 		byName[s.Name] = s
+		if _, ok := waypointOf(s.Labels); ok {
+			continue // drawn as its Waypoint
+		}
+		// Every Service is drawn, also those only reachable inside the cluster.
+		n := b.node("Service", b.ns, s.Name)
 		if s.Spec.Type != corev1.ServiceTypeLoadBalancer && s.Spec.Type != corev1.ServiceTypeNodePort {
 			continue
 		}
-		n := b.node("Service", b.ns, s.Name)
 		var addrs []string
 		for _, lb := range s.Status.LoadBalancer.Ingress {
 			addrs = append(addrs, lb.IP, lb.Hostname)

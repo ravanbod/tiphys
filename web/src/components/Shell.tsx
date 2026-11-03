@@ -4,6 +4,7 @@ import { api } from '../api';
 import type { Role } from '../api';
 import { useAuth } from '../context/auth';
 import { useBreakGlass } from '../context/breakglass';
+import { LiveIndicator } from '../context/live';
 import { useShellCtx } from '../context/shell';
 import { useTheme } from '../context/theme';
 import { useApi } from '../hooks/useApi';
@@ -14,6 +15,7 @@ import { Avatar, isProd } from './Badges';
 import { Icon } from './Icon';
 import type { IconName } from './Icon';
 import { ARGO_UI } from '../lib/features';
+import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 const ROLE_LABEL: Record<Role, string> = { user: 'Developer', admin: 'Admin', auditor: 'Auditor' };
 
@@ -31,7 +33,7 @@ function BreakGlassPill() {
   useEffect(() => {
     if (expired) void reload();
   }, [expired, reload]);
-  if (!bg || !bg.active || left === null) return null;
+  if (!bg || !bg.active || left === null) return <BreakGlassRequestPill />;
   return (
     <span className="bgp" role="status" aria-label="Break-glass is active">
       <Icon name="warn" size={14} />
@@ -42,8 +44,22 @@ function BreakGlassPill() {
   );
 }
 
+function BreakGlassRequestPill() {
+  const { me } = useAuth();
+  const { open } = useBreakGlass();
+  if (!me.breakGlassRequest) return null;
+  return (
+    <span className="bgp" role="status" aria-label="Break-glass request pending">
+      <Icon name="clock" size={14} />
+      <span className="bgp-t">Break-glass requested</span>
+      <span>waiting for approval</span>
+      <button type="button" onClick={() => open()}>View</button>
+    </span>
+  );
+}
+
 function UserMenu() {
-  const { me, isUser } = useAuth();
+  const { me, usesGrants } = useAuth();
   const { pref, setPref } = useTheme();
   const bg = useBreakGlass();
   const [open, setOpen] = useState(false);
@@ -89,11 +105,11 @@ function UserMenu() {
               {pref === p && <Icon name="check" style={{ marginLeft: 'auto' }} />}
             </button>
           ))}
-          {isUser && me.settings.breakGlassEnabled && !me.breakGlass && (
+          {usesGrants && breakGlassOn(me) && !me.breakGlass && (
             <>
               <div className="menu-sep" />
               <button type="button" role="menuitem" className="mi red" onClick={() => { setOpen(false); bg.open(); }}>
-                <Icon name="warn" />Use break-glass
+                <Icon name="warn" />{me.breakGlassRequest ? 'Break-glass request pending' : breakGlassLabel(me)}
               </button>
             </>
           )}
@@ -146,6 +162,7 @@ export function TopBar() {
         <kbd aria-hidden="true">/</kbd>
       </form>
       <span className="grow" />
+      <LiveIndicator />
       {ctx.cluster ? (
         <span className={`ctx${isProd(ctx.environment) ? ' prod' : ''}`}>
           <span className={`dot${isProd(ctx.environment) ? ' prod' : ''}`} />
@@ -176,7 +193,7 @@ function useNavGroups(): NavGroup[] {
     return [
       { items: [
         { to: '/', label: 'Workloads', icon: 'box', end: true },
-        { to: '/requests', label: 'Access requests', icon: 'inbox', badge: overview.data?.pendingRequests },
+        { to: '/requests', label: 'Access requests', icon: 'inbox', badge: overview.data && overview.data.pendingRequests + overview.data.pendingBreakGlassRequests },
       ] },
       { title: 'Audit', items: [
         { to: '/audit', label: 'Audit log', icon: 'list' },
@@ -192,6 +209,10 @@ function useNavGroups(): NavGroup[] {
     ];
   }
   return [
+    { items: [
+      { to: '/', label: 'Workloads', icon: 'box', end: true },
+      { to: '/access', label: 'My access', icon: 'key' },
+    ] },
     { title: 'Audit', items: [
       { to: '/audit', label: 'Audit log', icon: 'list' },
       { to: '/sessions', label: 'Sessions & replay', icon: 'term' },
@@ -208,7 +229,6 @@ function useNavGroups(): NavGroup[] {
 
 export function SideNav() {
   const groups = useNavGroups();
-  const { role } = useAuth();
   const { stars } = useStars();
   return (
     <nav className="side" aria-label="Main">
@@ -225,7 +245,7 @@ export function SideNav() {
           ))}
         </div>
       ))}
-      {role !== 'auditor' && stars.length > 0 && (
+      {stars.length > 0 && (
         <div className="sidegrp">
           <h6>Starred</h6>
           {stars.map((s) => (

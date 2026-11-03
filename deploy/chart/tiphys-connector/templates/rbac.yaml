@@ -89,7 +89,7 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes", "grpcroutes"]
     verbs: ["get", "list", "watch"]
-  # Only the Gateways routes attach to, for their class and addresses.
+  # Only the Gateways routes attach to and Istio waypoints, for their class and addresses.
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways"]
     verbs: ["get"]

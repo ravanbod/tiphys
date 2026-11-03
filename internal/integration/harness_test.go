@@ -212,6 +212,9 @@ func (noCreds) List(context.Context) ([]string, error)      { return nil, nil }
 func (noCreds) Environment(context.Context, string) (string, bool, error) {
 	return "", false, application.ErrNotFound
 }
+func (noCreds) Protected(context.Context, string) (bool, error) {
+	return false, application.ErrNotFound
+}
 func (noCreds) Watch(ctx context.Context, _ func(string)) error { <-ctx.Done(); return ctx.Err() }
 
 // ---- environment ----
@@ -293,7 +296,7 @@ func newEnvAuth(t *testing.T, tune func(*serverhttp.Options), tuneAuth func(*app
 	if err := settings.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassEnabled })
+	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassMode.Enabled() })
 	access := application.NewAccessService(policy, audit, clock)
 	notify := application.NewNotificationService(nopNotifier{}, settings, audit, publicURL, logger)
 	oidcStub := &stubOIDC{}
@@ -312,7 +315,7 @@ func newEnvAuth(t *testing.T, tune func(*serverhttp.Options), tuneAuth func(*app
 	workloads := application.NewWorkloadService(ctx, access, kube, argo, audit, streams, ops, settings, notify, clock, logger)
 	execSvc := application.NewExecService(ctx, access, kube, rec, audit, streams, store, settings, notify, clock, logger)
 	sessions := application.NewSessionService(store, rec, audit, execSvc)
-	bg := application.NewBreakGlassService(store, audit, policy, settings, notify, clock)
+	bg := application.NewBreakGlassService(store, audit, policy, settings, notify, clock, logger)
 	reqs := application.NewAccessRequestService(store, audit, policy, argo, notify, clock)
 	admin := application.NewAdminService(store, audit, policy, settings, notify, auth, streams, access, clock, logger)
 	clusters := application.NewClusterService(store, kube, noCreds{}, audit, policy, clock, logger)

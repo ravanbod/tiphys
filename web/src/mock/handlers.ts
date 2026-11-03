@@ -1,5 +1,5 @@
 import type {
-  AccessRequest, Action, AppSummary, AuditEvent, BreakGlass, CronJobSummary, DecisionExplain, ExecSessionView,
+  AccessRequest, Action, AppSummary, AuditEvent, BreakGlass, BreakGlassRequest, CronJobSummary, DecisionExplain, ExecSessionView,
   GrantInput, GrantView, JobSummary, K8sEvent, Me, NamespaceApp, NamespaceSummary, Pod, Role, ScopeView, SettingsView,
   ArgoAppStatus, ArgoDeploy, ArgoDiff, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
 } from '../api/types';
@@ -8,6 +8,8 @@ import { CSRF, DAY, HOUR, MIN, currentUser, getDb, nextId, personaRole } from '.
 import type { MockUser, NsDef, WlDef } from './db';
 import { WORKLOAD_ACTIONS, accessMap, covers, decide, envOf, nsActions, userGrants } from './decide';
 import { buildCast, commandList } from './scripts';
+import { mergeTarget } from '../lib/requestMerge';
+import { ACTIONS } from '../lib/grantForm';
 import { terminateSocket } from './sockets';
 
 export class MockError extends Error {
@@ -62,7 +64,6 @@ export function dispatch(method: string, path: string, query: URLSearchParams, b
 
 // ---- guards
 const isAdmin = (u: MockUser) => u.role === 'admin';
-function needWorker(u: MockUser) { if (u.role === 'auditor') throw forbiddenRole(); }
 function needStaff(u: MockUser) { if (u.role === 'user') throw forbiddenRole(); }
 function needAdmin(c: Ctx) { if (!isAdmin(c.user)) throw forbiddenRole(); }
 function adminRead(c: Ctx) { if (c.user.role === 'user') throw forbiddenRole(); }
@@ -114,7 +115,7 @@ function podsFor(n: NsDef, w: WlDef): Pod[] {
   const now = Date.now();
   const rs = w.kind === 'StatefulSet' ? '' : '7d9c6b5f4-';
   const count = w.desired || 1;
-  return Array.from({ length: count }, (_, i) => {
+  const pods: Pod[] = Array.from({ length: count }, (_, i) => {
     const name = w.kind === 'StatefulSet' ? `${w.name}-${i}` : `${w.name}-${rs}${POD_SUFFIX[i % POD_SUFFIX.length]}`;
     const oom = w.name === 'payments-api' && n.cluster === 'prod-1' && i === 1;
     const notReady = w.ready < w.desired && i >= w.ready;
@@ -131,12 +132,31 @@ function podsFor(n: NsDef, w: WlDef): Pod[] {
       containers: [container('app', oom ? 1 : notReady ? 14 : 0, oom), ...(two ? [{ ...container('metrics-sidecar'), memoryLimit: '64Mi' }] : [])],
     };
   });
+  const bumped = w.liveRestarts ?? 0;
+  if (bumped && pods[0]) {
+    const p = pods[0];
+    pods[0] = {
+      ...p, restarts: p.restarts + bumped, lastTermination: 'OOMKilled', lastTerminatedAt: iso(now - 20_000),
+      containers: p.containers.map((c, i) => (i === 0 ? { ...c, restartCount: c.restartCount + bumped, lastState: 'Terminated', lastReason: 'OOMKilled', lastExitCode: 137, lastFinishedAt: iso(now - 20_000) } : c)),
+    };
+  }
+  if (w.liveSurge && w.kind !== 'StatefulSet') {
+    const p = pods[0];
+    pods.push({
+      ...p, name: `${w.name}-5c8f7d6b9-n3w7p`, phase: 'Pending', ready: `0/${p.containers.length}`, restarts: 0, createdAt: iso(now - 3000),
+      lastTermination: null, lastTerminatedAt: null,
+      containers: p.containers.map((c) => ({ ...c, ready: false, state: 'Waiting', stateReason: 'ContainerCreating', restartCount: 0, lastState: null, lastReason: null, lastExitCode: null })),
+    });
+  }
+  return pods;
 }
 
 
 /**
- * The first workload behind an Ingress, the others behind HTTPRoutes on a
- * shared Gateway; a workload with no ready pods makes its Service a problem.
+ * The first workload behind an Ingress (and an in-cluster gRPC Service), the
+ * others behind HTTPRoutes on a shared Gateway; a workload with no ready pods
+ * makes its Service a problem. StatefulSets also get a headless Service, and
+ * a leftover Service selects nothing.
  */
 function trafficFor(n: NsDef): TrafficGraph {
   const g: TrafficGraph = { nodes: [], edges: [] };
@@ -155,13 +175,31 @@ function trafficFor(n: NsDef): TrafficGraph {
       const ing = node('Ingress', n.namespace, n.namespace, { details: ['class nginx', 'TLS'] });
       edge(node('Address', '', '10.20.0.15'), ing);
       edge(ing, svc, ...['/', '/api', '/v1', '/v2', '/webhooks', '/health', '/metrics', '/admin'].map((p) => host + p));
+      edge(node('Service', n.namespace, `${w.name}-grpc`, { details: ['port 9090'], ...pods }), node(w.kind, n.namespace, w.name));
     } else {
       const gw = node('Gateway', 'gateway-system', 'public', { details: ['class eg', '10.20.0.40'] });
       const route = node('HTTPRoute', n.namespace, w.name, { details: [`${w.name}.${host}`] });
       edge(gw, route, 'listener https');
       edge(route, svc, '/');
     }
+    if (w.kind === 'StatefulSet') {
+      edge(node('Service', n.namespace, `${w.name}-headless`, { details: ['headless', 'port 5432'], ...pods }), node(w.kind, n.namespace, w.name));
+    }
   });
+  if (g.nodes.length) node('Service', n.namespace, 'legacy-admin', { details: ['port 80→8080'], problem: 'no running pods match the selector' });
+  if (n.cluster === 'prod-1' && n.namespace === 'payments-worker') {
+    // Istio ambient: a waypoint applies a mesh route to one Service and carries another directly.
+    const via = (id: string, ...more: string[]) => g.nodes.find((x) => x.id === id)?.details.push('via waypoint waypoint', ...more);
+    const wp = node('Waypoint', n.namespace, 'waypoint', { details: ['10.96.4.12'], ready: 2, total: 2 });
+    const grpc = `Service/${n.namespace}/payments-worker-grpc`;
+    const route = node('HTTPRoute', n.namespace, 'payments-worker-grpc', { details: ['for Service payments-worker-grpc:9090'] });
+    edge(wp, route, 'payments-worker-grpc:9090');
+    edge(route, grpc, '/');
+    via(grpc, 'routed by HTTPRoute payments-worker-grpc');
+    const headless = `Service/${n.namespace}/payments-ledger-headless`;
+    edge(wp, headless);
+    via(headless);
+  }
   return g;
 }
 function eventsFor(w: WlDef): K8sEvent[] {
@@ -175,7 +213,7 @@ function eventsFor(w: WlDef): K8sEvent[] {
   ];
   if (w.name === 'payments-api') out.unshift(e('Warning', 'OOMKilling', 'Container app exceeded its memory limit and was killed.', '7d9c6b5f4-9mzt5', 121));
   if (w.ready < w.desired) out.unshift(e('Warning', 'BackOff', 'Back-off restarting failed container app', '7d9c6b5f4-4tn2p', 3, 42));
-  return out;
+  return [...(w.liveEvents ?? []), ...out];
 }
 
 function jobsFor(cluster: string, ns: string, cron: string): JobSummary[] {
@@ -198,7 +236,8 @@ on('GET', '/me', (c) => {
   const me: Me = {
     id: c.user.id, username: c.user.username, displayName: c.user.displayName, role: c.user.role,
     teams: c.user.teams, csrfToken: CSRF, breakGlass: bg,
-    settings: { breakGlassDefaultMinutes: d.settings.breakGlassDefaultMinutes, breakGlassMaxMinutes: d.settings.breakGlassMaxMinutes, execIdleTimeoutMinutes: d.settings.execIdleTimeoutMinutes, execMaxSessionMinutes: d.settings.execMaxSessionMinutes, clusterRegistration: true, debugEnabled: true, argoUrl: 'https://argocd.example.com', breakGlassEnabled: d.settings.breakGlassEnabled, localUsers: true },
+    breakGlassRequest: d.settings.breakGlassMode === 'off' ? null : pendingBgRequest(c.user.id) ?? null,
+    settings: { breakGlassDefaultMinutes: d.settings.breakGlassDefaultMinutes, breakGlassMaxMinutes: d.settings.breakGlassMaxMinutes, execIdleTimeoutMinutes: d.settings.execIdleTimeoutMinutes, execMaxSessionMinutes: d.settings.execMaxSessionMinutes, clusterRegistration: true, debugEnabled: true, argoUrl: 'https://argocd.example.com', breakGlassMode: d.settings.breakGlassMode, localUsers: true },
     argo: { fetchedAt: iso(d.argo.fetchedAt), ageSeconds: Math.round((Date.now() - d.argo.fetchedAt) / 1000) + (d.argo.stale ? 1200 : 0), stale: d.argo.stale },
   };
   return me;
@@ -207,7 +246,6 @@ on('POST', '/auth/logout', () => ({ redirect: '/login' }));
 
 // ---- catalog / workloads
 on('GET', '/apps', (c) => {
-  needWorker(c.user);
   const d = getDb();
   const out: AppSummary[] = [];
   for (const a of d.apps) {
@@ -219,7 +257,6 @@ on('GET', '/apps', (c) => {
   return out;
 });
 on('GET', '/namespaces', (c) => {
-  needWorker(c.user);
   const d = getDb();
   const out: NamespaceSummary[] = [];
   for (const n of d.namespaces) {
@@ -234,13 +271,11 @@ on('GET', '/namespaces', (c) => {
   return out;
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const n = findNs(c.params.c, c.params.ns);
   return n.workloads.filter((w) => w.kind !== 'CronJob' || true).map((w) => summary(c.user, n, w)).filter(canUse);
 });
 on('GET', '/clusters/:c/namespaces/:ns/apps', (c) => {
-  needWorker(c.user);
   const { c: cluster, ns } = c.params;
   if (!nsActions(c.user, cluster, ns).length) throw denied(decide(c.user, cluster, ns, null, null, 'logs'));
   return getDb().apps.filter((a) => a.cluster === cluster && a.namespace === ns).map((a, i): NamespaceApp => ({
@@ -251,7 +286,6 @@ on('GET', '/clusters/:c/namespaces/:ns/apps', (c) => {
   }));
 });
 function mockApp(c: { user: MockUser; params: Record<string, string> }) {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { c: cluster, ns, app } = c.params;
   if (!nsActions(c.user, cluster, ns).length) throw denied(decide(c.user, cluster, ns, null, null, 'logs'));
@@ -304,7 +338,6 @@ on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/diff', (c): ArgoDiff => 
   };
 });
 on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/sync', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { c: cluster, ns, app } = c.params;
   const a = getDb().apps.find((x) => x.cluster === cluster && x.namespace === ns && x.name === app);
@@ -316,7 +349,6 @@ on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/sync', (c) => {
   return { __status: 202, data: { operationId: id } };
 });
 on('GET', '/clusters/:c/namespaces/:ns/access', (c) => {
-  needWorker(c.user);
   const { c: cluster, ns } = c.params;
   const kind = (c.query.get('kind') as WorkloadKind) || null;
   const name = c.query.get('name') || null;
@@ -339,7 +371,6 @@ on('GET', '/clusters/:c/namespaces/:ns/access', (c) => {
     }));
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   const s = summary(c.user, ns, wl);
@@ -354,7 +385,6 @@ on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name', (c) => {
   return detail;
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   requireAction(c.user, ns, wl, 'logs');
@@ -368,21 +398,18 @@ on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods', (c) => {
   return podsFor(ns, wl);
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods/:pod/logs/download', (c) => {
-  needWorker(c.user);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   requireAction(c.user, ns, wl, 'logs');
   const lines = Array.from({ length: 200 }, (_, i) => `${new Date(Date.now() - (200 - i) * 1000).toISOString()} INFO mock log line ${i} from ${c.params.pod}`);
   return { __raw: lines.join('\n') + '\n', __type: 'text/plain' };
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/events', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   requireAction(c.user, ns, wl, 'logs');
   return eventsFor(wl);
 });
 on('GET', '/clusters/:c/namespaces/:ns/events', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const n = findNs(c.params.c, c.params.ns);
   const info = decide(c.user, n.cluster, n.namespace, null, null, 'logs');
@@ -390,7 +417,6 @@ on('GET', '/clusters/:c/namespaces/:ns/events', (c) => {
   return n.workloads.flatMap(eventsFor).sort((a, b) => Date.parse(b.lastSeen) - Date.parse(a.lastSeen));
 });
 on('GET', '/clusters/:c/namespaces/:ns/traffic', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const n = findNs(c.params.c, c.params.ns);
   const info = decide(c.user, n.cluster, n.namespace, null, null, 'logs');
@@ -398,7 +424,6 @@ on('GET', '/clusters/:c/namespaces/:ns/traffic', (c) => {
   return trafficFor(n);
 });
 on('GET', '/clusters/:c/namespaces/:ns/cronjobs', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const n = findNs(c.params.c, c.params.ns);
   const list = n.workloads.filter((w) => w.kind === 'CronJob').map((w) => cronSummary(c.user, n, w));
@@ -407,7 +432,6 @@ on('GET', '/clusters/:c/namespaces/:ns/cronjobs', (c) => {
 
 const opId = () => 'op_' + Math.random().toString(36).slice(2, 10);
 on('POST', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/restart', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   if (wl.kind === 'CronJob') throw new MockError(422, 'invalid', 'CronJobs cannot be restarted');
@@ -417,7 +441,6 @@ on('POST', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/restart', (c) => {
   return { __status: 202, data: { operationId: id } };
 });
 on('POST', '/clusters/:c/namespaces/:ns/cronjobs/:name/run', (c) => {
-  needWorker(c.user);
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, 'cronjobs', c.params.name);
   requireAction(c.user, ns, wl, 'run-job');
@@ -434,24 +457,26 @@ on('POST', '/clusters/:c/namespaces/:ns/cronjobs/:name/run', (c) => {
   return { __status: 202, data: { operationId: id, jobName } };
 });
 
-on('GET', '/catalog/argo-projects', (c) => { needWorker(c.user); return [...new Set([...getDb().apps.map((a) => a.project), 'search-lab'])].sort(); });
-on('GET', '/catalog/clusters', (c) => { needWorker(c.user); return getDb().clusters.filter((x) => x.usable).map((x) => ({ name: x.name, environment: x.environment ?? 'unlabeled' })); });
+on('GET', '/catalog/argo-projects', () => { return [...new Set([...getDb().apps.map((a) => a.project), 'search-lab'])].sort(); });
+const hiddenCluster = (u: MockUser, name?: string) => !isAdmin(u) && !!getDb().clusters.find((x) => x.name === name)?.protected;
+on('GET', '/catalog/clusters', (c) => { return getDb().clusters.filter((x) => x.usable && !hiddenCluster(c.user, x.name)).map((x) => ({ name: x.name, environment: x.environment ?? 'unlabeled' })); });
 on('GET', '/catalog/clusters/:c/namespaces', (c) => {
-  needWorker(c.user);
   const d = getDb();
+  if (hiddenCluster(c.user, c.params.c)) return [];
   return [...new Set([...d.namespaces.filter((n) => n.cluster === c.params.c).map((n) => n.namespace), ...(c.params.c === 'prod-1' ? ['payments-sandbox'] : [])])].filter((n) => !d.protectedNamespaces.includes(n)).sort();
 });
 on('GET', '/catalog/clusters/:c/namespaces/:ns/workloads', (c) => {
-  needWorker(c.user);
   if (getDb().protectedNamespaces.includes(c.params.ns)) throw new MockError(403, 'forbidden_role', 'Protected namespace');
+  if (hiddenCluster(c.user, c.params.c)) throw new MockError(404, 'not_found', 'Not found');
   const n = getDb().namespaces.find((x) => x.cluster === c.params.c && x.namespace === c.params.ns);
   return (n?.workloads ?? []).map((w) => ({ kind: w.kind, name: w.name }));
 });
 
 // ---- access, requests, break-glass
-function scopeText(s: ScopeView): string { return s.kind === 'argo_project' ? s.argoProject! : s.namespace!; }
+function scopeText(s: ScopeView): string {
+  return s.kind === 'argo_project' ? s.argoProject! : s.kind === 'environment' ? s.environment! : s.kind === 'cluster' ? s.cluster! : s.namespace!;
+}
 on('GET', '/my/access', (c) => {
-  needWorker(c.user);
   const d = getDb();
   const grants = userGrants(c.user).map((g) => ({
     id: g.id, holder: { kind: g.holder.kind, name: g.holder.name }, scope: g.scope, actions: g.actions, expiresAt: g.expiresAt, note: g.note,
@@ -468,12 +493,13 @@ on('GET', '/access-requests', (c) => {
   return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 });
 on('POST', '/access-requests', (c) => {
-  needWorker(c.user);
   const b = c.body as unknown as { scope: ScopeView; actions: Action[]; durationHours: number | null; reason: string };
   const fields: Record<string, string> = {};
   if (!b.reason || b.reason.trim().length < 10) fields.reason = 'Please explain why you need this (at least 10 characters).';
   if (!b.actions?.length) fields.actions = 'Pick at least one action.';
   if (b.scope?.kind === 'workloads' && !b.scope.workloads?.length) fields.workloads = 'Pick at least one workload.';
+  if (b.scope?.kind === 'cluster' || b.scope?.kind === 'environment') fields.scope = 'A whole cluster or environment is granted by an admin only, not requested.';
+  if (b.scope?.cluster && hiddenCluster(c.user, b.scope.cluster)) fields.scope = 'This cluster is protected and cannot be requested.';
   if (Object.keys(fields).length) throw invalid(fields);
   const r: AccessRequest = {
     id: nextId('request'), userId: c.user.id, username: c.user.username, scope: b.scope, actions: b.actions, durationHours: b.durationHours, reason: b.reason,
@@ -490,15 +516,27 @@ on('POST', '/access-requests/:id/approve', (c) => {
   const r = d.requests.find((x) => x.id === Number(c.params.id));
   if (!r) throw notFound();
   if (r.status !== 'pending') throw new MockError(409, 'conflict', 'This request was already decided.');
-  const b = c.body as { note?: string; durationHours?: number | null; actions?: Action[] };
-  if (b.actions?.length) r.actions = r.actions.filter((a) => b.actions!.includes(a));
+  const b = c.body as { note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean };
+  if (b.actions?.length) {
+    if (r.scope.kind === 'workloads' && b.actions.includes('sync')) throw invalid({ actions: 'Sync needs a namespace, cluster, environment or Argo project scope.' });
+    r.actions = b.actions;
+  }
   const hours = b.durationHours === undefined ? r.durationHours : b.durationHours;
   const u = d.users.find((x) => x.id === r.userId)!;
-  const g: GrantView = {
-    id: nextId('grant'), holder: holderOfUser(u), scope: r.scope, actions: r.actions, expiresAt: hours === null ? null : iso(Date.now() + hours * HOUR), note: `Request #${r.id}`,
-    expired: false, createdBy: c.user.username, createdAt: iso(Date.now()), environment: null,
-  };
-  d.grants.push(g);
+  const expiresAt = hours === null ? null : Date.now() + hours * HOUR;
+  // Like the server: add to the requester's own same-scope grant that ends no later.
+  const own = d.grants.filter((g) => g.holder.kind === 'user' && g.holder.id === u.id);
+  let g = b.separate ? null : mergeTarget(own, r.scope, expiresAt, Date.now());
+  if (g) {
+    g.actions = ACTIONS.filter((a) => g!.actions.includes(a) || r.actions.includes(a));
+    g.expiresAt = expiresAt === null ? null : iso(expiresAt);
+  } else {
+    g = {
+      id: nextId('grant'), holder: holderOfUser(u), scope: r.scope, actions: r.actions, expiresAt: expiresAt === null ? null : iso(expiresAt), note: `Request #${r.id}`,
+      expired: false, createdBy: c.user.username, createdAt: iso(Date.now()), environment: null,
+    };
+    d.grants.push(g);
+  }
   Object.assign(r, { status: 'approved', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: b.note || null, resultingGrantId: g.id, durationHours: hours });
   logAudit(c.user, 'access_request.approved', null, 'succeeded', { details: { requestId: r.id, grantId: g.id } });
   return r;
@@ -514,20 +552,104 @@ on('POST', '/access-requests/:id/reject', (c) => {
   logAudit(c.user, 'access_request.rejected', null, 'succeeded', { details: { requestId: r.id } });
   return r;
 });
-on('POST', '/break-glass', (c) => {
-  if (c.user.role !== 'user') throw forbiddenRole();
+/** Checks a break-glass reason and duration; returns the minutes. */
+function bgInput(b: { reason?: string; durationMinutes?: number }): number {
   const d = getDb();
-  const b = c.body as { reason?: string; durationMinutes?: number };
   const fields: Record<string, string> = {};
   if (!b.reason || b.reason.trim().length < 20) fields.reason = 'Reason must be at least 20 characters.';
   const mins = b.durationMinutes ?? d.settings.breakGlassDefaultMinutes;
-  if (mins > d.settings.breakGlassMaxMinutes) fields.durationMinutes = `At most ${d.settings.breakGlassMaxMinutes} minutes.`;
+  if (mins < 1 || mins > d.settings.breakGlassMaxMinutes) fields.durationMinutes = `At most ${d.settings.breakGlassMaxMinutes} minutes.`;
   if (Object.keys(fields).length) throw invalid(fields);
-  if (d.breakGlasses.some((x) => x.userId === c.user.id && x.active && Date.parse(x.expiresAt) > Date.now())) throw new MockError(409, 'conflict', 'Break-glass is already active.');
-  const bg: BreakGlass = { id: nextId('bg'), userId: c.user.id, username: c.user.username, reason: b.reason!.trim(), startedAt: iso(Date.now()), expiresAt: iso(Date.now() + mins * MIN), endedAt: null, endedBy: null, active: true };
-  d.breakGlasses.unshift(bg);
-  logAudit(c.user, 'break_glass.started', null, 'succeeded', { breakGlassId: bg.id, details: { reason: bg.reason, minutes: mins } });
+  return mins;
+}
+const hasActiveBg = (userId: number) => getDb().breakGlasses.some((x) => x.userId === userId && x.active && Date.parse(x.expiresAt) > Date.now());
+/** Marks pending requests past their expiry as expired, as the server does every 30 s. */
+function expireBgRequests() {
+  for (const r of getDb().bgRequests) if (r.status === 'pending' && Date.parse(r.expiresAt) <= Date.now()) Object.assign(r, { status: 'expired', decidedBy: 'system', decidedAt: r.expiresAt });
+}
+function pendingBgRequest(userId: number): BreakGlassRequest | undefined {
+  expireBgRequests();
+  return getDb().bgRequests.find((r) => r.userId === userId && r.status === 'pending');
+}
+function startBg(userId: number, username: string, reason: string, mins: number): BreakGlass {
+  const bg: BreakGlass = { id: nextId('bg'), userId, username, reason, startedAt: iso(Date.now()), expiresAt: iso(Date.now() + mins * MIN), endedAt: null, endedBy: null, active: true };
+  getDb().breakGlasses.unshift(bg);
+  return bg;
+}
+on('POST', '/break-glass', (c) => {
+  if (c.user.role === 'admin') throw forbiddenRole();
+  const d = getDb();
+  if (d.settings.breakGlassMode === 'off') throw new MockError(403, 'break_glass_disabled', 'Break-glass is turned off.');
+  if (d.settings.breakGlassMode === 'approval') throw new MockError(409, 'break_glass_approval_required', "Break-glass needs an admin's approval: request it instead.");
+  const b = c.body as { reason?: string; durationMinutes?: number };
+  const mins = bgInput(b);
+  if (hasActiveBg(c.user.id)) throw new MockError(409, 'conflict', 'Break-glass is already active.');
+  const bg = startBg(c.user.id, c.user.username, b.reason!.trim(), mins);
+  logAudit(c.user, 'break_glass.start', null, 'succeeded', { breakGlassId: bg.id, details: { reason: bg.reason, minutes: mins } });
   return { __status: 201, data: bg };
+});
+on('POST', '/break-glass/requests', (c) => {
+  if (c.user.role === 'admin') throw forbiddenRole();
+  const d = getDb();
+  if (d.settings.breakGlassMode === 'off') throw new MockError(403, 'break_glass_disabled', 'Break-glass is turned off.');
+  if (d.settings.breakGlassMode === 'self') throw new MockError(409, 'conflict', 'conflict: break-glass starts without approval');
+  const b = c.body as { reason?: string; durationMinutes?: number };
+  const mins = bgInput(b);
+  if (hasActiveBg(c.user.id)) throw new MockError(409, 'conflict', 'Break-glass is already active.');
+  if (pendingBgRequest(c.user.id)) throw new MockError(409, 'conflict', 'conflict: you already have a pending break-glass request');
+  const now = Date.now();
+  const r: BreakGlassRequest = {
+    id: nextId('bgRequest'), userId: c.user.id, username: c.user.username, reason: b.reason!.trim(), durationMinutes: mins, status: 'pending',
+    decidedBy: null, decidedAt: null, decisionNote: null, approvedMinutes: null, breakGlassId: null, createdAt: iso(now),
+    expiresAt: iso(now + d.settings.breakGlassRequestMaxAgeMinutes * MIN),
+  };
+  d.bgRequests.unshift(r);
+  logAudit(c.user, 'break_glass.request', null, 'succeeded', { reason: r.reason, details: { requestId: r.id, minutes: mins } });
+  return { __status: 201, data: r };
+});
+on('GET', '/break-glass/requests', (c) => {
+  needStaff(c.user);
+  expireBgRequests();
+  const status = c.query.get('status');
+  return getDb().bgRequests.filter((r) => !status || r.status === status);
+});
+function pendingBgById(id: string): BreakGlassRequest {
+  expireBgRequests();
+  const r = getDb().bgRequests.find((x) => x.id === Number(id));
+  if (!r) throw notFound();
+  if (r.status !== 'pending') throw new MockError(409, 'conflict', `conflict: request is already ${r.status}`);
+  return r;
+}
+on('POST', '/break-glass/requests/:id/approve', (c) => {
+  needAdmin(c);
+  const d = getDb();
+  if (d.settings.breakGlassMode === 'off') throw new MockError(403, 'break_glass_disabled', 'Break-glass is turned off.');
+  const r = pendingBgById(c.params.id);
+  const b = (c.body ?? {}) as { note?: string; durationMinutes?: number };
+  const mins = b.durationMinutes || r.durationMinutes;
+  if (mins < 1 || mins > d.settings.breakGlassMaxMinutes) throw invalid({ durationMinutes: `duration must be between 1 and ${d.settings.breakGlassMaxMinutes} minutes` });
+  if (hasActiveBg(r.userId)) throw new MockError(409, 'conflict', `conflict: ${r.username} already has an active break-glass`);
+  const bg = startBg(r.userId, r.username, r.reason, mins);
+  Object.assign(r, { status: 'approved', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: b.note ?? null, approvedMinutes: mins, breakGlassId: bg.id });
+  logAudit(c.user, 'break_glass.start', null, 'succeeded', { breakGlassId: bg.id, reason: r.reason, details: { owner: r.username, requestId: r.id, minutes: mins, requestedMinutes: r.durationMinutes } });
+  return r;
+});
+on('POST', '/break-glass/requests/:id/reject', (c) => {
+  needAdmin(c);
+  const r = pendingBgById(c.params.id);
+  const note = ((c.body ?? {}) as { note?: string }).note ?? null;
+  Object.assign(r, { status: 'rejected', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: note });
+  logAudit(c.user, 'break_glass.reject', null, 'succeeded', { details: { requestId: r.id, owner: r.username, note } });
+  return r;
+});
+on('POST', '/break-glass/requests/:id/cancel', (c) => {
+  const r = getDb().bgRequests.find((x) => x.id === Number(c.params.id));
+  if (!r) throw notFound();
+  if (r.userId !== c.user.id) throw forbiddenRole();
+  pendingBgById(c.params.id);
+  Object.assign(r, { status: 'cancelled', decidedBy: c.user.username, decidedAt: iso(Date.now()) });
+  logAudit(c.user, 'break_glass.cancel', null, 'succeeded', { details: { requestId: r.id, owner: r.username } });
+  return r;
 });
 on('POST', '/break-glass/:id/end', (c) => {
   const bg = getDb().breakGlasses.find((x) => x.id === Number(c.params.id));
@@ -687,15 +809,17 @@ function grantFromInput(b: GrantInput, id: number, createdBy: string): GrantView
   if (!b.actions?.length) fields.actions = 'Pick at least one action.';
   if (b.scope.kind === 'workloads' && !b.scope.workloads?.length) fields.workloads = 'Pick at least one workload.';
   if (b.scope.kind === 'argo_project' && !b.scope.argoProject) fields.argoProject = 'Pick an Argo project.';
-  if (b.scope.kind !== 'argo_project' && (!b.scope.cluster || !b.scope.namespace)) fields.namespace = 'Pick a cluster and namespace.';
-  if (b.scope.kind !== 'argo_project' && b.scope.namespace && d.protectedNamespaces.includes(b.scope.namespace)) fields.namespace = 'This namespace is protected.';
+  if (b.scope.kind === 'environment' && !b.scope.environment) fields.environment = 'Pick an environment.';
+  if (b.scope.kind === 'cluster' && !b.scope.cluster) fields.cluster = 'Pick a cluster.';
+  if ((b.scope.kind === 'namespace' || b.scope.kind === 'workloads') && (!b.scope.cluster || !b.scope.namespace)) fields.namespace = 'Pick a cluster and namespace.';
+  if (b.scope.namespace && d.protectedNamespaces.includes(b.scope.namespace)) fields.namespace = 'This namespace is protected.';
   if (Object.keys(fields).length) throw invalid(fields);
   const holderName = b.holder.kind === 'team' ? d.teams.find((t) => t.id === b.holder.id)?.name : d.users.find((u) => u.id === b.holder.id)?.displayName;
   if (!holderName) throw invalid({ holder: 'Unknown holder.' });
   return {
     id, holder: { kind: b.holder.kind, id: b.holder.id, name: holderName }, scope: b.scope, actions: b.actions, expiresAt: b.expiresAt, note: b.note ?? '',
     expired: !!b.expiresAt && Date.parse(b.expiresAt) < Date.now(), createdBy, createdAt: iso(Date.now()),
-    environment: b.scope.kind === 'argo_project' ? null : envOf(b.scope.cluster!, b.scope.namespace!),
+    environment: b.scope.kind === 'environment' ? b.scope.environment! : b.scope.namespace ? envOf(b.scope.cluster!, b.scope.namespace) : null,
   };
 }
 R('/admin/grants', (c) => {
@@ -819,7 +943,7 @@ R('/admin/clusters', (c) => {
   if (d.clusters.some((x) => x.name === b.name)) throw new MockError(409, 'conflict', `Cluster ${b.name} already exists.`);
   const v = kubeconfigViolations(b.kubeconfig!);
   if (v.length) throw new MockError(422, 'invalid', 'Refused: the credential has too much power.', { violations: v });
-  const cl = { name: b.name!.trim(), environment: b.environment || null, reachable: true, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap' as const, lastCheckAt: iso(Date.now()), usable: true, credentialLoaded: true, environmentFromSecret: false };
+  const cl = { name: b.name!.trim(), environment: b.environment || null, reachable: true, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap' as const, lastCheckAt: iso(Date.now()), usable: true, credentialLoaded: true, environmentFromSecret: false, protected: false };
   d.clusters.push(cl);
   logAudit(c.user, 'admin.cluster.added', null, 'succeeded', { details: { after: { name: cl.name, environment: cl.environment } } });
   return { __status: 201, data: cl };
@@ -883,7 +1007,7 @@ R('/admin/settings', () => getDb().settings);
 R('/admin/settings', (c) => {
   const b = c.body as unknown as SettingsView;
   const f: Record<string, string> = {};
-  for (const k of ['execMaxSessionMinutes', 'execIdleTimeoutMinutes', 'breakGlassDefaultMinutes', 'breakGlassMaxMinutes', 'retentionAuditDays', 'retentionRecordingsDays'] as const) {
+  for (const k of ['execMaxSessionMinutes', 'execIdleTimeoutMinutes', 'breakGlassDefaultMinutes', 'breakGlassMaxMinutes', 'breakGlassRequestMaxAgeMinutes', 'retentionAuditDays', 'retentionRecordingsDays'] as const) {
     if (!Number.isInteger(b[k]) || b[k] < 1) f[k] = 'Must be a positive whole number.';
   }
   if (!f.breakGlassDefaultMinutes && b.breakGlassDefaultMinutes > b.breakGlassMaxMinutes) f.breakGlassDefaultMinutes = 'Default cannot exceed the maximum.';
@@ -903,6 +1027,7 @@ R('/admin/overview', () => {
   return {
     activeExecSessions: d.sessions.filter((s) => s.active).length, openLogStreams: 3,
     pendingRequests: d.requests.filter((r) => r.status === 'pending').length,
+    pendingBreakGlassRequests: (expireBgRequests(), d.bgRequests.filter((r) => r.status === 'pending').length),
     activeBreakGlasses: d.breakGlasses.filter((b) => b.active && Date.parse(b.expiresAt) > Date.now()).length,
     clustersUnreachable: d.clusters.filter((x) => !x.reachable).length,
   };

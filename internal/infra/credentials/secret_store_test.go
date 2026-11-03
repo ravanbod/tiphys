@@ -77,6 +77,29 @@ func TestSecretStoreEnvironmentAnnotation(t *testing.T) {
 	}
 }
 
+func TestSecretStoreProtectedAnnotation(t *testing.T) {
+	ctx := context.Background()
+	on := clusterSecret("a", "on", "kc")
+	on.Annotations[ProtectedAnnotation] = " true "
+	off := clusterSecret("b", "off", "kc")
+	off.Annotations[ProtectedAnnotation] = "false"
+	junk := clusterSecret("c", "junk", "kc")
+	junk.Annotations[ProtectedAnnotation] = "yes please"
+	s := NewSecretStore(fake.NewSimpleClientset(on, off, junk, clusterSecret("d", "plain", "kc")), "tiphys", 0, zap.NewNop())
+
+	if p, err := s.Protected(ctx, "on"); !p || err != nil {
+		t.Fatalf("on: %v %v", p, err)
+	}
+	for _, c := range []string{"off", "junk", "plain"} {
+		if p, err := s.Protected(ctx, c); p || err != nil {
+			t.Fatalf("%s: %v %v", c, p, err)
+		}
+	}
+	if _, err := s.Protected(ctx, "missing"); err != application.ErrNotFound {
+		t.Fatalf("missing: %v", err)
+	}
+}
+
 func TestSecretStoreReadsAnnotatedSecretsWhateverTheirName(t *testing.T) {
 	ctx := context.Background()
 	cs := fake.NewClientset(

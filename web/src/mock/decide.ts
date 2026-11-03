@@ -26,6 +26,8 @@ export function covers(g: GrantView, cluster: string, ns: string, kind: Workload
   const s = g.scope;
   if (s.kind === 'argo_project') return { match: projectsOf(cluster, ns).includes(s.argoProject ?? ''), project: true };
   if (s.kind === 'namespace') return { match: s.cluster === cluster && s.namespace === ns, project: false };
+  if (s.kind === 'cluster') return { match: s.cluster === cluster, project: false };
+  if (s.kind === 'environment') return { match: envOf(cluster, ns) === s.environment, project: false };
   const inWl = !kind || !name ? s.cluster === cluster && s.namespace === ns : !!s.workloads?.some((w) => w.kind === kind && w.name === name);
   return { match: s.cluster === cluster && s.namespace === ns && inWl, project: false };
 }
@@ -60,7 +62,6 @@ export function decide(u: MockUser, cluster: string, ns: string, kind: WorkloadK
   const base = { environment: env, grantIds: [] as number[], breakGlassId: null, reopensAt: null, closesAt: null };
   if (d.protectedNamespaces.includes(ns)) return { allowed: false, reason: 'protected_namespace', ...base };
   if (u.disabled) return { allowed: false, reason: 'user_disabled', ...base };
-  if (u.role === 'auditor') return { allowed: false, reason: 'role', ...base };
   if (u.role === 'admin') return { allowed: true, reason: 'admin', ...base };
   if (kind === 'CronJob' && action === 'restart') return { allowed: false, reason: 'no_grant', ...base };
   if (kind && kind !== 'CronJob' && action === 'run-job') return { allowed: false, reason: 'no_grant', ...base };

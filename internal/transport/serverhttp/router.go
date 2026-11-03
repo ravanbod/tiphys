@@ -40,11 +40,12 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api := r.Group("/api/v1", h.authRequired(), csrfRequired(), h.rateLimited())
 	api.GET("/me", h.Me)
 
-	user := h.userOrAdmin()
+	user := h.worker()
 	staff := h.requireRoles(domain.RoleAdmin, domain.RoleAuditor)
 	admin := h.requireRoles(domain.RoleAdmin)
 
-	// Workloads and catalog (developers; admins see everything non-protected).
+	// Workloads and catalog (users and auditors through grants; admins see
+	// everything non-protected).
 	api.GET("/apps", user, h.Apps)
 	api.GET("/namespaces", user, h.Namespaces)
 	api.GET("/my/access", user, h.MyAccess)
@@ -66,6 +67,7 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api.GET(ns+"/cronjobs", user, h.CronJobs)
 	api.POST(ns+"/cronjobs/:name/run", user, h.RunCronJob)
 	api.GET("/operations/:id/stream", user, h.OperationStream)
+	api.GET("/live", user, h.Live)
 	api.GET("/catalog/argo-projects", user, h.CatalogProjects)
 	api.GET("/catalog/clusters", user, h.CatalogClusters)
 	api.GET("/catalog/clusters/:cluster/namespaces", user, h.CatalogNamespaces)
@@ -87,6 +89,11 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api.POST("/break-glass", user, h.StartBreakGlass)
 	api.POST("/break-glass/:id/end", user, h.EndBreakGlass)
 	api.GET("/break-glass", staff, h.ListBreakGlass)
+	api.POST("/break-glass/requests", user, h.RequestBreakGlass)
+	api.GET("/break-glass/requests", staff, h.ListBreakGlassRequests)
+	api.POST("/break-glass/requests/:id/approve", admin, h.ApproveBreakGlassRequest)
+	api.POST("/break-glass/requests/:id/reject", admin, h.RejectBreakGlassRequest)
+	api.POST("/break-glass/requests/:id/cancel", user, h.CancelBreakGlassRequest)
 
 	// Sessions and audit.
 	api.GET("/sessions", staff, h.ListSessions)

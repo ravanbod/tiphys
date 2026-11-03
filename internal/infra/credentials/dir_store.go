@@ -55,6 +55,12 @@ func (d *DirStore) Environment(_ context.Context, cluster string) (string, bool,
 	return "", false, nil
 }
 
+// Protected: files carry no metadata, so no cluster is protected.
+func (d *DirStore) Protected(ctx context.Context, cluster string) (bool, error) {
+	_, _, err := d.Environment(ctx, cluster)
+	return false, err
+}
+
 // Put writes the file atomically with mode 0600.
 func (d *DirStore) Put(_ context.Context, cluster string, kubeconfig []byte) error {
 	if err := validName(cluster); err != nil {

@@ -160,7 +160,7 @@ func run(cfg *config.Config, logger *zap.Logger) error {
 	if err := settings.Reload(startCtx); err != nil {
 		return err
 	}
-	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassEnabled })
+	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassMode.Enabled() })
 	if err := policy.Reload(startCtx); err != nil {
 		return err
 	}
@@ -198,7 +198,7 @@ func run(cfg *config.Config, logger *zap.Logger) error {
 	workloads := application.NewWorkloadService(rootCtx, access, kube, argo, audit, streams, ops, settings, notify, clock, logger)
 	execSvc := application.NewExecService(rootCtx, access, kube, recStore, audit, streams, store, settings, notify, clock, logger)
 	sessions := application.NewSessionService(store, recStore, audit, execSvc)
-	breakGlass := application.NewBreakGlassService(store, audit, policy, settings, notify, clock)
+	breakGlass := application.NewBreakGlassService(store, audit, policy, settings, notify, clock, logger)
 	requests := application.NewAccessRequestService(store, audit, policy, argo, notify, clock)
 	admin := application.NewAdminService(store, audit, policy, settings, notify, auth, streams, access, clock, logger)
 	clusters := application.NewClusterService(store, kube, credStore, audit, policy, clock, logger)
@@ -217,6 +217,7 @@ func run(cfg *config.Config, logger *zap.Logger) error {
 	go ops.Run(rootCtx)
 	go auth.RefreshLoop(rootCtx)
 	go maintenance.Run(rootCtx)
+	go breakGlass.Run(rootCtx)
 	go func() {
 		if err := registry.Run(rootCtx); err != nil && !errors.Is(err, context.Canceled) {
 			logger.Error("cluster registry stopped", zap.Error(err))

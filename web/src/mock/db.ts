@@ -1,6 +1,6 @@
 import type {
-  AccessRequest, AuditEvent, BreakGlass, ClusterView, EnvironmentOverride, ExecSessionView, GrantView,
-  HolidayView, JobSummary, SettingsView, TimeWindowView, UserView, WorkloadKind, Role, Action,
+  AccessRequest, AuditEvent, BreakGlass, BreakGlassRequest, ClusterView, EnvironmentOverride, ExecSessionView, GrantView,
+  HolidayView, JobSummary, K8sEvent, SettingsView, TimeWindowView, UserView, WorkloadKind, Role, Action,
 } from '../api/types';
 
 export const MIN = 60_000;
@@ -24,6 +24,10 @@ export interface WlDef {
   concurrencyPolicy?: string;
   lastResult?: 'succeeded' | 'failed' | 'running' | null;
   lastScheduleMinutesAgo?: number;
+  // Set by the mock live stream: restarts of the first pod, a new pod during a rollout, newer events.
+  liveRestarts?: number;
+  liveSurge?: boolean;
+  liveEvents?: K8sEvent[];
 }
 export interface NsDef {
   cluster: string;
@@ -64,6 +68,7 @@ export interface Db {
   holidays: HolidayView[];
   requests: AccessRequest[];
   breakGlasses: BreakGlass[];
+  bgRequests: BreakGlassRequest[];
   sessions: ExecSessionView[];
   audit: AuditEvent[];
   settings: SettingsView;
@@ -132,10 +137,10 @@ function seed(): Db {
   }
 
   const clusters: ClusterView[] = [
-    { name: 'prod-1', environment: 'prod', reachable: true, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap', lastCheckAt: iso(now - 20_000), usable: true, credentialLoaded: true, environmentFromSecret: false },
-    { name: 'prod-2', environment: 'prod', reachable: false, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap', lastCheckAt: iso(now - 11 * MIN), usable: false, credentialLoaded: true, environmentFromSecret: false },
-    { name: 'staging-1', environment: 'staging', reachable: true, kubernetesVersion: 'v1.29.8', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'kyverno', lastCheckAt: iso(now - 15_000), usable: true, credentialLoaded: true, environmentFromSecret: true },
-    { name: 'staging-2', environment: 'staging', reachable: true, kubernetesVersion: 'v1.29.8', privilegeCheckOk: false, privilegeViolations: ['credential can get Secrets in kube-system (bound to cluster-admin)', 'credential can create Pods'], admissionMode: 'none', lastCheckAt: iso(now - 15_000), usable: false, credentialLoaded: true, environmentFromSecret: false },
+    { name: 'prod-1', environment: 'prod', reachable: true, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap', lastCheckAt: iso(now - 20_000), usable: true, credentialLoaded: true, environmentFromSecret: false, protected: false },
+    { name: 'prod-2', environment: 'prod', reachable: false, kubernetesVersion: 'v1.30.4', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'vap', lastCheckAt: iso(now - 11 * MIN), usable: false, credentialLoaded: true, environmentFromSecret: false, protected: false },
+    { name: 'staging-1', environment: 'staging', reachable: true, kubernetesVersion: 'v1.29.8', privilegeCheckOk: true, privilegeViolations: [], admissionMode: 'kyverno', lastCheckAt: iso(now - 15_000), usable: true, credentialLoaded: true, environmentFromSecret: true, protected: true },
+    { name: 'staging-2', environment: 'staging', reachable: true, kubernetesVersion: 'v1.29.8', privilegeCheckOk: false, privilegeViolations: ['credential can get Secrets in kube-system (bound to cluster-admin)', 'credential can create Pods'], admissionMode: 'none', lastCheckAt: iso(now - 15_000), usable: false, credentialLoaded: true, environmentFromSecret: false, protected: false },
   ];
 
   const apps: AppDef[] = [
@@ -221,19 +226,27 @@ function seed(): Db {
     req(2, 5, { kind: 'namespace', cluster: 'staging-1', namespace: 'notifications-worker' }, ['logs', 'run-job'], 168, 'Need to replay failed digests after yesterday\'s outage.', 'pending', 2.4 * HOUR),
     req(3, 6, { kind: 'workloads', cluster: 'prod-1', namespace: 'payments-worker', workloads: [{ kind: 'Deployment', name: 'payments-worker' }] }, ['restart'], 1, 'Worker leaking connections; restarting is the only fix until the patch ships.', 'pending', 26 * HOUR),
     req(4, 1, { kind: 'workloads', cluster: 'prod-2', namespace: 'search-indexer', workloads: [{ kind: 'StatefulSet', name: 'search-indexer' }] }, ['exec'], 24, 'Checking indexer lock files for the search team.', 'pending', 2.2 * HOUR),
+    // Approving adds restart to Sara's grant 9 on the same namespace (it ends sooner).
+    req(8, 1, { kind: 'namespace', cluster: 'prod-1', namespace: 'notifications-api' }, ['restart'], 168, 'Digest workers hang after the queue failover; I need to restart them while we fix it.', 'pending', 0.5 * HOUR),
     req(5, 1, { kind: 'workloads', cluster: 'prod-1', namespace: 'payments-api', workloads: [{ kind: 'Deployment', name: 'payments-api' }] }, ['restart'], 1, 'Restart after config change.', 'rejected', 2 * DAY, { decisionNote: "Use the deploy pipeline for restarts. Ping me if it's an incident." }),
     req(6, 1, { kind: 'namespace', cluster: 'prod-1', namespace: 'notifications-api' }, ['logs'], 168, 'Investigating digest delays.', 'approved', 6 * DAY, { resultingGrantId: 9 }),
     req(7, 1, { kind: 'namespace', cluster: 'prod-1', namespace: 'payments-worker' }, ['exec'], 8, 'Debug ledger worker.', 'expired', 14 * DAY),
   ];
 
   const settings: SettingsView = {
-    breakGlassEnabled: true, execMaxSessionMinutes: 30, execIdleTimeoutMinutes: 10, breakGlassDefaultMinutes: 60, breakGlassMaxMinutes: 120,
+    breakGlassMode: 'self', breakGlassRequestMaxAgeMinutes: 60, execMaxSessionMinutes: 30, execIdleTimeoutMinutes: 10, breakGlassDefaultMinutes: 60, breakGlassMaxMinutes: 120,
     retentionAuditDays: 365, retentionRecordingsDays: 90,
-    rocket: { webhookUrl: 'https://chat.internal/hooks/9fK2xQ7', channel: '#platform-access', events: { break_glass_started: true, request_created: true, request_decided: false, exec_in_prod: true, admin_changes: true } },
+    rocket: { webhookUrl: 'https://chat.internal/hooks/9fK2xQ7', channel: '#platform-access', events: { break_glass_started: true, break_glass_requested: true, request_created: true, request_decided: false, exec_in_prod: true, admin_changes: true } },
     lokiRetentionInfo: 'Loki keeps audit lines for 400 days (set by operations).',
   };
 
   const bgNima: BreakGlass = { id: 1, userId: 4, username: 'nima.karimi', reason: 'Index rebuild is stuck on shard 4 and the time window closed at 13:00; need to inspect lock files.', startedAt: iso(now - 45 * MIN), expiresAt: iso(now - 15 * MIN), endedAt: iso(now - 15 * MIN), endedBy: 'nima.karimi', active: false };
+
+  // A pending break-glass request (shown on the admin's Access requests page) and a decided one.
+  const bgRequests: BreakGlassRequest[] = [
+    { id: 2, userId: 6, username: 'arash.rahimi', reason: 'Notifications worker is stuck on a poisoned message and prod exec is closed tonight.', durationMinutes: 30, status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, approvedMinutes: null, breakGlassId: null, createdAt: iso(now - 6 * MIN), expiresAt: iso(now + 54 * MIN) },
+    { id: 1, userId: 4, username: 'nima.karimi', reason: bgNima.reason, durationMinutes: 30, status: 'approved', decidedBy: 'reza.ahmadi', decidedAt: iso(now - 45 * MIN), decisionNote: null, approvedMinutes: 30, breakGlassId: 1, createdAt: iso(now - 50 * MIN), expiresAt: iso(now + 10 * MIN) },
+  ];
 
   const sess = (id: string, userId: number, pod: string, cluster: string, ns: string, wl: string, container: string, env: string, startedAgoMin: number, durSec: number | null, endReason: ExecSessionView['endReason'], extra: Partial<ExecSessionView> = {}): ExecSessionView => {
     const u = users.find((x) => x.id === userId)!;
@@ -311,8 +324,8 @@ function seed(): Db {
       { id: 1, kind: 'namespace', cluster: 'prod-1', namespace: 'payments-sandbox', environment: 'staging' },
       { id: 2, kind: 'argo_project', cluster: 'prod-2', argoProject: 'search-lab', environment: 'staging' },
     ],
-    grants, windows, holidays, requests, breakGlasses: [bgNima], sessions, audit, settings,
+    grants, windows, holidays, requests, breakGlasses: [bgNima], bgRequests, sessions, audit, settings,
     argo: { fetchedAt: now - 42_000, stale: false, appCount: apps.length, projectCount: 3, lastError: null },
-    jobs, ops: {}, nextId: { grant: 100, request: 100, user: 100, team: 100, window: 100, holiday: 100, bg: 100, override: 100, audit: 9000 },
+    jobs, ops: {}, nextId: { grant: 100, request: 100, user: 100, team: 100, window: 100, holiday: 100, bg: 100, bgRequest: 100, override: 100, audit: 9000 },
   };
 }

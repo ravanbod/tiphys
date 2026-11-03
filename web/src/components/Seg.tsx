@@ -6,13 +6,14 @@ export interface SegOption<T extends string | number> {
 
 /** Segmented control (single choice) built from buttons, styled by `.seg`. */
 export function Seg<T extends string | number>({
-  value, options, onChange, label, style,
+  value, options, onChange, label, style, disabled,
 }: {
   value: T;
   options: SegOption<T>[];
   onChange: (v: T) => void;
   label: string;
   style?: React.CSSProperties;
+  disabled?: boolean;
 }) {
   return (
     <div className="seg" role="group" aria-label={label} style={style}>
@@ -22,6 +23,7 @@ export function Seg<T extends string | number>({
           type="button"
           className={`${value === o.value ? 'on' : ''}${o.mono ? ' mono' : ''}`}
           aria-pressed={value === o.value}
+          disabled={disabled}
           onClick={() => onChange(o.value)}
         >
           {o.label}

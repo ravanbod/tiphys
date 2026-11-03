@@ -10,7 +10,7 @@ Contract between `web/` and the Go portal. The frontend is served by the portal 
 - Errors: HTTP status + body `{"error": {"code": string, "message": string, "details"?: object}}`.
   - `401 unauthenticated` → frontend redirects to `/auth/login?next=<path>`, or to the login page `/login?next=<path>` when `GET /auth/options` says `localLogin`.
   - `403 denied` → authorization decision; `details` is a `DecisionInfo` (below), so the UI can show the reason, `reopensAt` and `closesAt`.
-  - `403 forbidden_role` → role does not allow the endpoint. `403 break_glass_disabled` → break-glass is turned off in the settings. `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
+  - `403 forbidden_role` → role does not allow the endpoint. `403 break_glass_disabled` → break-glass is turned off in the settings. `409 break_glass_approval_required` → `POST /break-glass` in mode `approval`: request it instead. `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
 - Health: `GET /healthz`, `GET /readyz` (no auth). Metrics are on a separate port.
 - Lists are returned as plain arrays unless stated (audit uses a cursor).
 
@@ -56,7 +56,8 @@ interface Me {
   teams: { id: number; name: string }[];
   csrfToken: string;
   breakGlass: BreakGlass | null;     // active one, if any
-  settings: { breakGlassEnabled: boolean; breakGlassDefaultMinutes: number; breakGlassMaxMinutes: number; execIdleTimeoutMinutes: number; execMaxSessionMinutes: number; clusterRegistration: boolean; debugEnabled: boolean; argoUrl: string /* Argo CD in the browser (ARGO_PUBLIC_URL), for app links */; localUsers: boolean /* LOCAL_USERS_ENABLED */ };
+  breakGlassRequest: BreakGlassRequest | null; // own pending request (mode approval), if any; the UI polls /me while it is set
+  settings: { breakGlassMode: 'off' | 'self' | 'approval'; breakGlassDefaultMinutes: number; breakGlassMaxMinutes: number; execIdleTimeoutMinutes: number; execMaxSessionMinutes: number; clusterRegistration: boolean; debugEnabled: boolean; argoUrl: string /* Argo CD in the browser (ARGO_PUBLIC_URL), for app links */; localUsers: boolean /* LOCAL_USERS_ENABLED */ };
   argo: { fetchedAt: string | null; ageSeconds: number | null; stale: boolean };  // stale => project-scoped grants do not match
 }
 
@@ -67,7 +68,7 @@ interface BreakGlass {
 }
 ```
 
-## Catalog and workloads (role `user`; admins see everything non-protected; auditors get 403)
+## Catalog and workloads (roles `user` and `auditor` per their grants; admins see everything non-protected)
 
 Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemonsets | rollouts | cronjobs`. `{c}` is the cluster name, `{ns}` the namespace.
 
@@ -80,7 +81,7 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods` | `Pod[]` (needs `logs`) |
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/events` | `K8sEvent[]` (needs `logs`) |
 | GET | `/clusters/{c}/namespaces/{ns}/events` | `K8sEvent[]`: the newest 200 events of every object in the namespace, newest first. Needs `logs` on the whole namespace (a namespace or Argo project grant; a grant on single workloads gives 403, use the workload's `/events`). |
-| GET | `/clusters/{c}/namespaces/{ns}/traffic` | `TrafficGraph`: how traffic from outside reaches the namespace's pods, like Argo CD's network view. Needs `logs` on the whole namespace (same rule as `/events`). `interface TrafficGraph { nodes: TrafficNode[]; edges: TrafficEdge[] }`, `interface TrafficNode { id: string; kind: string; namespace: string; name: string; details: string[]; ready: number; total: number; problem: string }` (`id` is `Kind/namespace/name`; `kind` is `Address` (no namespace), `Gateway`, `Ingress`, `HTTPRoute`, `GRPCRoute`, `Service`, a workload kind, `ReplicaSet`, `Job` or `Pod`; `ready`/`total` count running pods behind a Service or workload; `problem` is empty unless traffic may not get through), `interface TrafficEdge { from: string; to: string; labels: string[] }` (labels: host and path, route matches, listener). |
+| GET | `/clusters/{c}/namespaces/{ns}/traffic` | `TrafficGraph`: how traffic from outside reaches the namespace's pods, like Argo CD's network view. Needs `logs` on the whole namespace (same rule as `/events`). `interface TrafficGraph { nodes: TrafficNode[]; edges: TrafficEdge[] }`, `interface TrafficNode { id: string; kind: string; namespace: string; name: string; details: string[]; ready: number; total: number; problem: string }` (`id` is `Kind/namespace/name`; `kind` is `Address` (no namespace), `Gateway`, `Waypoint` (an Istio ambient waypoint), `Ingress`, `HTTPRoute`, `GRPCRoute`, `Service`, a workload kind, `ReplicaSet`, `Job` or `Pod`; `ready`/`total` count running pods behind a Service or workload; `problem` is empty unless traffic may not get through; every Service of the namespace is a node; what no `Address`, `Gateway`, `Ingress` or Service whose details say `LoadBalancer` or `NodePort` leads to is reachable only inside the cluster), `interface TrafficEdge { from: string; to: string; labels: string[] }` (labels: host and path, route matches, listener). |
 | GET | `/clusters/{c}/namespaces/{ns}/access?kind=&name=` | `AccessGrant[]` ("Who has access" for developers): unexpired grants reaching the namespace, or the workload when `kind` (e.g. `Deployment`) and `name` are given. Same check as listing the namespace / opening the workload; 403 otherwise. `interface AccessGrant { id: number; holder: { kind: 'team' \| 'user'; id: number; name: string; members: string[] }; scope: ScopeView; actions: Action[]; expiresAt: string \| null }` (no note or author; `members` are a team's enabled members). Admins and auditors use `/admin/grants/covering`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps` | `NamespaceApp[]` — Argo CD applications deploying to the namespace (destination or any resource there), from the Argo cache (≤60 s old). Same check as listing the namespace; 403 otherwise. |
 | GET | `/clusters/{c}/namespaces/{ns}/cronjobs` | `CronJobSummary[]` incl. recent jobs (user needs `run-job` or `logs` on at least one CronJob; list is filtered to allowed ones) |
@@ -91,11 +92,12 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history` | `ArgoDeploy[]`: the last 10 deploys of `status.history`, newest first, each with its commit (author, message) when Argo CD can describe the revision (Git, single source). Same check as `status`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/diff` | `ArgoDiff`: what a sync would change, from Argo CD's managed resources (normalized live vs predicted state): `changed`, `missing` (only in Git) or `extra` (only in the cluster; never pruned), each with a unified YAML diff without `status`, managed fields and server-set metadata; hooks left out; Secrets listed with `hidden: true` and no content. At most 200 resources and 2,000 lines per diff. It shows manifests, so it needs what a sync needs (`sync` on every namespace of the app) and is audited as `argo.diff` before Argo CD is asked. |
 | GET | `/operations/{id}/stream` | Server-Sent Events for restart / run / sync progress (see below). Only the operation's owner or an admin. |
+| GET | `/live?ns={cluster}/{namespace}&ns=...` | Server-Sent Events: what changes in 1–10 namespaces (see below). `422` for a bad or missing `ns`, `429 rate_limited` over 8 open streams per user. |
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/logs/download?container=&previous=&tailLines=&sinceSeconds=&timestamps=` | `text/plain` attachment, capped at 50 MB. Header `X-Tiphys-Truncated: true` when capped. Needs `logs`. |
-| GET | `/catalog/argo-projects` | `string[]` (any logged-in non-auditor, for pickers and the request form). |
-| GET | `/catalog/clusters` | `{ name, environment }[]`. |
-| GET | `/catalog/clusters/{c}/namespaces` | `string[]` — namespaces read from the cluster itself, protected ones removed; empty when the cluster cannot be read. Cached for 30 s. |
-| GET | `/catalog/clusters/{c}/namespaces/{ns}/workloads` | `{ kind, name }[]` (live; protected namespaces refused). |
+| GET | `/catalog/argo-projects` | `string[]` (any logged-in user, for pickers and the request form). |
+| GET | `/catalog/clusters` | `{ name, environment }[]`. Protected clusters (`tiphys/protected`) are listed for admins only. |
+| GET | `/catalog/clusters/{c}/namespaces` | `string[]` — namespaces read from the cluster itself, protected ones removed; empty when the cluster cannot be read, and for non-admins on a protected cluster. Cached for 30 s. |
+| GET | `/catalog/clusters/{c}/namespaces/{ns}/workloads` | `{ kind, name }[]` (live; protected namespaces refused; `404` for non-admins on a protected cluster). |
 
 ```ts
 interface AppSummary {
@@ -174,6 +176,33 @@ interface JobSummary {
 - `event: progress` — restart: `{ desired, updated, ready, available }`; run-job: a `JobSummary`; sync: `{ phase, message, synced, failed, total }` (`phase` is `Pending` until Argo CD starts the operation, then its `operationState.phase`; counts are the sync result's resources).
 - `event: done` — `{ outcome: 'succeeded' | 'failed' | 'timed_out', message: string }`. The server then closes the stream.
 
+### Live changes (SSE)
+
+`GET /live?ns=<cluster>/<namespace>` (repeated, 1–10) → `text/event-stream`. One stream per browser tab follows the namespaces the open page shows; the pages refetch their data when something changes, and notable changes become toasts. The server watches pods and events in each namespace as `tiphys:user` and attributes them to their workload through the owner chain; anything that belongs to no workload is dropped. Events from before the stream are not sent.
+
+- `retry: 3000`, then `event: ready` — `{ namespaces: { cluster, namespace, error? }[] }`. `error` (`denied` | `invalid` | `not_found` | `cluster_error`) means that namespace is not followed (it needs a grant there, like `.../workloads`; a denial is audited). After a reconnect the client should refetch, since changes may have been missed.
+- `event: change` — a `LiveChange`, decided on its own against the current policy: with `logs` on the workload everything is sent; with only other actions on it, `workload` and the rollout changes (the counts the workload list shows) are sent and every other change becomes `{ type: 'workload' }` without details; without a grant on the workload nothing.
+- `event: end` — `{ reason: EndReason }` before the server closes the stream. It does so after 10 minutes (`max_duration`; the browser reconnects, which checks the login again), when the login session ends or the user is disabled.
+- A `: ping` comment every 25 s keeps proxies from closing the stream.
+
+```ts
+interface LiveChange {
+  cluster: string; namespace: string;
+  kind: WorkloadKind; name: string;   // the workload it belongs to
+  type: 'pod_added' | 'pod_removed' | 'pod_updated'   // phase, readiness, terminating
+      | 'pod_restarted'                               // a container restarted
+      | 'workload'                                    // something changed; status when the counts were read
+      | 'rollout_started' | 'rollout_complete' | 'rollout_failed'
+      | 'event';                                      // a warning, or a CronJob's Job starting (SuccessfulCreate) or finishing
+  pod?: string; phase?: string;                       // pod changes
+  container?: string; reason?: string; exitCode?: number;  // pod_restarted: how the container last ended
+  status?: { desired: number; updated: number; ready: number; available: number; complete: boolean; failed: boolean; message: string };
+  event?: K8sEvent;                                   // event; a repeating event is sent at most every 30 s
+}
+```
+
+A rollout is a new revision of the workload (Deployment revision, StatefulSet update revision, DaemonSet generation, Rollout pod hash or restart), seen when its pods change; it is followed until it completes or fails (at most 15 minutes). Scaling is a `workload` change.
+
 ## WebSockets (logs, exec, watch)
 
 Authenticated by the session cookie; the server checks `Origin` equals the portal's origin and the `csrf` query parameter equals the CSRF token (browsers cannot set headers on WebSockets): `?csrf=<csrfToken>`. Paths:
@@ -206,16 +235,33 @@ Client → server control messages (exec only): `{ type: 'resize', cols: number,
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/my/access` | `MyAccess` |
+| GET | `/my/access` | `MyAccess` (own grants and own requests; `user` and `auditor`) |
 | GET | `/access-requests` | Own requests for `user`; all (optionally `?status=pending`) for `admin`/`auditor`. |
-| POST | `/access-requests` | `CreateAccessRequest` → `AccessRequest` |
-| POST | `/access-requests/{id}/approve` | admin. Body `{ note?: string, durationHours?: number \| null, actions?: Action[] }` (override of the requested duration; `actions` narrows to a subset of the requested ones). Creates the grant in the same transaction. Returns `AccessRequest`. |
+| POST | `/access-requests` | `user` or `auditor`. `CreateAccessRequest` → `AccessRequest`. `422` for a protected namespace or a protected cluster. |
+| POST | `/access-requests/{id}/approve` | admin. Body `{ note?: string, durationHours?: number \| null, actions?: Action[], separate?: boolean }` (override of the requested duration; `actions` replaces the requested ones, fewer or more, as long as they fit the scope — e.g. no `sync` on a `workloads` scope; the `access_request.decide` audit details carry `requestedActions` and `actions`). In the same transaction it adds the actions to the requester's own unexpired grant on exactly the same scope (workloads as a set) that ends no later than the approved access — the longest of them; that grant then takes the new expiry — or, when there is none or `separate` is true, creates a grant. `resultingGrantId` is that grant; the audit details carry `merged` and, when merged, the grant's `before`/`after` actions and expiry. Team grants are never changed. Returns `AccessRequest`. |
 | POST | `/access-requests/{id}/reject` | admin. Body `{ note?: string }` |
-| POST | `/break-glass` | role `user`. Body `{ reason: string /* ≥ 20 chars */, durationMinutes?: number }` → `BreakGlass` |
+| POST | `/break-glass` | role `user` or `auditor`. Body `{ reason: string /* ≥ 20 chars */, durationMinutes?: number }` → `BreakGlass` |
 | POST | `/break-glass/{id}/end` | owner or admin. |
 | GET | `/break-glass` | admin/auditor: recent ones (`BreakGlass[]`, newest first). |
+| POST | `/break-glass/requests` | role `user` or `auditor`, mode `approval` (`403 break_glass_disabled` when off, `409` in mode `self`). Body as `POST /break-glass` → `201 BreakGlassRequest`. `409` with a pending request or an active break-glass. |
+| GET | `/break-glass/requests?status=` | admin/auditor: up to 200, newest first. A pending request past its expiry reads as `expired`. |
+| POST | `/break-glass/requests/{id}/approve` | admin. Body `{ note?: string, durationMinutes?: number /* omitted or 0: as requested; 1..max */ }`. Starts the break-glass now; `409` if no longer pending or the requester already has one active, `403 break_glass_disabled` when off. → `BreakGlassRequest` |
+| POST | `/break-glass/requests/{id}/reject` | admin. Body `{ note?: string }` → `BreakGlassRequest` |
+| POST | `/break-glass/requests/{id}/cancel` | the requester only → `BreakGlassRequest` |
 
 ```ts
+interface BreakGlassRequest {
+  id: number; userId: number; username: string; reason: string;
+  durationMinutes: number;             // requested
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
+  decidedBy: string | null;            // 'system' when expired
+  decidedAt: string | null; decisionNote: string | null;
+  approvedMinutes: number | null;      // approved: the duration the admin approved
+  breakGlassId: number | null;         // approved: the break-glass it started
+  createdAt: string;
+  expiresAt: string;                   // when it expires if still pending (createdAt + the setting)
+}
+
 interface MyAccess {
   grants: {
     id: number; holder: { kind: 'team' | 'user'; name: string };
@@ -227,10 +273,12 @@ interface MyAccess {
 }
 
 interface ScopeView {
-  kind: 'argo_project' | 'namespace' | 'workloads';
+  kind: 'argo_project' | 'namespace' | 'workloads' | 'cluster' | 'environment';
   argoProject?: string; cluster?: string; namespace?: string;
   workloads?: { kind: WorkloadKind; name: string }[];
+  environment?: string;            // environment scope
 }
+// cluster (cluster only) and environment (environment only) are admin grants; a request with them is 422.
 
 interface CreateAccessRequest {
   scope: ScopeView; actions: Action[];
@@ -308,13 +356,15 @@ interface ClusterView {
   lastCheckAt: string | null; usable: boolean;
   credentialLoaded: boolean;   // false: the annotated Secret is missing or was rejected; the cluster stays listed
   environmentFromSecret: boolean; // the Secret's tiphys/environment annotation sets environment; PUT .../clusters/{name} is 409 then
+  protected: boolean;          // the Secret's tiphys/protected annotation: hidden from access requests, grants still work
 }
 interface SettingsView {
   execMaxSessionMinutes: number; execIdleTimeoutMinutes: number;
-  breakGlassEnabled: boolean;   // false: nobody can start break-glass, active ones stop overriding time rules
+  breakGlassMode: 'off' | 'self' | 'approval'; // off: nobody can start break-glass, active ones stop overriding time rules; approval: requested, then approved by an admin
   breakGlassDefaultMinutes: number; breakGlassMaxMinutes: number;
+  breakGlassRequestMaxAgeMinutes: number;      // a pending break-glass request expires after this
   retentionAuditDays: number; retentionRecordingsDays: number;
-  rocket: { webhookUrl: string; channel: string; events: Record<'break_glass_started' | 'request_created' | 'request_decided' | 'exec_in_prod' | 'admin_changes', boolean> };
+  rocket: { webhookUrl: string; channel: string; events: Record<'break_glass_started' | 'break_glass_requested' | 'request_created' | 'request_decided' | 'exec_in_prod' | 'admin_changes', boolean> };
   lokiRetentionInfo: string | null;   // informational only
 }
 interface DecisionExplain extends DecisionInfo { cluster: string; namespace: string; workload: string | null; action: Action; evaluatedAt: string; userRole: Role; teams: string[]; matchedGrants: GrantView[] }
@@ -328,8 +378,8 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | GET / POST | `/admin/teams` | POST `{ name, description }` |
 | PATCH / DELETE | `/admin/teams/{id}` | PATCH `{ name?, description? }` |
 | PUT | `/admin/teams/{id}/members` | `{ userIds: number[] }` |
-| GET / POST | `/admin/grants` | GET filters: `holderKind, holderId, scopeKind, cluster, argoProject, action, expiring=true, expired=true` |
-| GET | `/admin/grants/covering` | `?cluster=&namespace=&kind=&name=` → `GrantView[]`: grants whose scope reaches the namespace or workload (namespace, Argo project, workloads grants), expired ones included. Without `kind`/`name` a workloads grant in the namespace counts. 422 without cluster/namespace. |
+| GET / POST | `/admin/grants` | GET filters: `holderKind, holderId, scopeKind, cluster, argoProject, action, expiring=true, expired=true`. `GrantView.environment` is the namespace's environment for namespace/workloads grants, the scope's for environment grants, else null. |
+| GET | `/admin/grants/covering` | `?cluster=&namespace=&kind=&name=` → `GrantView[]`: grants whose scope reaches the namespace or workload (namespace, Argo project, cluster, environment, workloads grants), expired ones included. Without `kind`/`name` a workloads grant in the namespace counts. 422 without cluster/namespace. |
 | PUT / DELETE | `/admin/grants/{id}` | PUT takes `GrantInput` |
 | POST | `/admin/access-check` | `{ userId, cluster, namespace, workload?: {kind,name}, action, at?: string }` → `DecisionExplain` (the "access checker") |
 | GET / POST | `/admin/time-windows` | |
@@ -350,4 +400,4 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | POST | `/admin/argo/refresh` | refresh now |
 | GET / PUT | `/admin/settings` | `SettingsView` |
 | POST | `/admin/settings/rocket/test` | sends a test message |
-| GET | `/admin/overview` | `{ activeExecSessions, openLogStreams, pendingRequests, activeBreakGlasses, clustersUnreachable }` for badges |
+| GET | `/admin/overview` | `{ activeExecSessions, openLogStreams, pendingRequests, pendingBreakGlassRequests, activeBreakGlasses, clustersUnreachable }` for badges |

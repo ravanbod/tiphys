@@ -23,6 +23,12 @@ type fakeKube struct {
 	execs    []*fakeExec
 	debugs   []application.KubeDebugSpec
 	actors   []application.KubeActor
+	watches  []*fakeWatch
+}
+
+type fakeWatch struct {
+	ns string
+	ch chan application.NamespaceChange
 }
 
 func newFakeKube() *fakeKube { return &fakeKube{} }
@@ -215,6 +221,42 @@ func (k *fakeKube) WatchJob(context.Context, application.KubeActor, string, stri
 	ch <- application.JobInfo{Name: "reconcile-manual-abcde", Status: "succeeded", Succeeded: 1, Completions: 1}
 	close(ch)
 	return ch, nil
+}
+
+// WatchNamespace follows a namespace until ctx is done; emit sends to it.
+func (k *fakeKube) WatchNamespace(ctx context.Context, a application.KubeActor, cluster, ns string) (<-chan application.NamespaceChange, error) {
+	k.record(a)
+	if cluster == "broken" {
+		return nil, fmt.Errorf("cluster unreachable")
+	}
+	w := &fakeWatch{ns: ns, ch: make(chan application.NamespaceChange, 8)}
+	k.mu.Lock()
+	k.watches = append(k.watches, w)
+	k.mu.Unlock()
+	go func() {
+		<-ctx.Done()
+		k.mu.Lock()
+		defer k.mu.Unlock()
+		for i, x := range k.watches {
+			if x == w {
+				k.watches = append(k.watches[:i], k.watches[i+1:]...)
+				break
+			}
+		}
+		close(w.ch)
+	}()
+	return w.ch, nil
+}
+
+// emit sends a change to every watch of the namespace.
+func (k *fakeKube) emit(ns string, c application.NamespaceChange) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for _, w := range k.watches {
+		if w.ns == ns {
+			w.ch <- c
+		}
+	}
 }
 
 func (k *fakeKube) ProbeKubeconfig(context.Context, []byte) (application.ClusterProbe, error) {
