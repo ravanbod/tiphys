@@ -64,6 +64,8 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api.GET(ns+"/apps/:appNs/:app/status", user, h.AppStatus)
 	api.GET(ns+"/apps/:appNs/:app/history", user, h.AppHistory)
 	api.GET(ns+"/apps/:appNs/:app/diff", user, h.AppDiff)
+	api.GET(ns+"/apps/:appNs/:app/history/:id/rollback", user, h.AppRollbackPlan)
+	api.POST(ns+"/apps/:appNs/:app/history/:id/rollback", user, h.RollbackApp)
 	api.GET(ns+"/cronjobs", user, h.CronJobs)
 	api.POST(ns+"/cronjobs/:name/run", user, h.RunCronJob)
 	api.GET("/operations/:id/stream", user, h.OperationStream)

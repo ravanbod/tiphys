@@ -178,7 +178,7 @@ func (s *AdminService) localPasswordHash(password string) (string, error) {
 	if !s.auth.LocalUsersEnabled() {
 		return "", Invalid("password", "local users are turned off (LOCAL_USERS_ENABLED)")
 	}
-	return hashPassword(password)
+	return s.auth.hashPassword(password)
 }
 
 // UserPatch is a partial update of a user.

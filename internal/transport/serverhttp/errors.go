@@ -53,7 +53,7 @@ var denialText = map[domain.Reason]string{
 	domain.ReasonOutsideWindow:      "This action is closed outside its allowed time window.",
 	domain.ReasonHoliday:            "This action is closed because of a holiday.",
 	domain.ReasonArgoStale:          "Argo CD data is out of date, so project-scoped grants do not apply.",
-	domain.ReasonAppScope:           "This application manages cluster-wide resources (or deploys nowhere the portal knows), so only an admin can sync it.",
+	domain.ReasonAppScope:           "This application manages cluster-wide resources (or deploys nowhere the portal knows), so only an admin can sync or roll it back.",
 }
 
 // writeError maps an application error to an HTTP response. Business
@@ -93,6 +93,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		abort(c, http.StatusConflict, "already_running", "A run of this CronJob is already in progress.", nil)
 	case errors.Is(err, application.ErrSyncInProgress):
 		abort(c, http.StatusConflict, "already_running", "Another operation on this application is already in progress in Argo CD.", nil)
+	case errors.Is(err, application.ErrAutoSyncEnabled):
+		abort(c, http.StatusConflict, "auto_sync_enabled", "This application syncs automatically, so Argo CD does not roll it back. Turn off auto-sync in Git or Argo CD first.", nil)
 	case errors.Is(err, application.ErrLastAdmin):
 		abort(c, http.StatusConflict, "last_admin", "At least one active admin must exist.", nil)
 	case errors.Is(err, application.ErrConflict):

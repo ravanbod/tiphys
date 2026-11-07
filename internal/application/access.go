@@ -85,6 +85,13 @@ func (s *AccessService) DecideApp(p Principal, app domain.ArgoApp, a domain.Acti
 	return d, at
 }
 
+// AdminOnlyResources returns the app's cluster-scoped resources that leave
+// syncing it to admins (domain.Policy.AdminOnlyResources), to explain an
+// app_scope denial.
+func (s *AccessService) AdminOnlyResources(app domain.ArgoApp) []domain.ClusterResource {
+	return s.policy.Current().Policy.AdminOnlyResources(app)
+}
+
 // AuthorizeApp is Authorize for an action on a whole Argo CD application. A
 // denial is audited for the namespace that denied it, naming the app.
 func (s *AccessService) AuthorizeApp(ctx context.Context, p Principal, app domain.ArgoApp, a domain.Action) (domain.Decision, error) {

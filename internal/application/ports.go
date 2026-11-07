@@ -318,7 +318,8 @@ type Sealer interface {
 // Argo CD
 // ---------------------------------------------------------------------------
 
-// ArgoClient reads Applications and AppProjects, and syncs applications.
+// ArgoClient reads Applications and AppProjects, and syncs and rolls back
+// applications.
 type ArgoClient interface {
 	// ListApplications returns every application with its destination
 	// resolved to a cluster name and the namespaces of status.resources.
@@ -342,6 +343,24 @@ type ArgoClient interface {
 	ManagedResources(ctx context.Context, appNamespace, name string) ([]ArgoManagedResource, error)
 	// RevisionMetadata returns the commit behind a Git revision of the app.
 	RevisionMetadata(ctx context.Context, appNamespace, name, revision string) (ArgoRevision, error)
+	// RollbackApplication asks Argo CD to roll the app back to the deploy
+	// with this history ID, always without prune or dry run. Like
+	// SyncApplication it returns the operation state from before. Argo CD's
+	// rollback request carries no info, so the user is not named in Argo CD.
+	// ErrSyncInProgress when an operation is already running,
+	// ErrAutoSyncEnabled when the app syncs automatically.
+	RollbackApplication(ctx context.Context, appNamespace, name string, id int64) (ArgoOperation, error)
+	// Manifests returns the objects Argo CD generates for the app's current
+	// source at this revision (hooks included), as written in the source: a
+	// namespaced object without a namespace goes to the destination.
+	Manifests(ctx context.Context, appNamespace, name, revision string) ([]ArgoResourceRef, error)
+}
+
+// ArgoResourceRef names a resource of an application. Namespace is empty
+// for cluster-scoped resources (and, in Manifests, for objects that name
+// none).
+type ArgoResourceRef struct {
+	Group, Kind, Namespace, Name string
 }
 
 // ArgoAppDetails is an application's status beyond health and sync.
@@ -352,6 +371,9 @@ type ArgoAppDetails struct {
 	Conditions            []ArgoCondition
 	LastOperation         *ArgoOperationResult // nil if none ran
 	History               []ArgoDeploy         // oldest first, as Argo CD keeps it
+	AutoSync              bool                 // spec.syncPolicy.automated is enabled
+	MultiSource           bool                 // spec.sources
+	Resources             []ArgoResourceRef    // status.resources
 }
 
 type ArgoCondition struct {
@@ -389,6 +411,13 @@ type ArgoDeploy struct {
 	InitiatedBy string
 	Automated   bool
 	Source      string // repo URL (and chart) of the deployed source
+	// StartedAt is when the operation that deployed it started (the
+	// operation's startedAt), nil when Argo CD did not record it.
+	StartedAt *time.Time
+	// SameSource is set when the deployed source equals the app's current
+	// source but for targetRevision, so the manifests of the current source
+	// at Revision are what a rollback to it deploys.
+	SameSource bool
 }
 
 // ArgoRevision is the commit behind a revision.
@@ -421,6 +450,9 @@ type ArgoOperation struct {
 // ---------------------------------------------------------------------------
 // Kubernetes (kubeaccess)
 // ---------------------------------------------------------------------------
+
+// KubeGroupKind is a kind of an API group ("" for the core group).
+type KubeGroupKind struct{ Group, Kind string }
 
 // KubeActor is who a Kubernetes call is made on behalf of; it is carried to
 // the API server as impersonation extras.
@@ -624,6 +656,7 @@ var (
 	ErrClusterUnusable    = errors.New("cluster is unreachable or over-privileged")
 	ErrAlreadyRunning     = errors.New("a job of this cronjob is already running")
 	ErrSyncInProgress     = errors.New("an operation on this application is already in progress")
+	ErrAutoSyncEnabled    = errors.New("the application syncs automatically, so it cannot be rolled back")
 	ErrDebugUnavailable   = errors.New("debug containers are not enabled on this cluster")
 )
 
@@ -685,6 +718,11 @@ type ClusterAccess interface {
 	// rollouts, notable events) until ctx is done; the channel is closed at
 	// the end. Changes that belong to no workload are dropped.
 	WatchNamespace(ctx context.Context, actor KubeActor, cluster, namespace string) (<-chan NamespaceChange, error)
+	// ResourceScopes returns, from the cluster's discovery, whether each
+	// kind it serves is namespaced (true) or cluster-scoped (false). A kind
+	// missing from the map is not served (its group may have failed
+	// discovery).
+	ResourceScopes(ctx context.Context, actor KubeActor, cluster string) (map[KubeGroupKind]bool, error)
 
 	// --- cluster lifecycle (not tied to a user action) ---
 

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"testing"
 	"time"
 )
@@ -29,13 +30,16 @@ type fixture struct {
 	nsEnv    map[ClusterNS]string
 	prjEnv   map[string]string
 	clEnv    map[string]string
+	kinds    []string // SyncClusterKinds
 }
+
+var clusterRole = ClusterResource{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "x"}
 
 func (f fixture) policy() *Policy {
 	return NewPolicy(PolicyInput{
 		Grants: f.grants, Windows: f.windows, Holidays: f.holidays,
 		ClusterEnv: f.clEnv, NamespaceEnv: f.nsEnv, ProjectEnv: f.prjEnv,
-		Protected: f.protect, Argo: f.argo,
+		Protected: f.protect, Argo: f.argo, SyncClusterKinds: f.kinds,
 	})
 }
 
@@ -652,13 +656,13 @@ func TestDecideApp(t *testing.T) {
 		{"another action does not count", []Grant{teamGrant(1, 10, Scope{Kind: ScopeArgoProject, ArgoProject: "payments"}, ActionRestart)},
 			dev, worker, false, ReasonNoGrant, ClusterNS{"prod-1", "payments-worker"}},
 		{"own Namespace objects are fine", []Grant{teamGrant(1, 10, Scope{Kind: ScopeArgoProject, ArgoProject: "payments"}, ActionSync)},
-			dev, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []string{"Namespace/payments-api"}},
+			dev, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []ClusterResource{{Kind: "Namespace", Name: "payments-api"}}},
 			true, ReasonAllowed, ClusterNS{"prod-1", "payments-api"}},
 		{"other cluster-scoped resources need an admin", []Grant{teamGrant(1, 10, Scope{Kind: ScopeArgoProject, ArgoProject: "payments"}, ActionSync)},
-			dev, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []string{"ClusterRole/x"}},
+			dev, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []ClusterResource{clusterRole}},
 			false, ReasonAppScope, ClusterNS{"prod-1", "payments-api"}},
 		{"admin may sync cluster-scoped resources", nil,
-			Subject{ID: 2, Role: RoleAdmin}, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []string{"ClusterRole/x"}},
+			Subject{ID: 2, Role: RoleAdmin}, ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api", ClusterResources: []ClusterResource{clusterRole}},
 			true, ReasonAdmin, ClusterNS{"prod-1", "payments-api"}},
 		{"an app deploying nowhere known is denied", nil,
 			Subject{ID: 2, Role: RoleAdmin}, ArgoApp{Name: "orphan", Project: "payments", Namespace: "x"},
@@ -677,6 +681,13 @@ func TestDecideApp(t *testing.T) {
 		})
 	}
 
+	t.Run("foreign cluster resources leave out own Namespace objects", func(t *testing.T) {
+		app := ArgoApp{Cluster: "prod-1", Namespace: "payments-api", ResourceNamespaces: []string{"shared"},
+			ClusterResources: []ClusterResource{{Kind: "Namespace", Name: "payments-api"}, clusterRole, {Kind: "Namespace", Name: "shared"}, {Kind: "Namespace", Name: "other"}}}
+		if got := app.ForeignClusterResources(); !slices.Equal(got, []ClusterResource{clusterRole, {Kind: "Namespace", Name: "other"}}) {
+			t.Fatalf("got %v", got)
+		}
+	})
 	t.Run("protected namespace denies even admins", func(t *testing.T) {
 		p := fixture{argo: testArgo(now.Add(-time.Minute)), protect: []string{"kube-system"}}.policy()
 		app := ArgoApp{Name: "a", Cluster: "prod-1", Namespace: "payments-api", ResourceNamespaces: []string{"kube-system"}}
@@ -717,5 +728,71 @@ func TestValidateScopeActions(t *testing.T) {
 	}
 	if err := ValidateScopeActions(wl, []Action{"delete"}); err == nil {
 		t.Fatal("unknown action must be refused")
+	}
+}
+
+func TestDecideAppAllowedClusterKinds(t *testing.T) {
+	now := at(2026, 10, 21, 10, 0)
+	input := ClusterResource{Group: "fluentbit.fluent.io", Kind: "ClusterInput", Name: "tail"}
+	app := ArgoApp{Name: "a", Project: "payments", Cluster: "prod-1", Namespace: "payments-api",
+		ClusterResources: []ClusterResource{{Kind: "Namespace", Name: "payments-api"}, input}}
+	grants := []Grant{teamGrant(1, 10, Scope{Kind: ScopeArgoProject, ArgoProject: "payments"}, ActionSync)}
+	decide := func(kinds []string, app ArgoApp) Decision {
+		p := fixture{argo: testArgo(now.Add(-time.Minute)), grants: grants, kinds: kinds}.policy()
+		d, _ := DecideApp(p, dev, app, ActionSync, now)
+		return d
+	}
+
+	if d := decide(nil, app); d.Allowed || d.Reason != ReasonAppScope {
+		t.Fatalf("not allowed yet: %+v", d)
+	}
+	if d := decide([]string{"ClusterInput.fluentbit.fluent.io"}, app); !d.Allowed {
+		t.Fatalf("allowed kind: %+v", d)
+	}
+	// The group counts: the same kind of another group stays with admins.
+	other := app
+	other.ClusterResources = []ClusterResource{{Group: "example.com", Kind: "ClusterInput", Name: "x"}}
+	if d := decide([]string{"ClusterInput.fluentbit.fluent.io"}, other); d.Allowed || d.Reason != ReasonAppScope {
+		t.Fatalf("other group: %+v", d)
+	}
+	// A kind that may never be allowed stays with admins even when listed.
+	rbac := app
+	rbac.ClusterResources = []ClusterResource{clusterRole}
+	if d := decide([]string{"ClusterRole.rbac.authorization.k8s.io"}, rbac); d.Allowed || d.Reason != ReasonAppScope {
+		t.Fatalf("never-allowed kind: %+v", d)
+	}
+	p := fixture{kinds: []string{"ClusterInput.fluentbit.fluent.io"}}.policy()
+	mixed := app
+	mixed.ClusterResources = append([]ClusterResource{clusterRole}, app.ClusterResources...)
+	if got := p.AdminOnlyResources(mixed); !slices.Equal(got, []ClusterResource{clusterRole}) {
+		t.Fatalf("admin-only: %v", got)
+	}
+	if got := input.String(); got != "ClusterInput.fluentbit.fluent.io/tail" {
+		t.Fatalf("String: %s", got)
+	}
+}
+
+func TestCheckSyncClusterKind(t *testing.T) {
+	for entry, ok := range map[string]bool{
+		"ClusterInput.fluentbit.fluent.io":      true,
+		"ClusterOutput.fluentbit.fluent.io":     true,
+		"ClusterInput":                          false, // core kind (no group)
+		"Namespace":                             false,
+		"PersistentVolume":                      false,
+		"ClusterRole.rbac.authorization.k8s.io": false,
+		"ValidatingWebhookConfiguration.admissionregistration.k8s.io": false,
+		"CustomResourceDefinition.apiextensions.k8s.io":               false,
+		"APIService.apiregistration.k8s.io":                           false,
+		"StorageClass.storage.k8s.io":                                 false,
+		"PriorityClass.scheduling.k8s.io":                             false,
+		"*.fluentbit.fluent.io":                                       false,
+		"clusterinput.fluentbit.fluent.io":                            false,
+		"ClusterInput.Fluentbit.io":                                   false,
+		"ClusterInput.apps":                                           false,
+		"":                                                            false,
+	} {
+		if got := CheckSyncClusterKind(entry) == ""; got != ok {
+			t.Errorf("%q: allowed=%v, want %v (%s)", entry, got, ok, CheckSyncClusterKind(entry))
+		}
 	}
 }

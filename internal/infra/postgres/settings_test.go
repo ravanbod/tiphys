@@ -22,6 +22,7 @@ func TestSettings(t *testing.T) {
 	s.BreakGlassMode, s.BreakGlassRequestMaxAgeMin = domain.BreakGlassApproval, 15
 	s.Rocket.WebhookURL, s.Rocket.Channel = "https://chat.example/hooks/x", "#ops"
 	s.Rocket.Events[domain.NotifyExecInProd] = false
+	s.ArgoSyncClusterKinds = []string{"ClusterInput.fluentbit.fluent.io"}
 	must(t, f.r.Settings.Save(f.ctx, s, "admin"))
 	got, err = f.r.Settings.Load(f.ctx)
 	must(t, err)
@@ -35,7 +36,7 @@ func TestSettings(t *testing.T) {
 	var rows int
 	var by string
 	must(t, f.owner.QueryRow(f.ctx, `SELECT count(*), max(updated_by) FROM settings`).Scan(&rows, &by))
-	if rows != 10 || by != "admin2" {
+	if rows != 11 || by != "admin2" {
 		t.Fatalf("rows=%d updated_by=%s", rows, by)
 	}
 

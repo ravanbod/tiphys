@@ -15,8 +15,10 @@ PASSWORD="${TIPHYS_TEST_DB_PASSWORD:-tiphys-test}"
 case "${1:-}" in
 start)
   if ! docker inspect "$NAME" >/dev/null 2>&1; then
-    docker run -d --rm --name "$NAME" -p 127.0.0.1::5432 \
-      -e POSTGRES_PASSWORD="$PASSWORD" "$IMAGE" >/dev/null
+    # Throwaway data, as in CI: in memory and without fsync.
+    docker run -d --rm --name "$NAME" -p 127.0.0.1::5432 --tmpfs /var/lib/postgresql/data \
+      -e POSTGRES_PASSWORD="$PASSWORD" "$IMAGE" \
+      -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
   fi
   for _ in $(seq 1 60); do
     # pg_isready can answer during the init-time restart, so require a real query.

@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, api, errorText, watchOperation } from '../api';
-import type { ArgoSyncProgress, DecisionInfo, JobSummary, NamespaceApp, OperationDone, Pod, RestartProgress, WorkloadSummary } from '../api';
+import type { ArgoDeploy, ArgoResourceRef, ArgoSyncProgress, DecisionInfo, JobSummary, NamespaceApp, OperationDone, Pod, RestartProgress, WorkloadSummary } from '../api';
+import { useAuth } from '../context/auth';
+import { breakGlassOn } from '../lib/breakGlass';
+import { appScopeNote, explainDecision } from '../lib/decision';
 import { useApi } from '../hooks/useApi';
 import { describeCron } from '../lib/cron';
-import { fmtTime } from '../lib/time';
+import { fmtDateTime, fmtTime } from '../lib/time';
 import { BreakGlassMark, EnvBadge, JobStatusChip, KindTag, isProd } from './Badges';
 import { DiffList } from './DiffView';
 import { Skeleton } from './Feedback';
@@ -200,27 +203,7 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
   const subtitle = <span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cluster} / {app.name}</span><EnvBadge env={info.environment} /></span>;
   if (started) {
     return (
-      <Dialog
-        onClose={() => onClose(true)} tone={info.breakGlassId ? 'bg' : undefined} title={done ? `Sync of ${app.name}` : `Syncing ${app.name}`}
-        subtitle={subtitle}
-        footer={<button type="button" className="btn" data-autofocus onClick={() => onClose(true)}>Close</button>}
-      >
-        <div aria-live="polite" className="col" style={{ gap: 10 }}>
-          {!prog || prog.phase === 'Pending'
-            ? <span className="muted">Waiting for Argo CD to start the sync…</span>
-            : (
-              <>
-                <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
-                  <dt>Phase</dt><dd>{prog.phase}</dd>
-                  {prog.message && <><dt>Message</dt><dd>{prog.message}</dd></>}
-                  {prog.failed > 0 && <><dt>Failed</dt><dd className="mono">{prog.failed}</dd></>}
-                </dl>
-                {prog.total > 0 && <ProgressBar label="Resources synced" v={prog.synced} max={prog.total} />}
-              </>
-            )}
-          {done && <DoneCard done={done} okTitle={`${app.name} synced`} failTitle={`Sync of ${app.name} failed`} />}
-        </div>
-      </Dialog>
+      <ArgoProgressDialog what="Sync" verb="synced" name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />
     );
   }
 
@@ -253,6 +236,160 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
       </div>
       {prod && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
       {prod && (
+        <label className="f">
+          <span>Type <b className="mono" style={{ color: 'var(--tx)' }}>{app.name}</b> to confirm</span>
+          <input className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type the application name to confirm" autoComplete="off" spellCheck={false} data-autofocus />
+        </label>
+      )}
+      {already && <div className="banner yel" role="alert"><Icon name="warn" /><span>Another operation on this application is already running in Argo CD. Try again when it has finished.</span></div>}
+      {err != null && !already && <div className="banner red" role="alert">{errText(err)}</div>}
+    </Dialog>
+  );
+}
+
+/** Follows a sync or rollback of an Argo CD application until Argo CD reports it finished. */
+function ArgoProgressDialog({ what, verb, name, info, subtitle, prog, done, onClose }: {
+  what: 'Sync' | 'Rollback'; verb: string; name: string; info: DecisionInfo; subtitle: React.ReactNode;
+  prog: ArgoSyncProgress | null; done: OperationDone | null; onClose: () => void;
+}) {
+  return (
+    <Dialog
+      onClose={onClose} tone={info.breakGlassId ? 'bg' : undefined} title={done ? `${what} of ${name}` : `${what === 'Sync' ? 'Syncing' : 'Rolling back'} ${name}`}
+      subtitle={subtitle}
+      footer={<button type="button" className="btn" data-autofocus onClick={onClose}>Close</button>}
+    >
+      <div aria-live="polite" className="col" style={{ gap: 10 }}>
+        {!prog || prog.phase === 'Pending'
+          ? <span className="muted">Waiting for Argo CD to start the {what.toLowerCase()}…</span>
+          : (
+            <>
+              <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
+                <dt>Phase</dt><dd>{prog.phase}</dd>
+                {prog.message && <><dt>Message</dt><dd>{prog.message}</dd></>}
+                {prog.failed > 0 && <><dt>Failed</dt><dd className="mono">{prog.failed}</dd></>}
+              </dl>
+              {prog.total > 0 && <ProgressBar label="Resources synced" v={prog.synced} max={prog.total} />}
+            </>
+          )}
+        {done && <DoneCard done={done} okTitle={`${name} ${verb}`} failTitle={`${what} of ${name} failed`} />}
+      </div>
+    </Dialog>
+  );
+}
+
+const shortRev = (rev: string) => (/^[0-9a-f]{40}$/.test(rev) ? rev.slice(0, 7) : rev);
+const refName = (r: ArgoResourceRef) => `${r.kind}${r.group ? `.${r.group}` : ''} ${r.namespace ? `${r.namespace}/` : ''}${r.name}`;
+
+/**
+ * Confirms and follows a rollback of an Argo CD application to an earlier
+ * deploy, like Rollback in Argo CD. The plan is decided again with what the
+ * revision deploys, so it can deny what the app's own access allowed.
+ */
+export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: {
+  app: NamespaceApp; deploy: ArgoDeploy; cluster: string; namespace: string; onClose: (changed: boolean) => void;
+}) {
+  const { usesGrants, me } = useAuth();
+  const args = [cluster, namespace, app.appNamespace, app.name, deploy.id] as const;
+  const plan = useApi(() => api.appRollbackPlan(...args), [...args]);
+  const info = plan.data?.decision ?? app.access.rollback;
+  const prod = isProd(info.environment);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<unknown>(null);
+  const [started, setStarted] = useState(false);
+  const [prog, setProg] = useState<ArgoSyncProgress | null>(null);
+  const [done, setDone] = useState<OperationDone | null>(null);
+  const stop = useRef<(() => void) | null>(null);
+  useEffect(() => () => stop.current?.(), []);
+  const allowed = !!plan.data?.decision.allowed;
+  const canGo = allowed && (!prod || typed === app.name);
+  const already = err instanceof ApiError && err.code === 'already_running';
+  const rev = deploy.revision ? shortRev(deploy.revision) : `#${deploy.id}`;
+
+  async function go() {
+    if (!canGo || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const { operationId } = await api.rollbackApp(...args);
+      setStarted(true);
+      stop.current = watchOperation<ArgoSyncProgress>(operationId, {
+        onProgress: setProg,
+        onDone: (d) => { setDone(d); setBusy(false); },
+        onError: () => { setDone({ outcome: 'failed', message: 'Lost the progress stream. Check the application in Argo CD.' }); setBusy(false); },
+      });
+    } catch (e) {
+      setErr(e);
+      setBusy(false);
+    }
+  }
+
+  const subtitle = <span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cluster} / {app.name} → {rev}</span><EnvBadge env={info.environment} /></span>;
+  if (started) {
+    return <ArgoProgressDialog what="Rollback" verb={`rolled back to ${rev}`} name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />;
+  }
+  const p = plan.data;
+  const denial = p && !p.decision.allowed
+    ? explainDecision(p.decision, { action: 'rollback', target: p.decisionNamespace === namespace ? app.name : `${app.name} (namespace ${p.decisionNamespace})`, canBreakGlass: usesGrants && breakGlassOn(me) })
+    : null;
+  const scope = p ? appScopeNote(p.decision, p.adminOnlyResources) : null;
+
+  return (
+    <Dialog
+      width={720} onClose={() => onClose(false)} tone={info.breakGlassId ? 'bg' : prod ? 'prod' : undefined} title={`Roll back ${app.name} to ${rev}?`}
+      subtitle="Applies the manifests of this earlier deploy, like Rollback in Argo CD. Nothing is pruned, and the application stays OutOfSync with Git until the next sync."
+      footer={
+        <>
+          <button type="button" className="btn" onClick={() => onClose(false)}>Cancel</button>
+          <button type="button" className={`btn act${canGo && !busy && !already ? '' : ' dis'}`} aria-disabled={!canGo || busy || already} onClick={() => void go()} data-autofocus={!prod || undefined}>
+            <Icon name="restart" />Roll back
+          </button>
+        </>
+      }
+    >
+      <BgNote info={info} />
+      <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
+        <dt>Application</dt><dd className="mono">{app.name}</dd>
+        <dt>Revision</dt><dd><span className="mono">{deploy.revision || deploy.revisions.join(', ')}</span></dd>
+        {deploy.commit && <><dt>Commit</dt><dd>{deploy.commit.message.split('\n')[0]} <span className="muted">· {deploy.commit.author}</span></dd></>}
+        <dt>Deployed</dt><dd>{fmtDateTime(deploy.deployedAt)}</dd>
+        <dt>Cluster</dt><dd className="mono">{cluster}</dd>
+        <dt>Environment</dt><dd><EnvBadge env={info.environment} /></dd>
+      </dl>
+      {plan.error ? <div className="banner red" role="alert">{errText(plan.error)}</div>
+        : !p ? <Skeleton rows={2} />
+          : (
+            <div className="col" style={{ gap: 6 }}>
+              {denial && (
+                <div className="banner yel" role="alert">
+                  <Icon name="warn" />
+                  <span>
+                    {denial.text} {scope?.text}
+                    {scope && scope.shown.length > 0 && (
+                      <span className="row wrap" style={{ gap: 4, marginTop: 4 }}>
+                        {scope.shown.map((r) => <span key={r} className="tag mono">{r}</span>)}
+                        {scope.more > 0 && <span className="muted">and {scope.more} more</span>}
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+              <b>Added by this revision ({p.added.length})</b>
+              {p.added.length === 0 ? <span className="muted">None: it deploys the resources the application manages now.</span> : (
+                <ul className="mono" style={{ margin: 0, paddingLeft: 18, maxHeight: 140, overflow: 'auto' }}>{p.added.map((r) => <li key={refName(r)}>{refName(r)}</li>)}</ul>
+              )}
+              {p.kept.length > 0 && (
+                <>
+                  <b>Not in this revision ({p.kept.length})</b>
+                  <span className="muted">They stay in the cluster, since a rollback never prunes.</span>
+                  <ul className="mono" style={{ margin: 0, paddingLeft: 18, maxHeight: 140, overflow: 'auto' }}>{p.kept.map((r) => <li key={refName(r)}>{refName(r)}</li>)}</ul>
+                </>
+              )}
+              {p.truncated && <span className="muted">Only the first 200 of each are listed.</span>}
+            </div>
+          )}
+      {prod && allowed && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
+      {prod && allowed && (
         <label className="f">
           <span>Type <b className="mono" style={{ color: 'var(--tx)' }}>{app.name}</b> to confirm</span>
           <input className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type the application name to confirm" autoComplete="off" spellCheck={false} data-autofocus />

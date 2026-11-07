@@ -33,7 +33,8 @@ const (
 	// Local passwords: bcrypt's input is at most 72 bytes.
 	minPasswordLength = 12
 	maxPasswordBytes  = 72
-	passwordCost      = 12
+	// defaultPasswordCost is the bcrypt cost of local passwords.
+	defaultPasswordCost = 12
 )
 
 // AuthConfig configures AuthService.
@@ -50,6 +51,9 @@ type AuthConfig struct {
 	// instead of Keycloak. Off, they can neither log in nor be created, and
 	// their open sessions end at the next refresh.
 	LocalUsers bool
+	// PasswordCost is the bcrypt cost of local passwords; 0 means 12. Only
+	// tests lower it (cost 12 takes seconds under the race detector).
+	PasswordCost int
 }
 
 type loginTransaction struct {
@@ -96,6 +100,13 @@ func NewAuthService(oidc OIDCProvider, sealer Sealer, store Store, policy *Polic
 		oidc: oidc, sealer: sealer, store: store, policy: policy, audit: audit, clock: clock,
 		cfg: cfg, bootstrap: b, logger: logger, refreshing: map[string]*sync.Mutex{},
 	}
+}
+
+func (s *AuthService) passwordCost() int {
+	if s.cfg.PasswordCost > 0 {
+		return s.cfg.PasswordCost
+	}
+	return defaultPasswordCost
 }
 
 // SetOnSessionEnded registers a callback run when a session ends for any
@@ -543,7 +554,7 @@ func (s *AuthService) LocalLogin(ctx context.Context, username, password, ip, us
 func (s *AuthService) checkPassword(hash, password string) bool {
 	if hash == "" || len(password) > maxPasswordBytes {
 		s.dummyOnce.Do(func() {
-			s.dummyHash, _ = bcrypt.GenerateFromPassword([]byte(randomToken(16)), passwordCost)
+			s.dummyHash, _ = bcrypt.GenerateFromPassword([]byte(randomToken(16)), s.passwordCost())
 		})
 		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(password))
 		return false
@@ -552,14 +563,14 @@ func (s *AuthService) checkPassword(hash, password string) bool {
 }
 
 // hashPassword checks a new local password and returns its bcrypt hash.
-func hashPassword(password string) (string, error) {
+func (s *AuthService) hashPassword(password string) (string, error) {
 	switch {
 	case len([]rune(password)) < minPasswordLength:
 		return "", Invalid("password", fmt.Sprintf("at least %d characters", minPasswordLength))
 	case len(password) > maxPasswordBytes:
 		return "", Invalid("password", fmt.Sprintf("at most %d bytes", maxPasswordBytes))
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(password), passwordCost)
+	h, err := bcrypt.GenerateFromPassword([]byte(password), s.passwordCost())
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
 	}

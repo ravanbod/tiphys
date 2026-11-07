@@ -51,6 +51,13 @@ graph are matched in memory too); the only selector is
 
 ## Behavior notes
 
+- **ResourceScopes** reads the cluster's discovery (as `tiphys:user`, which
+  Kubernetes adds to `system:authenticated`, so the default `system:discovery`
+  binding covers it; no chart rule) and returns whether each kind is
+  namespaced. A rollback plan uses it to place the manifests of an earlier
+  revision; groups whose discovery fails are left out, and their kinds then
+  count as cluster-scoped.
+
 - **ListNamespaces** lists namespace names of a cluster (the only verb without a namespace argument). Protected namespaces are left out. It needs the `namespaces` get/list rule in `tiphys-actions`; without it the call is forbidden and the portal uses Argo CD's namespaces only.
 
 - **NamespaceTraffic** builds the namespace page's traffic graph: load balancer

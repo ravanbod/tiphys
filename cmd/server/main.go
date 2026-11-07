@@ -161,6 +161,7 @@ func run(cfg *config.Config, logger *zap.Logger) error {
 		return err
 	}
 	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassMode.Enabled() })
+	policy.SetSyncClusterKinds(func() []string { return settings.Get().ArgoSyncClusterKinds })
 	if err := policy.Reload(startCtx); err != nil {
 		return err
 	}

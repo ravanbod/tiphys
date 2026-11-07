@@ -9,6 +9,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { TerminateSessionDialog } from '../../components/TerminateSessionDialog';
 import { useAuth } from '../../context/auth';
 import { useApi } from '../../hooks/useApi';
+import { useUrlState } from '../../hooks/useUrlState';
 import { useNow } from '../../hooks/useNow';
 import { endChip } from '../../lib/endReason';
 import { podMiddleEllipsis } from '../../lib/auditLabels';
@@ -38,11 +39,8 @@ function EndCell({ s }: { s: ExecSessionView }) {
 
 export function Sessions() {
   const { isAdmin, isAuditor } = useAuth();
-  const [openOnly, setOpenOnly] = useState(true);
-  const [user, setUser] = useState('');
-  const [env, setEnv] = useState('');
-  const [bgOnly, setBgOnly] = useState(false);
-  const [userDebounced, setUserDebounced] = useState('');
+  const [{ open: openOnly, user, env, bg: bgOnly }, setF] = useUrlState({ open: true, user: '', env: '', bg: false });
+  const [userDebounced, setUserDebounced] = useState(() => user.trim());
   const [extra, setExtra] = useState<ExecSessionView[]>([]);
   const [exhausted, setExhausted] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -115,7 +113,7 @@ export function Sessions() {
     <>
       <PageHeader title="Sessions" subtitle="Every exec session is recorded. Open sessions can be watched live.">
         <label className="chk">
-          <input type="checkbox" checked={openOnly} onChange={(e) => setOpenOnly(e.target.checked)} /> Open now
+          <input type="checkbox" checked={openOnly} onChange={(e) => setF({ open: e.target.checked })} /> Open now
         </label>
       </PageHeader>
 
@@ -126,14 +124,14 @@ export function Sessions() {
           aria-label="User"
           placeholder="Any user"
           value={user}
-          onChange={(e) => setUser(e.target.value)}
+          onChange={(e) => setF({ user: e.target.value })}
         />
-        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setEnv(e.target.value)}>
+        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setF({ env: e.target.value })}>
           <option value="">Any environment</option>
           {envs.map((x) => <option key={x} value={x}>{x}</option>)}
         </select>
         <label className="chk">
-          <input type="checkbox" checked={bgOnly} onChange={(e) => setBgOnly(e.target.checked)} /> Break-glass only
+          <input type="checkbox" checked={bgOnly} onChange={(e) => setF({ bg: e.target.checked })} /> Break-glass only
         </label>
         <button type="button" className="btn ghost sm" onClick={first.reload} aria-label="Refresh sessions">
           <Icon name="refresh" size={12} />Refresh

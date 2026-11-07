@@ -1,4 +1,4 @@
-import type { Action, GrantInput, GrantView, ScopeView, WorkloadKind } from '../api/types';
+import type { Action, AppAction, GrantInput, GrantView, ScopeView, WorkloadKind } from '../api/types';
 import { ADMIN_TZ, isoToLocalInput, localInputToIso } from './adminDatetime';
 import { ARGO_UI } from './features';
 
@@ -20,19 +20,24 @@ export interface GrantForm {
   note: string;
 }
 
-/** Sync acts on whole Argo CD applications, which a workloads scope cannot cover. */
-export const SYNC_SCOPE_HINT = 'Sync needs a namespace, cluster, environment or Argo project scope: it applies to whole Argo CD applications.';
+/** Sync and rollback act on whole Argo CD applications, which a workloads scope cannot cover. */
+export const APP_SCOPE_HINT = 'Sync and rollback need a namespace, cluster, environment or Argo project scope: they apply to whole Argo CD applications.';
 
-export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
+export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'];
+
+/** Whether the action acts on a whole Argo CD application (sync, rollback). */
+export function isAppAction(a: Action): a is AppAction {
+  return a === 'sync' || a === 'rollback';
+}
 
 /** How an action is named on the grant, request and time window checkboxes. */
 export function actionOptionLabel(a: Action): string {
-  return a === 'sync' ? 'ArgoCD Sync' : a;
+  return a === 'sync' ? 'ArgoCD Sync' : a === 'rollback' ? 'ArgoCD Rollback' : a;
 }
 
 export function emptyGrantForm(): GrantForm {
   return {
-    id: null, holderKind: 'team', holderId: null, scopeKind: ARGO_UI ? 'argo_project' : 'namespace', argoProject: '', environment: '', cluster: '', namespace: '',
+    id: null, holderKind: 'user', holderId: null, scopeKind: ARGO_UI ? 'argo_project' : 'namespace', argoProject: '', environment: '', cluster: '', namespace: '',
     workloads: [], actions: ['logs'], expiryMode: 'none', expiry: '', note: '',
   };
 }
@@ -77,7 +82,7 @@ export function validateGrantForm(f: GrantForm, now: number): Record<string, str
     if (f.scopeKind === 'workloads' && f.workloads.length === 0) e.workloads = 'Select at least one workload.';
   }
   if (f.actions.length === 0) e.actions = 'Select at least one action.';
-  else if (f.scopeKind === 'workloads' && f.actions.includes('sync')) e.actions = SYNC_SCOPE_HINT;
+  else if (f.scopeKind === 'workloads' && f.actions.some(isAppAction)) e.actions = APP_SCOPE_HINT;
   if (f.expiryMode === 'date') {
     const iso = localInputToIso(f.expiry);
     if (!iso) e.expiresAt = 'Enter a valid date and time.';
@@ -107,7 +112,7 @@ export function grantInputFromForm(f: GrantForm): GrantInput {
   };
 }
 
-const VERB: Record<Action, string> = { logs: 'read logs', exec: 'exec', restart: 'restart', 'run-job': 'run jobs', sync: 'sync Argo CD apps' };
+const VERB: Record<Action, string> = { logs: 'read logs', exec: 'exec', restart: 'restart', 'run-job': 'run jobs', sync: 'sync Argo CD apps', rollback: 'roll back Argo CD apps' };
 
 /** "read logs, exec and restart" */
 export function actionPhrase(actions: Action[]): string {

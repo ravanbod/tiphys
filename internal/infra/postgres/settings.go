@@ -25,6 +25,7 @@ const (
 	keyRetAudit     = "retention.audit_days"
 	keyRetRecording = "retention.recordings_days"
 	keyRocket       = "rocket"
+	keySyncKinds    = "argo.sync_cluster_kinds" // JSON array of "Kind.group"
 )
 
 type rocketJSON struct {
@@ -84,6 +85,12 @@ func (r settingsRepo) Load(ctx context.Context) (domain.Settings, error) {
 				s.Rocket.Events[domain.NotificationEvent(ev)] = on
 			}
 		}
+		if key == keySyncKinds {
+			if err := json.Unmarshal(raw, &s.ArgoSyncClusterKinds); err != nil {
+				return s, fmt.Errorf("load settings: key %s: %w", key, err)
+			}
+			continue
+		}
 		// Unknown keys are ignored so a newer version can add settings.
 	}
 	if err := rows.Err(); err != nil {
@@ -113,6 +120,7 @@ func (r settingsRepo) Save(ctx context.Context, s domain.Settings, updatedBy str
 		{keyBGReqMaxAge, s.BreakGlassRequestMaxAgeMin},
 		{keyRetAudit, s.RetentionAuditDays}, {keyRetRecording, s.RetentionRecordingsDays},
 		{keyRocket, rocketJSON{WebhookURL: s.Rocket.WebhookURL, Channel: s.Rocket.Channel, Events: events}},
+		{keySyncKinds, s.ArgoSyncClusterKinds},
 	}
 	return withTx(ctx, r.q, func(tx dbtx) error {
 		for _, v := range values {

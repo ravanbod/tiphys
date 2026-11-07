@@ -13,6 +13,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { Seg } from '../../components/Seg';
 import { useAuth } from '../../context/auth';
 import { useApi } from '../../hooks/useApi';
+import { useUrlState } from '../../hooks/useUrlState';
 import { useNow } from '../../hooks/useNow';
 import { adminFieldErrors } from '../../lib/adminErrorText';
 import { fmtWhen } from '../../lib/time';
@@ -42,8 +43,9 @@ export function Users() {
   const users = useApi(() => api.users(), []);
   const teams = useApi(() => api.teams(), []);
   const now = useNow(60_000);
-  const [query, setQuery] = useState('');
-  const [status, setStatus] = useState<StatusFilter>('all');
+  const [f, setF] = useUrlState({ q: '', status: 'all' });
+  const query = f.q;
+  const status: StatusFilter = f.status === 'active' || f.status === 'disabled' ? f.status : 'all';
   const [selId, setSelId] = useState<number | null>(null);
   const [dialog, setDialog] = useState<'create' | 'role' | 'team' | 'disable' | 'password' | null>(null);
   const toggle = useAdminMutation();
@@ -93,13 +95,13 @@ export function Users() {
             placeholder="Search name, username, role or team"
             aria-label="Search users"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => setF({ q: e.target.value })}
           />
         </label>
         <Seg
           label="Filter by status"
           value={status}
-          onChange={setStatus}
+          onChange={(v: StatusFilter) => setF({ status: v })}
           options={[
             { value: 'all', label: 'All' },
             { value: 'active', label: 'Active' },
@@ -363,7 +365,7 @@ function EffectiveAccess({ user }: { user: UserView }) {
         <MiniGrantRow key={`${r.via ?? 'u'}-${r.grant.id}`} grant={r.grant} via={r.via} />
       ))}
       <div style={{ paddingTop: 10, borderTop: '1px solid var(--ln)' }}>
-        <Link to="/grants" className="linklike blue">
+        <Link to={`/grants?holder=user:${user.id}`} className="linklike blue">
           Open in Grants
         </Link>
       </div>

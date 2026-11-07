@@ -55,6 +55,8 @@ type PolicyService struct {
 
 	// breakGlassEnabled says whether active break-glasses may count; nil means yes.
 	breakGlassEnabled func() bool
+	// syncClusterKinds returns Settings.ArgoSyncClusterKinds; nil means none.
+	syncClusterKinds func() []string
 
 	current atomic.Pointer[PolicySnapshot]
 	version atomic.Uint64
@@ -80,6 +82,11 @@ func NewPolicyService(store Store, argo *ArgoService, clock Clock, logger *zap.L
 // feature is on. While it is off, no break-glass is attached to decisions, so
 // time windows and holidays apply to everyone.
 func (s *PolicyService) SetBreakGlassEnabled(f func() bool) { s.breakGlassEnabled = f }
+
+// SetSyncClusterKinds sets the function that returns the cluster-scoped kinds
+// that do not leave syncing an app to admins (Settings.ArgoSyncClusterKinds).
+// Like SetBreakGlassEnabled, it is called before Run.
+func (s *PolicyService) SetSyncClusterKinds(f func() []string) { s.syncClusterKinds = f }
 
 // Current returns the latest snapshot.
 func (s *PolicyService) Current() *PolicySnapshot { return s.current.Load() }
@@ -181,10 +188,14 @@ func (s *PolicyService) Reload(ctx context.Context) error {
 		}
 	}
 
+	var kinds []string
+	if s.syncClusterKinds != nil {
+		kinds = s.syncClusterKinds()
+	}
 	snap.Policy = domain.NewPolicy(domain.PolicyInput{
 		Grants: grants, Windows: windows, Holidays: holidays,
 		ClusterEnv: clusterEnv, NamespaceEnv: nsEnv, ProjectEnv: projEnv,
-		Protected: protected, Argo: s.argo.Snapshot(),
+		Protected: protected, Argo: s.argo.Snapshot(), SyncClusterKinds: kinds,
 	})
 	s.current.Store(snap)
 	s.notify()

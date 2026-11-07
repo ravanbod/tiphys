@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DecisionInfo } from '../api/types';
-import { closesInSeconds, closesSoonLabel, explainDecision, grantedOrClosed, reopensLabel } from './decision';
+import { appScopeNote, appSyncTarget, closesInSeconds, closesSoonLabel, explainDecision, grantedOrClosed, reopensLabel } from './decision';
 
 const base: DecisionInfo = {
   allowed: false, reason: 'no_grant', environment: 'prod', grantIds: [], breakGlassId: null, reopensAt: null, closesAt: null,
@@ -63,5 +63,33 @@ describe('grantedOrClosed', () => {
     expect(grantedOrClosed(d(false, 'no_grant'))).toBe(false);
     expect(grantedOrClosed(d(false, 'grant_expired'))).toBe(false);
     expect(grantedOrClosed(undefined)).toBe(false);
+  });
+});
+
+describe('appScopeNote', () => {
+  const scope: DecisionInfo = { ...base, reason: 'app_scope' };
+  it('names the resources, at most ten', () => {
+    const many = Array.from({ length: 12 }, (_, i) => `ClusterRole/r${i}`);
+    const n = appScopeNote(scope, many)!;
+    expect(n.shown).toHaveLength(10);
+    expect(n.more).toBe(2);
+    expect(appScopeNote(scope, ['ClusterRole/x'])).toEqual({ text: 'It manages cluster-wide resources:', shown: ['ClusterRole/x'], more: 0 });
+  });
+  it('without resources the app deploys nowhere known', () => {
+    expect(appScopeNote(scope, [])!.text).toMatch(/no cluster or namespace/);
+  });
+  it('is null for other decisions', () => {
+    expect(appScopeNote({ ...base, reason: 'no_grant' }, ['ClusterRole/x'])).toBeNull();
+    expect(appScopeNote({ ...base, allowed: true, reason: 'admin' }, [])).toBeNull();
+  });
+});
+
+describe('appSyncTarget', () => {
+  it('names the other namespace that denied a sync', () => {
+    const app = { name: 'shop-prod', syncNamespace: 'shop-prod' };
+    expect(appSyncTarget(app, 'shop-prod')).toBe('shop-prod');
+    expect(appSyncTarget(app, 'shop-jobs')).toBe('namespace shop-prod, where this app also deploys');
+    expect(explainDecision({ ...base, reason: 'no_grant' }, { action: 'sync', target: appSyncTarget(app, 'shop-jobs'), now })!.text)
+      .toBe("You don't have sync access to namespace shop-prod, where this app also deploys.");
   });
 });

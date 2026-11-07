@@ -70,7 +70,7 @@ export function CronJobsPanel({ cluster, namespace, flatTop, only }: { cluster: 
                             </span>
                           </div>
                         ) : (
-                          <ActionButton action="run-job" decision={c.access['run-job']} label="Run now" icon="bolt" size="sm" target={c.name} hint="inline" onClick={() => setRun(c)} />
+                          <ActionButton action="run-job" decision={c.access['run-job']} label="Run now" icon="bolt" size="sm" target={c.name} hint="inline" request={{ cluster, namespace, workload: { kind: 'CronJob', name: c.name } }} onClick={() => setRun(c)} />
                         )}
                       </td>
                     )}

@@ -75,10 +75,31 @@ func ValidateSettings(v domain.Settings) *InvalidError {
 	if v.BreakGlassDefaultMin > v.BreakGlassMaxMinutes {
 		fields["breakGlassDefaultMinutes"] = "must not exceed the maximum"
 	}
+	if msg := checkSyncClusterKinds(v.ArgoSyncClusterKinds); msg != "" {
+		fields["argoSyncClusterKinds"] = msg
+	}
 	if len(fields) > 0 {
 		return &InvalidError{Message: "invalid settings", Fields: fields}
 	}
 	return nil
+}
+
+// checkSyncClusterKinds explains the first problem in the list ("" if none).
+func checkSyncClusterKinds(kinds []string) string {
+	if len(kinds) > domain.MaxSyncClusterKinds {
+		return "at most " + itoa(domain.MaxSyncClusterKinds) + " kinds"
+	}
+	seen := map[string]struct{}{}
+	for _, k := range kinds {
+		if msg := domain.CheckSyncClusterKind(k); msg != "" {
+			return k + ": " + msg
+		}
+		if _, dup := seen[k]; dup {
+			return k + ": listed twice"
+		}
+		seen[k] = struct{}{}
+	}
+	return ""
 }
 
 func itoa(n int) string {

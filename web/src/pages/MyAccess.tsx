@@ -15,12 +15,14 @@ import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { explainDecision } from '../lib/decision';
 import { mergeTarget, sameScope } from '../lib/requestMerge';
-import { SYNC_SCOPE_HINT, actionOptionLabel } from '../lib/grantForm';
+import { APP_SCOPE_HINT, actionOptionLabel, isAppAction } from '../lib/grantForm';
 import { fmtDateTime, fmtDay, fmtHours, fmtReopens, fmtWhen } from '../lib/time';
 import { ARGO_UI } from '../lib/features';
+import { requestPrefill, requestUrl } from '../lib/requestLink';
+import type { RequestPrefill } from '../lib/requestLink';
 import { breakGlassOn } from '../lib/breakGlass';
 
-const ALL_ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
+const ALL_ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'];
 const DURATIONS: { value: number | 'perm'; label: string; hours: number | null }[] = [
   { value: 1, label: '1 hour', hours: 1 }, { value: 8, label: '8 hours', hours: 8 }, { value: 24, label: '1 day', hours: 24 },
   { value: 168, label: '7 days', hours: 168 }, { value: 'perm', label: 'Permanent', hours: null },
@@ -34,7 +36,7 @@ function availability(g: MyAccessGrant, wls: WorkloadSummary[] | undefined, now:
   if (!wls) return { state: 'unknown' };
   const covered = g.scope.kind === 'workloads' ? wls.filter((w) => g.scope.workloads?.some((x) => x.kind === w.kind && x.name === w.name)) : wls;
   // Sync is decided per Argo CD application, not per workload.
-  const infos: DecisionInfo[] = covered.flatMap((w) => g.actions.filter((a): a is WorkloadAction => a !== 'sync').map((a) => w.access[a]));
+  const infos: DecisionInfo[] = covered.flatMap((w) => g.actions.filter((a): a is WorkloadAction => !isAppAction(a)).map((a) => w.access[a]));
   if (infos.length === 0) return { state: 'unknown' };
   if (infos.some((i) => i.allowed)) return { state: 'open' };
   const closed = infos.find((i) => i.reason === 'outside_window' || i.reason === 'holiday') ?? infos[0];
@@ -77,6 +79,14 @@ export function MyAccess() {
       window.setTimeout(() => reasonRef.current?.focus(), 50);
     }
   }, [sp, data.data]);
+
+  // A "Request access" link may name what was denied; the form starts with it.
+  const prefill = requestPrefill(sp);
+  const closeRequest = () => {
+    const n = new URLSearchParams(sp);
+    for (const k of ['request', 'cluster', 'namespace', 'action', 'kind', 'name']) n.delete(k);
+    setSp(n, { replace: true });
+  };
 
   if (data.loading && !data.data) return <Loading what="your access" />;
   if (data.error && !data.data) return <ErrorBanner error={data.error} onRetry={data.reload} />;
@@ -161,9 +171,10 @@ export function MyAccess() {
         </div>
 
         <RequestForm
+          key={prefill ? requestUrl(prefill) : ''} prefill={prefill}
           formRef={formRef} reasonRef={reasonRef} grants={d.grants} now={now}
-          onSent={() => { toast('Request sent. An administrator will review it.'); data.reload(); setTab('requests'); const n = new URLSearchParams(sp); n.delete('request'); setSp(n, { replace: true }); }}
-          onCancel={() => { const n = new URLSearchParams(sp); n.delete('request'); setSp(n, { replace: true }); }}
+          onSent={() => { toast('Request sent. An administrator will review it.'); data.reload(); setTab('requests'); closeRequest(); }}
+          onCancel={closeRequest}
         />
       </div>
     </>
@@ -191,15 +202,16 @@ function RequestRow({ r, now }: { r: AccessRequest; now: number }) {
  * shown as held and only new ones are requested; the hint says whether
  * approval adds to the user's own grant (see lib/requestMerge) or creates one.
  */
-function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
+function RequestForm({ prefill, formRef, reasonRef, grants, now, onSent, onCancel }: {
+  prefill: RequestPrefill | null;
   formRef: React.RefObject<HTMLElement>; reasonRef: React.RefObject<HTMLTextAreaElement>; grants: MyAccessGrant[]; now: number; onSent: () => void; onCancel: () => void;
 }) {
-  const [kind, setKind] = useState<ScopeView['kind']>('namespace');
+  const [kind, setKind] = useState<ScopeView['kind']>(prefill?.workload ? 'workloads' : 'namespace');
   const [project, setProject] = useState('');
-  const [cluster, setCluster] = useState('');
-  const [namespace, setNamespace] = useState('');
-  const [picked, setPicked] = useState<CatalogWorkload[]>([]);
-  const [actions, setActions] = useState<Action[]>(['logs']);
+  const [cluster, setCluster] = useState(prefill?.cluster ?? '');
+  const [namespace, setNamespace] = useState(prefill?.namespace ?? '');
+  const [picked, setPicked] = useState<CatalogWorkload[]>(prefill?.workload ? [prefill.workload] : []);
+  const [actions, setActions] = useState<Action[]>([prefill?.action ?? 'logs']);
   const [dur, setDur] = useState<number | 'perm'>('perm');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
@@ -211,9 +223,27 @@ function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
   const fields = err instanceof ApiError ? err.fields : {};
 
   useEffect(() => { if (!project && projects.data?.[0]) setProject(projects.data[0]); }, [projects.data, project]);
-  useEffect(() => { if (!cluster && clusters.data?.[0]) setCluster(clusters.data[0].name); }, [clusters.data, cluster]);
-  useEffect(() => { setNamespace(nss.data?.[0] ?? ''); setPicked([]); }, [nss.data]);
-  useEffect(() => { setPicked([]); }, [namespace]);
+  useEffect(() => {
+    if (clusters.data && !clusters.data.some((c) => c.name === cluster)) setCluster(clusters.data[0]?.name ?? '');
+  }, [clusters.data, cluster]);
+  // The catalog leaves out only protected clusters, where requests are refused.
+  const linkedHidden = !!prefill && !!clusters.data && !clusters.data.some((c) => c.name === prefill.cluster);
+  // A namespace the cluster lists stays chosen (or the same name on another
+  // cluster), and so does a prefilled one an unreachable cluster cannot list;
+  // picked workloads reset when the place changes.
+  useEffect(() => {
+    if (!nss.data) return;
+    const linked = prefill && cluster === prefill.cluster ? prefill.namespace : '';
+    setNamespace((n) => (nss.data!.includes(n) || (n && n === linked) ? n : nss.data![0] ?? ''));
+  }, [nss.data, prefill, cluster]);
+  const where = `${cluster}/${namespace}`;
+  const lastWhere = useRef(where);
+  useEffect(() => {
+    if (lastWhere.current !== where) {
+      lastWhere.current = where;
+      setPicked([]);
+    }
+  }, [where]);
 
   const scope: ScopeView | null = kind === 'argo_project' ? (project ? { kind, argoProject: project } : null)
     : !cluster || !namespace ? null : kind === 'namespace' ? { kind, cluster, namespace } : picked.length ? { kind, cluster, namespace, workloads: picked } : null;
@@ -248,6 +278,9 @@ function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
     <aside className="card" style={{ width: 400, flex: 'none', maxWidth: '100%' }} aria-label="Request access" ref={formRef as React.RefObject<HTMLElement>}>
       <div className="hd">Request access</div>
       <form className="bd col" style={{ gap: 14 }} onSubmit={send}>
+        {linkedHidden && (
+          <div className="banner yel" role="note"><Icon name="warn" /><span>Access on cluster <b className="mono">{prefill!.cluster}</b> cannot be requested here. Ask an administrator.</span></div>
+        )}
         <div className="f">Scope
           <Seg label="Scope" style={{ alignSelf: 'flex-start' }} value={kind} onChange={setKind} options={[...(ARGO_UI ? [{ value: 'argo_project' as const, label: 'Argo project' }] : []), { value: 'namespace' as const, label: 'Namespace' }, { value: 'workloads' as const, label: 'Workloads' }]} />
         </div>
@@ -255,8 +288,13 @@ function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
           <label className="f">Argo project<select className="sel" style={{ height: 30 }} value={project} onChange={(e) => setProject(e.target.value)}>{(projects.data ?? []).map((p) => <option key={p}>{p}</option>)}</select>{fe('argoProject')}</label>
         ) : (
           <>
-            <label className="f">Cluster<select className="sel" style={{ height: 30 }} value={cluster} onChange={(e) => setCluster(e.target.value)}>{(clusters.data ?? []).map((c) => <option key={c.name} value={c.name}>{c.name} ({c.environment})</option>)}</select></label>
-            <label className="f">Namespace<select className="sel" style={{ height: 30 }} value={namespace} onChange={(e) => setNamespace(e.target.value)}>{(nss.data ?? []).map((n) => <option key={n}>{n}</option>)}</select>{fe('namespace')}</label>
+            <label className="f">Cluster<select className="sel" style={{ height: 30 }} value={cluster} onChange={(e) => setCluster(e.target.value)}>
+              {(clusters.data ?? []).map((c) => <option key={c.name} value={c.name}>{c.name} ({c.environment})</option>)}
+            </select></label>
+            <label className="f">Namespace<select className="sel" style={{ height: 30 }} value={namespace} onChange={(e) => setNamespace(e.target.value)}>
+              {(nss.data ?? []).map((n) => <option key={n}>{n}</option>)}
+              {nss.data && namespace && !nss.data.includes(namespace) && <option value={namespace}>{namespace}</option>}
+            </select>{fe('namespace')}</label>
           </>
         )}
         {kind === 'workloads' && (
@@ -279,10 +317,10 @@ function RequestForm({ formRef, reasonRef, grants, now, onSent, onCancel }: {
           <div className="row wrap" style={{ gap: 14 }}>
             {ALL_ACTIONS.map((a) => {
               // Sync applies to whole Argo CD apps, which a workloads scope cannot cover.
-              const off = a === 'sync' && kind === 'workloads' && !actions.includes(a);
+              const off = isAppAction(a) && kind === 'workloads' && !actions.includes(a);
               const has = held.has(a);
               return (
-                <label key={a} className="chk" title={has ? 'You already have this here' : off ? SYNC_SCOPE_HINT : undefined}>
+                <label key={a} className="chk" title={has ? 'You already have this here' : off ? APP_SCOPE_HINT : undefined}>
                   <input type="checkbox" checked={has || actions.includes(a)} disabled={has || off} onChange={() => toggleAction(a)} />{actionOptionLabel(a)}
                 </label>
               );

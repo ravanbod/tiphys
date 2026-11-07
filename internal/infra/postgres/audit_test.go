@@ -266,7 +266,7 @@ func TestMigrate(t *testing.T) {
 
 	var version int64
 	must(t, f.owner.QueryRow(f.ctx, `SELECT max(version_id) FROM goose_db_version`).Scan(&version))
-	if version != 7 {
+	if version != 8 {
 		t.Fatalf("version %d", version)
 	}
 	// The app role keeps working after a second migration run.

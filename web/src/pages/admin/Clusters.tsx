@@ -260,7 +260,6 @@ export function Clusters() {
             isAdmin={isAdmin}
             onAdd={() => setDialog({ kind: 'override' })}
           />
-          <ProtectedCard isAdmin={isAdmin} />
         </div>
         <div style={{ width: 360, flex: 'none' }}>
           <ArgoCard isAdmin={isAdmin} argoUrl={me.settings.argoUrl} />
@@ -603,101 +602,6 @@ function OverrideDialog({ knownEnvs, onClose, onDone }: { knownEnvs: string[]; o
         <AdminErrorBanner error={Object.keys(adminFieldErrors(m.error)).length ? null : m.error} />
       </form>
     </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------- protected namespaces
-
-function ProtectedCard({ isAdmin }: { isAdmin: boolean }) {
-  const prot = useApi(() => api.protectedNamespaces(), []);
-  const m = useAdminMutation();
-  const [value, setValue] = useState('');
-  const [pendingRemove, setPendingRemove] = useState<string | null>(null);
-
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const ns = value.trim();
-    if (!ns) return;
-    const r = await m.run(() => api.addProtectedNamespace(ns), `${ns} is now protected`);
-    if (r.ok) {
-      setValue('');
-      prot.reload();
-    }
-  };
-  const remove = async (ns: string) => {
-    const r = await m.run(() => api.removeProtectedNamespace(ns), `${ns} is no longer protected`);
-    if (r.ok) {
-      setPendingRemove(null);
-      prot.reload();
-    }
-  };
-
-  return (
-    <div className="card">
-      <div className="hd">
-        <Icon name="lock" />
-        Protected namespaces <small>No grant can reach these. Grant pickers hide them.</small>
-      </div>
-      <div className="bd col" style={{ gap: 12 }}>
-        {pendingRemove === null && <AdminErrorBanner error={m.error} />}
-        {prot.loading && !prot.data && <Skeleton rows={1} />}
-        {!!prot.error && !prot.data && <ErrorBanner error={prot.error} onRetry={prot.reload} />}
-        <div className="row wrap">
-          {prot.data?.map((ns) => (
-            <span key={ns} className="chip" style={{ height: 26, padding: isAdmin ? '0 6px 0 10px' : '0 10px' }}>
-              <span className="mono">{ns}</span>
-              {isAdmin && (
-                <button
-                  type="button"
-                  className="btn ghost sm"
-                  style={{ padding: '0 2px', height: 20 }}
-                  aria-label={`Remove ${ns}`}
-                  disabled={m.busy}
-                  onClick={() => setPendingRemove(ns)}
-                >
-                  <Icon name="x" size={12} />
-                </button>
-              )}
-            </span>
-          ))}
-          {prot.data?.length === 0 && <span className="muted">No protected namespaces.</span>}
-        </div>
-        {isAdmin && (
-          <form className="row" onSubmit={(e) => void add(e)}>
-            <input
-              className="input mono"
-              style={{ width: 200 }}
-              placeholder="Add namespace"
-              aria-label="Add protected namespace"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              disabled={m.busy}
-            />
-            <button type="submit" className="btn" disabled={m.busy || !value.trim()}>
-              Add
-            </button>
-          </form>
-        )}
-      </div>
-      {pendingRemove !== null && (
-        <ConfirmAdminDialog
-          title={`Remove protection from ${pendingRemove}?`}
-          confirmLabel="Remove protection"
-          danger
-          busy={m.busy}
-          error={m.error}
-          onConfirm={() => void remove(pendingRemove)}
-          onClose={() => {
-            m.clear();
-            setPendingRemove(null);
-          }}
-        >
-          <div className="banner prod" style={{ fontSize: 12 }}>
-            Grants can then be created for <span className="mono">{pendingRemove}</span> and its workloads become visible in pickers.
-          </div>
-        </ConfirmAdminDialog>
-      )}
-    </div>
   );
 }
 

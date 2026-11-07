@@ -78,6 +78,7 @@ export function WorkloadDetailPage() {
   const bgActive = Object.values(d.access).some((x) => x.breakGlassId);
   const closes = closesSoonLabel(d.access.exec.allowed ? d.access.exec : d.access.logs, now);
   const isCron = d.kind === 'CronJob';
+  const wlRequest = { cluster: d.cluster, namespace: d.namespace, workload: { kind: d.kind, name: d.name } };
 
   return (
     <>
@@ -101,12 +102,12 @@ export function WorkloadDetailPage() {
             <span>Cluster <b className="mono" style={{ color: 'var(--tx)' }}>{d.cluster}</b></span>
             {ARGO_UI && d.argoApp && <span>Argo app <b className="mono" style={{ color: 'var(--tx)' }}>{d.argoApp}</b></span>}
           </div>
-          <AccessHints access={d.access} target={d.name} actions={isCron ? ['logs', 'run-job'] : ['logs', 'exec', 'restart']} />
+          <AccessHints access={d.access} target={d.name} actions={isCron ? ['logs', 'run-job'] : ['logs', 'exec', 'restart']} request={wlRequest} />
         </div>
         <div className="row wrap">
           <WhoHasAccess cluster={d.cluster} namespace={d.namespace} kind={d.kind} name={d.name} />
-          {!isCron && <ActionButton action="restart" decision={d.access.restart} label="Restart" icon="restart" target={d.name} hint="tip" onClick={() => setRestart(true)} />}
-          {isCron && <ActionButton action="run-job" decision={d.access['run-job']} label="Run now" icon="bolt" target={d.name} hint="tip" onClick={() => setRunning(true)} />}
+          {!isCron && <ActionButton action="restart" decision={d.access.restart} label="Restart" icon="restart" target={d.name} hint="tip" request={wlRequest} onClick={() => setRestart(true)} />}
+          {isCron && <ActionButton action="run-job" decision={d.access['run-job']} label="Run now" icon="bolt" target={d.name} hint="tip" request={wlRequest} onClick={() => setRunning(true)} />}
         </div>
       </div>
 

@@ -166,6 +166,21 @@ type namespaceAppDTO struct {
 	// the namespace it is about (the one that denied, or the destination).
 	Access        map[string]decisionInfo `json:"access"`
 	SyncNamespace string                  `json:"syncNamespace"`
+	// AdminOnlyResources are the cluster-scoped resources ("Kind.group/name") that
+	// leave the sync to admins; empty unless that is why it is denied.
+	AdminOnlyResources []string `json:"adminOnlyResources"`
+	// AutoSync and MultiSource keep the app from being rolled back here.
+	AutoSync    bool `json:"autoSync"`
+	MultiSource bool `json:"multiSource"`
+}
+
+// clusterResourceNames are "Kind.group/name" (never null).
+func clusterResourceNames(rs []domain.ClusterResource) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.String()
+	}
+	return out
 }
 
 func toNamespaceApp(v application.NamespaceAppView) namespaceAppDTO {
@@ -182,8 +197,10 @@ func toNamespaceApp(v application.NamespaceAppView) namespaceAppDTO {
 		at = timeStr(&a.LastSyncAt)
 	}
 	return namespaceAppDTO{Name: a.Name, Project: a.Project, AppNamespace: a.AppNamespace, Health: health, Sync: sync,
-		LastSyncAt: at, LastSyncPhase: strPtr(a.LastSyncPhase), Access: map[string]decisionInfo{string(domain.ActionSync): toDecisionInfo(v.Sync)},
-		SyncNamespace: v.SyncAt.Namespace}
+		LastSyncAt: at, LastSyncPhase: strPtr(a.LastSyncPhase),
+		Access:        map[string]decisionInfo{string(domain.ActionSync): toDecisionInfo(v.Sync), string(domain.ActionRollback): toDecisionInfo(v.Rollback)},
+		SyncNamespace: v.SyncAt.Namespace, AdminOnlyResources: clusterResourceNames(v.AdminOnlyResources),
+		AutoSync: a.AutoSync, MultiSource: a.MultiSource}
 }
 
 type namespaceDTO struct {
@@ -724,6 +741,9 @@ type settingsDTO struct {
 	RetentionRecordingsDays        int       `json:"retentionRecordingsDays"`
 	Rocket                         rocketDTO `json:"rocket"`
 	LokiRetentionInfo              *string   `json:"lokiRetentionInfo"`
+	// ArgoSyncClusterKinds is optional on PUT: left out (a client from before
+	// the setting existed), the stored list is kept.
+	ArgoSyncClusterKinds *[]string `json:"argoSyncClusterKinds"`
 }
 
 type rocketDTO struct {
@@ -737,6 +757,7 @@ func toSettings(s domain.Settings, maskWebhook bool) settingsDTO {
 	for _, e := range domain.AllNotificationEvents {
 		ev[string(e)] = s.Rocket.Events[e]
 	}
+	kinds := orEmpty(s.ArgoSyncClusterKinds)
 	url := s.Rocket.WebhookURL
 	if maskWebhook && url != "" {
 		url = maskURL(url)
@@ -745,7 +766,8 @@ func toSettings(s domain.Settings, maskWebhook bool) settingsDTO {
 		BreakGlassMode: s.BreakGlassMode, BreakGlassDefaultMinutes: s.BreakGlassDefaultMin, BreakGlassMaxMinutes: s.BreakGlassMaxMinutes,
 		BreakGlassRequestMaxAgeMinutes: s.BreakGlassRequestMaxAgeMin,
 		RetentionAuditDays:             s.RetentionAuditDays, RetentionRecordingsDays: s.RetentionRecordingsDays,
-		Rocket: rocketDTO{WebhookURL: url, Channel: s.Rocket.Channel, Events: ev}}
+		Rocket:               rocketDTO{WebhookURL: url, Channel: s.Rocket.Channel, Events: ev},
+		ArgoSyncClusterKinds: &kinds}
 }
 
 // maskURL hides the secret token at the end of a webhook URL.
@@ -770,6 +792,10 @@ func (d settingsDTO) toDomain(current domain.Settings) domain.Settings {
 	}
 	for _, e := range domain.AllNotificationEvents {
 		s.Rocket.Events[e] = d.Rocket.Events[string(e)]
+	}
+	s.ArgoSyncClusterKinds = current.ArgoSyncClusterKinds
+	if d.ArgoSyncClusterKinds != nil {
+		s.ArgoSyncClusterKinds = *d.ArgoSyncClusterKinds
 	}
 	return s
 }
@@ -847,15 +873,55 @@ type argoHistoryDTO struct {
 	Source      string         `json:"source"`
 	Current     bool           `json:"current"`
 	Commit      *argoCommitDTO `json:"commit"`
+	// PortalUser started the deploy through the portal, with PortalAction
+	// (argo.sync or argo.rollback); null otherwise.
+	PortalUser   *string `json:"portalUser"`
+	PortalAction *string `json:"portalAction"`
+	// RollbackBlocked: current, auto_sync, multi_source, source_changed or null.
+	RollbackBlocked *string `json:"rollbackBlocked"`
 }
 
 func toArgoHistory(h application.ArgoHistoryEntry) argoHistoryDTO {
 	out := argoHistoryDTO{ID: h.ID, Revision: h.Revision, Revisions: orEmpty(h.Revisions), DeployedAt: tstr(h.DeployedAt),
-		InitiatedBy: h.InitiatedBy, Automated: h.Automated, Source: h.Source, Current: h.Current}
+		InitiatedBy: h.InitiatedBy, Automated: h.Automated, Source: h.Source, Current: h.Current,
+		PortalUser: strPtr(h.PortalUser), PortalAction: strPtr(h.PortalAction), RollbackBlocked: strPtr(h.RollbackBlocked)}
 	if c := h.Commit; c != nil {
 		out.Commit = &argoCommitDTO{Author: c.Author, Date: timeStr(c.Date), Message: c.Message, Tags: orEmpty(c.Tags)}
 	}
 	return out
+}
+
+type argoResourceRefDTO struct {
+	Group     string `json:"group"`
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+func toArgoResourceRefs(rs []application.ArgoResourceRef) []argoResourceRefDTO {
+	out := make([]argoResourceRefDTO, len(rs))
+	for i, r := range rs {
+		out[i] = argoResourceRefDTO{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name}
+	}
+	return out
+}
+
+type argoRollbackPlanDTO struct {
+	ID       int64        `json:"id"`
+	Revision string       `json:"revision"`
+	Decision decisionInfo `json:"decision"`
+	// DecisionNamespace is the namespace the decision is about.
+	DecisionNamespace  string               `json:"decisionNamespace"`
+	AdminOnlyResources []string             `json:"adminOnlyResources"`
+	Added              []argoResourceRefDTO `json:"added"`
+	Kept               []argoResourceRefDTO `json:"kept"`
+	Truncated          bool                 `json:"truncated"`
+}
+
+func toArgoRollbackPlan(p application.ArgoRollbackPlan) argoRollbackPlanDTO {
+	return argoRollbackPlanDTO{ID: p.Deploy.ID, Revision: p.Deploy.Revision, Decision: toDecisionInfo(p.Decision),
+		DecisionNamespace: p.DecisionAt.Namespace, AdminOnlyResources: clusterResourceNames(p.AdminOnlyResources),
+		Added: toArgoResourceRefs(p.Added), Kept: toArgoResourceRefs(p.Kept), Truncated: p.Truncated}
 }
 
 type argoResourceDiffDTO struct {

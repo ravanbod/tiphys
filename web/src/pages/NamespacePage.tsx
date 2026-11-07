@@ -19,9 +19,10 @@ import { useSetShellCtx } from '../context/shell';
 import { eventKey, eventSig, rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import type { AnimatedRow } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
+import { useUrlState } from '../hooks/useUrlState';
 import type { ApiState } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
-import { grantedOrClosed } from '../lib/decision';
+import { appSyncTarget, grantedOrClosed } from '../lib/decision';
 import { cronJobsUrl, logsUrl, workloadUrl } from '../lib/routes';
 import { fmtDateTime, fmtRelative } from '../lib/time';
 import { inClusterNodes, trafficRules, withoutNodes } from '../lib/traffic';
@@ -36,8 +37,7 @@ const denied = (err: unknown) => err instanceof ApiError && err.status === 403;
 export function NamespacePage() {
   const { cluster = '', ns = '' } = useParams();
   const { me } = useAuth();
-  const [q, setQ] = useState('');
-  const [kind, setKind] = useState('');
+  const [{ q, kind }, setFilters] = useUrlState({ q: '', kind: '' });
   const [run, setRun] = useState<WorkloadSummary | null>(null);
   const navigate = useNavigate();
   const list = useApi(() => api.workloads(cluster, ns), [cluster, ns, me.breakGlass?.id]);
@@ -93,15 +93,15 @@ export function NamespacePage() {
 
       {tab === 'events' ? <NamespaceEvents events={events} scope={key} /> : tab === 'traffic' ? <NamespaceTraffic traffic={traffic} cluster={cluster} ns={ns} /> : (
         <>
-          <ArgoApps cluster={cluster} ns={ns} syncHere={!!info?.access.includes('sync')} />
+          <ArgoApps cluster={cluster} ns={ns} />
 
           <div className="row wrap">
-            <select className="sel" aria-label="Kind" value={kind} onChange={(e) => setKind(e.target.value)}>
+            <select className="sel" aria-label="Kind" value={kind} onChange={(e) => setFilters({ kind: e.target.value })}>
               <option value="">All kinds</option>{kinds.map((k) => <option key={k}>{k}</option>)}
             </select>
             <label className="search" style={{ width: 280, height: 28, background: 'var(--sf)' }}>
               <Icon name="search" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Filter by name" aria-label="Filter by name" />
+              <input value={q} onChange={(e) => setFilters({ q: e.target.value })} placeholder="Filter by name" aria-label="Filter by name" />
             </label>
             <span className="grow" />
             {list.data && <span className="muted" aria-live="polite">Showing {shown.length} of {all.length}</span>}
@@ -129,7 +129,7 @@ export function NamespacePage() {
                             <div className="row" style={{ justifyContent: 'flex-end', gap: 4 }}>
                               {/* Only for users with a run-job grant; a closed window shows why. */}
                               {w.kind === 'CronJob' && grantedOrClosed(w.access['run-job']) && (
-                                <ActionButton action="run-job" decision={w.access['run-job']} label="Run now" icon="bolt" size="sm" target={w.name} hint="inline" onClick={() => setRun(w)} />
+                                <ActionButton action="run-job" decision={w.access['run-job']} label="Run now" icon="bolt" size="sm" target={w.name} hint="inline" request={{ cluster, namespace: ns, workload: { kind: w.kind, name: w.name } }} onClick={() => setRun(w)} />
                               )}
                               <Link className="btn ghost sm" to={logsUrl(loc)}>Logs</Link>
                               <Link className="btn ghost sm" to={workloadUrl(loc)}>Open</Link>
@@ -157,17 +157,21 @@ export function NamespacePage() {
 }
 
 function TabLink({ id, tab, children }: { id: Tab; tab: Tab; children: React.ReactNode }) {
-  return <Link role="tab" aria-selected={tab === id} className={tab === id ? 'on' : undefined} to={`?tab=${id}`} replace>{children}</Link>;
+  // Keeps the other parameters (the tabs' filters).
+  const [sp] = useSearchParams();
+  const n = new URLSearchParams(sp);
+  n.set('tab', id);
+  return <Link role="tab" aria-selected={tab === id} className={tab === id ? 'on' : undefined} to={`?${n}`} replace>{children}</Link>;
 }
 
 /**
  * The Argo CD applications deploying to the namespace, with their sync state.
  * Hidden when there are none or they cannot be loaded (Argo CD is enrichment).
- * Sync is offered to users who hold it in this namespace (or whose decision
- * is only closed by time); a denial for another namespace the app deploys to
- * names that namespace.
+ * Every app has a Sync button, disabled with the reason when the viewer may
+ * not sync it; a denial for another namespace the app deploys to names that
+ * namespace.
  */
-function ArgoApps({ cluster, ns, syncHere }: { cluster: string; ns: string; syncHere: boolean }) {
+function ArgoApps({ cluster, ns }: { cluster: string; ns: string }) {
   const { me } = useAuth();
   const now = useNow(30_000);
   const apps = useApi(() => api.namespaceApps(cluster, ns), [cluster, ns, me.breakGlass?.id]);
@@ -199,20 +203,18 @@ function ArgoApps({ cluster, ns, syncHere }: { cluster: string; ns: string; sync
                 <td><SyncChip sync={a.sync} /></td>
                 <td><LastSync app={a} now={now} /></td>
                 <td style={{ textAlign: 'right' }}>
-                  {(syncHere || grantedOrClosed(a.access.sync)) && (
-                    <ActionButton
-                      action="sync" decision={a.access.sync} label="Sync" icon="refresh" size="sm" hint="inline"
-                      target={a.syncNamespace && a.syncNamespace !== ns ? `namespace ${a.syncNamespace}, which ${a.name} also deploys to` : a.name}
-                      onClick={() => setSyncing(a)}
-                    />
-                  )}
+                  <ActionButton
+                    action="sync" decision={a.access.sync} label="Sync" icon="refresh" size="sm"
+                    target={appSyncTarget(a, ns)} request={{ cluster, namespace: a.syncNamespace || ns }}
+                    onClick={() => setSyncing(a)}
+                  />
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {shown && <ArgoAppPanel app={shown} cluster={cluster} ns={ns} argoLink={base ? link(shown) : ''} onClose={() => setShown(null)} />}
+      {shown && <ArgoAppPanel app={shown} cluster={cluster} ns={ns} argoLink={base ? link(shown) : ''} onClose={() => setShown(null)} onChanged={apps.reload} />}
       {syncing && (
         <SyncAppDialog app={syncing} cluster={cluster} namespace={ns} onClose={(changed) => { setSyncing(null); if (changed) apps.reload(); }} />
       )}
@@ -229,7 +231,7 @@ function ArgoApps({ cluster, ns, syncHere }: { cluster: string; ns: string; sync
  */
 function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficGraph>; cluster: string; ns: string }) {
   const [allOpen, setAllOpen] = useState(false);
-  const [withInCluster, setWithInCluster] = useState(true);
+  const [{ inCluster: withInCluster }, setView] = useUrlState({ inCluster: true });
   if (denied(traffic.error)) return <WholeNamespaceOnly what="The traffic graph" />;
   if (traffic.error) return <ErrorBanner error={traffic.error} onRetry={traffic.reload} />;
   const full = traffic.data;
@@ -248,7 +250,7 @@ function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficG
         <span className="grow" />
         {services > 0 && (
           <button
-            type="button" className="btn ghost sm" aria-pressed={withInCluster} onClick={() => setWithInCluster((v) => !v)}
+            type="button" className="btn ghost sm" aria-pressed={withInCluster} onClick={() => setView({ inCluster: !withInCluster })}
             title="Services that no Ingress, Gateway or load balancer leads to: other workloads call them inside the cluster, directly or through an Istio waypoint."
           >
             {withInCluster ? 'Hide' : 'Show'} in-cluster Services ({services})
@@ -280,7 +282,7 @@ function NamespaceTraffic({ traffic, cluster, ns }: { traffic: ApiState<TrafficG
  */
 function NamespaceEvents({ events, scope }: { events: ApiState<K8sEvent[]>; scope: string }) {
   const now = useNow(30_000);
-  const [warningsOnly, setWarningsOnly] = useState(true);
+  const [{ warnings: warningsOnly }, setView] = useUrlState({ warnings: true });
   const rows = useAnimatedList(events.data ? (warningsOnly ? events.data.filter((e) => e.type === 'Warning') : events.data) : undefined, eventKey, eventSig, `${scope}|${warningsOnly}`);
   if (denied(events.error)) return <WholeNamespaceOnly what="The events of the whole namespace" />;
   if (events.error) return <ErrorBanner error={events.error} onRetry={events.reload} />;
@@ -297,7 +299,7 @@ function NamespaceEvents({ events, scope }: { events: ApiState<K8sEvent[]>; scop
         {events.data && <small>· {warnings} warning{warnings === 1 ? '' : 's'} of {list.length}</small>}
         <span className="grow" />
         <label className="row" style={{ gap: 6, fontWeight: 400 }} title="Normal events are routine (Pulled, Started, Scheduled); warnings are problems such as BackOff or FailedCreate">
-          <input type="checkbox" checked={warningsOnly} onChange={(e) => setWarningsOnly(e.target.checked)} />
+          <input type="checkbox" checked={warningsOnly} onChange={(e) => setView({ warnings: e.target.checked })} />
           Warnings only
         </label>
         <button type="button" className="btn ghost sm" onClick={events.reload} disabled={events.loading}>Refresh</button>

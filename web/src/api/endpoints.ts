@@ -1,7 +1,7 @@
 import { del, get, patch, post, put, request, requestText } from './client';
 import { kindSegment, qs, seg } from './query';
 import type {
-  AccessCheckInput, AccessGrant, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
+  AccessCheckInput, AccessGrant, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
   CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CronJobSummary, DecisionExplain,
   EnvironmentOverride, EnvironmentOverrideInput, ExecSessionDetail, ExecSessionView, GrantFilters, GrantInput,
   GrantView, HolidayInput, HolidayView, K8sEvent, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
@@ -64,6 +64,10 @@ export const api = {
     get<ArgoDiff>(`${appPath(cluster, ns, appNamespace, name)}/diff`),
   syncApp: (cluster: string, ns: string, appNamespace: string, name: string) =>
     post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/sync`),
+  appRollbackPlan: (cluster: string, ns: string, appNamespace: string, name: string, id: number) =>
+    get<ArgoRollbackPlan>(`${appPath(cluster, ns, appNamespace, name)}/history/${id}/rollback`),
+  rollbackApp: (cluster: string, ns: string, appNamespace: string, name: string, id: number) =>
+    post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/history/${id}/rollback`),
   cronJobs: (cluster: string, ns: string) =>
     get<CronJobSummary[]>(`/clusters/${seg(cluster)}/namespaces/${seg(ns)}/cronjobs`),
   restart: (r: WorkloadRef) => post<{ operationId: string }>(`${workloadPath(r)}/restart`),

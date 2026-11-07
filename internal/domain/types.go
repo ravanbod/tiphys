@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// Action is something a user can do to a workload or, for sync, to an Argo
-// CD application.
+// Action is something a user can do to a workload or, for sync and
+// rollback, to an Argo CD application.
 type Action string
 
 const (
@@ -20,25 +20,33 @@ const (
 	ActionRunJob  Action = "run-job"
 	// ActionSync syncs a whole Argo CD application (see DecideApp).
 	ActionSync Action = "sync"
+	// ActionRollback rolls a whole Argo CD application back to an earlier
+	// deploy of its history (see DecideApp). It is separate from sync, since
+	// it deploys what is no longer in Git.
+	ActionRollback Action = "rollback"
 )
 
 // AllActions lists every action in display order.
-var AllActions = []Action{ActionLogs, ActionExec, ActionRestart, ActionRunJob, ActionSync}
+var AllActions = []Action{ActionLogs, ActionExec, ActionRestart, ActionRunJob, ActionSync, ActionRollback}
 
-// WorkloadActions are the actions on a workload (all but sync).
+// WorkloadActions are the actions on a workload (all but the app actions).
 var WorkloadActions = []Action{ActionLogs, ActionExec, ActionRestart, ActionRunJob}
 
 func (a Action) Valid() bool {
 	switch a {
-	case ActionLogs, ActionExec, ActionRestart, ActionRunJob, ActionSync:
+	case ActionLogs, ActionExec, ActionRestart, ActionRunJob, ActionSync, ActionRollback:
 		return true
 	}
 	return false
 }
 
-// ValidateScopeActions checks the actions and that they fit the scope: sync
-// needs a scope wider than workloads, since a workloads scope cannot cover an
-// Argo CD application.
+// OnApp reports whether the action applies to a whole Argo CD application
+// (sync, rollback) rather than to a workload.
+func (a Action) OnApp() bool { return a == ActionSync || a == ActionRollback }
+
+// ValidateScopeActions checks the actions and that they fit the scope: the
+// app actions (sync, rollback) need a scope wider than workloads, since a
+// workloads scope cannot cover an Argo CD application.
 func ValidateScopeActions(s Scope, actions []Action) error {
 	if len(actions) == 0 {
 		return fmt.Errorf("at least one action is required")
@@ -47,8 +55,8 @@ func ValidateScopeActions(s Scope, actions []Action) error {
 		if !a.Valid() {
 			return fmt.Errorf("invalid action %q", a)
 		}
-		if a == ActionSync && s.Kind == ScopeWorkloads {
-			return fmt.Errorf("sync needs a namespace, cluster, environment or Argo project scope: it applies to whole Argo CD applications")
+		if a.OnApp() && s.Kind == ScopeWorkloads {
+			return fmt.Errorf("%s needs a namespace, cluster, environment or Argo project scope: it applies to whole Argo CD applications", a)
 		}
 	}
 	return nil
@@ -651,6 +659,7 @@ const (
 	EventRunJob           = "run-job"
 	EventArgoSync         = "argo.sync"
 	EventArgoDiff         = "argo.diff"
+	EventArgoRollback     = "argo.rollback"
 	EventBreakGlassStart  = "break_glass.start"
 	EventBreakGlassEnd    = "break_glass.end"
 	EventBreakGlassReq    = "break_glass.request"
@@ -677,6 +686,10 @@ type Settings struct {
 	RetentionAuditDays         int
 	RetentionRecordingsDays    int
 	Rocket                     RocketSettings
+	// ArgoSyncClusterKinds are cluster-scoped kinds ("Kind.group") whose
+	// resources do not leave syncing an Argo CD app to admins
+	// (CheckSyncClusterKind says which may be listed).
+	ArgoSyncClusterKinds []string
 }
 
 // BreakGlassMode says how break-glass is started.

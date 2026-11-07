@@ -243,6 +243,33 @@ func (h *Handler) AppDiff(c *gin.Context) {
 	c.JSON(http.StatusOK, toArgoDiff(d))
 }
 
+// AppRollbackPlan shows what rolling the app back to a deploy would do.
+func (h *Handler) AppRollbackPlan(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	plan, err := h.svc.Workloads.AppRollbackPlan(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), id)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toArgoRollbackPlan(plan))
+}
+
+func (h *Handler) RollbackApp(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	op, err := h.svc.Workloads.RollbackApp(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), id)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"operationId": op.OperationID})
+}
+
 func (h *Handler) Namespaces(c *gin.Context) {
 	ns := h.svc.Workloads.Namespaces(c.Request.Context(), principal(c))
 	out := make([]namespaceDTO, len(ns))

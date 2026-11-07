@@ -15,6 +15,7 @@ const TITLES: Record<string, string> = {
   'run-job': 'CronJob run',
   'argo.sync': 'Argo CD sync',
   'argo.diff': 'Argo CD diff viewed',
+  'argo.rollback': 'Argo CD rollback',
   'break_glass.start': 'Break-glass started',
   'break_glass.end': 'Break-glass ended',
   'break_glass.request': 'Break-glass requested',

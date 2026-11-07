@@ -288,7 +288,7 @@ function TeamDetail({
           <div className="hd">
             Grants
             <span className="grow" />
-            <Link to="/grants" className="btn sm">
+            <Link to={`/grants?holder=team:${team.id}`} className="btn sm">
               Open in Grants
             </Link>
           </div>

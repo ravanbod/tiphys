@@ -16,12 +16,13 @@ import { Seg } from '../../components/Seg';
 import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
 import { useApi } from '../../hooks/useApi';
+import { useUrlState } from '../../hooks/useUrlState';
 import { buildSteps, verdict } from '../../lib/accessCheckSteps';
 import type { CheckStep } from '../../lib/accessCheckSteps';
 import { ADMIN_TZ, localInputToIso } from '../../lib/adminDatetime';
 import { fieldError, unmatchedFields } from '../../lib/adminFields';
 import {
-  ACTIONS, SYNC_SCOPE_HINT, actionOptionLabel, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, parseWlKey, validateGrantForm, wlKey,
+  ACTIONS, APP_SCOPE_HINT, actionOptionLabel, isAppAction, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, parseWlKey, validateGrantForm, wlKey,
 } from '../../lib/grantForm';
 import type { GrantForm } from '../../lib/grantForm';
 import { fmtDateTime, fmtDay, fmtSpan } from '../../lib/time';
@@ -396,9 +397,9 @@ function GrantEditor({
           4 · Actions
           <div className="row wrap" style={{ gap: 16 }}>
             {ACTIONS.map((a) => {
-              const off = a === 'sync' && form.scopeKind === 'workloads' && !form.actions.includes(a);
+              const off = isAppAction(a) && form.scopeKind === 'workloads' && !form.actions.includes(a);
               return (
-                <label key={a} className="chk" title={off ? SYNC_SCOPE_HINT : undefined}>
+                <label key={a} className="chk" title={off ? APP_SCOPE_HINT : undefined}>
                   <input type="checkbox" checked={form.actions.includes(a)} disabled={off} onChange={() => toggleAction(a)} />
                   {actionOptionLabel(a)}
                   {a === 'logs' && <span className="muted">(events, pod status)</span>}
@@ -680,13 +681,8 @@ function AccessChecker({
 
 export function Grants() {
   const { isAdmin } = useAuth();
-  const [fHolder, setFHolder] = useState('');
-  const [fKind, setFKind] = useState('');
-  const [fCluster, setFCluster] = useState('');
-  const [fProject, setFProject] = useState('');
-  const [fAction, setFAction] = useState('');
-  const [fExpiring, setFExpiring] = useState(false);
-  const [fExpired, setFExpired] = useState(false);
+  const [{ holder: fHolder, kind: fKind, cluster: fCluster, project: fProject, action: fAction, expiring: fExpiring, expired: fExpired }, setF] =
+    useUrlState({ holder: '', kind: '', cluster: '', project: '', action: '', expiring: false, expired: false });
   // null: the editor dialog is closed.
   const [form, setForm] = useState<GrantForm | null>(null);
   const [checking, setChecking] = useState(false);
@@ -764,7 +760,7 @@ export function Grants() {
       </PageHeader>
 
       <div className="row wrap">
-        <select className="sel" aria-label="Holder" value={fHolder} onChange={(e) => setFHolder(e.target.value)}>
+        <select className="sel" aria-label="Holder" value={fHolder} onChange={(e) => setF({ holder: e.target.value })}>
           <option value="">Any holder</option>
           <optgroup label="Teams">
             {(teams.data ?? []).map((t) => <option key={t.id} value={`team:${t.id}`}>{t.name}</option>)}
@@ -773,26 +769,26 @@ export function Grants() {
             {(users.data ?? []).map((u) => <option key={u.id} value={`user:${u.id}`}>{u.displayName}</option>)}
           </optgroup>
         </select>
-        <select className="sel" aria-label="Scope kind" value={fKind} onChange={(e) => setFKind(e.target.value)}>
+        <select className="sel" aria-label="Scope kind" value={fKind} onChange={(e) => setF({ kind: e.target.value })}>
           <option value="">Any scope</option>
           {SCOPE_KINDS.map((k) => <option key={k} value={k}>{SCOPE_KIND_LABEL[k]}</option>)}
         </select>
-        <select className="sel" aria-label="Cluster" value={fCluster} onChange={(e) => setFCluster(e.target.value)}>
+        <select className="sel" aria-label="Cluster" value={fCluster} onChange={(e) => setF({ cluster: e.target.value })}>
           <option value="">All clusters</option>
           {clusterOptions.map((c) => <option key={c} value={c}>{c}</option>)}
         </select>
         {ARGO_UI && (
-          <select className="sel" aria-label="Argo project" value={fProject} onChange={(e) => setFProject(e.target.value)}>
+          <select className="sel" aria-label="Argo project" value={fProject} onChange={(e) => setF({ project: e.target.value })}>
             <option value="">All Argo projects</option>
             {projectOptions.map((p) => <option key={p} value={p}>{p}</option>)}
           </select>
         )}
-        <select className="sel" aria-label="Action" value={fAction} onChange={(e) => setFAction(e.target.value)}>
+        <select className="sel" aria-label="Action" value={fAction} onChange={(e) => setF({ action: e.target.value })}>
           <option value="">Any action</option>
           {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
         </select>
-        <label className="chk"><input type="checkbox" checked={fExpiring} onChange={(e) => setFExpiring(e.target.checked)} /> Expiring soon</label>
-        <label className="chk"><input type="checkbox" checked={fExpired} onChange={(e) => setFExpired(e.target.checked)} /> Expired</label>
+        <label className="chk"><input type="checkbox" checked={fExpiring} onChange={(e) => setF({ expiring: e.target.checked })} /> Expiring soon</label>
+        <label className="chk"><input type="checkbox" checked={fExpired} onChange={(e) => setF({ expired: e.target.checked })} /> Expired</label>
       </div>
 
       {grants.error ? (

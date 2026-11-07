@@ -81,15 +81,15 @@ func TestListApplications(t *testing.T) {
 	want := []domain.ArgoApp{
 		{Name: "payments-api", Project: "payments", Cluster: "prod-1", Namespace: "payments",
 			ResourceNamespaces: []string{"payments"}, Health: "Healthy", Sync: "Synced", AppNamespace: "argocd",
-			LastSyncAt: time.Date(2026, 10, 27, 9, 0, 5, 0, time.UTC), LastSyncPhase: "Succeeded"},
+			LastSyncAt: time.Date(2026, 10, 27, 9, 0, 5, 0, time.UTC), LastSyncPhase: "Succeeded", AutoSync: true},
 		// multi-source app, destination by name, resources in two namespaces
 		{Name: "payments-observability", Project: "payments", Cluster: "prod-1", Namespace: "payments-monitoring",
 			ResourceNamespaces: []string{"payments", "payments-monitoring"}, Health: "Degraded", Sync: "OutOfSync",
-			AppNamespace: "argocd", LastSyncPhase: "Running", ClusterResources: []string{"ClusterRole/payments-read"}}, // sync still running: no finishedAt
+			AppNamespace: "argocd", LastSyncPhase: "Running", MultiSource: true, ClusterResources: []domain.ClusterResource{{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "payments-read"}}}, // sync still running: no finishedAt
 		// in-cluster by well-known server; the cluster-scoped Namespace is listed apart
 		{Name: "platform-ingress", Project: "platform", Cluster: "in-cluster", Namespace: "ingress",
 			ResourceNamespaces: []string{"ingress"}, Health: "Healthy", Sync: "Synced", AppNamespace: "argocd",
-			ClusterResources: []string{"Namespace/ingress"}},
+			ClusterResources: []domain.ClusterResource{{Kind: "Namespace", Name: "ingress"}}},
 		// empty project -> default; server with trailing slash in the cluster list
 		{Name: "stage-web", Project: "default", Cluster: "staging", Namespace: "web", Sync: "Unknown", AppNamespace: "argocd"},
 		// unknown server: no cluster name, so it covers nothing

@@ -19,7 +19,7 @@ import { useMedia } from '../../hooks/useMedia';
 import { useNow } from '../../hooks/useNow';
 import { scopeEnvironment } from '../../lib/adminEnv';
 import { BreakGlassRequests } from './BreakGlassRequests';
-import { ACTIONS, SYNC_SCOPE_HINT, actionOptionLabel } from '../../lib/grantForm';
+import { ACTIONS, APP_SCOPE_HINT, actionOptionLabel, isAppAction } from '../../lib/grantForm';
 import { mergeTarget, sameScope } from '../../lib/requestMerge';
 import { fmtDateTime, fmtHours, fmtWhen } from '../../lib/time';
 
@@ -200,7 +200,7 @@ function DecidedCard({ req }: { req: AccessRequest }) {
           {req.resultingGrantId !== null && (
             <>
               <dt>Grant</dt>
-              <dd><Link to="/grants">Grant #{req.resultingGrantId}</Link></dd>
+              <dd><Link to={`/grants?holder=user:${req.userId}`}>Grant #{req.resultingGrantId}</Link></dd>
             </>
           )}
         </dl>
@@ -334,9 +334,9 @@ function DecisionCard({
         Actions
         <div className="row wrap" style={{ gap: 14 }}>
           {ACTIONS.map((a) => {
-            const off = a === 'sync' && req.scope.kind === 'workloads' && !actions.includes(a);
+            const off = isAppAction(a) && req.scope.kind === 'workloads' && !actions.includes(a);
             return (
-              <label key={a} className="chk" style={{ minHeight: mobile ? 44 : undefined }} title={off ? SYNC_SCOPE_HINT : undefined}>
+              <label key={a} className="chk" style={{ minHeight: mobile ? 44 : undefined }} title={off ? APP_SCOPE_HINT : undefined}>
                 <input type="checkbox" checked={actions.includes(a)} disabled={off} onChange={() => toggle(a)} />
                 {actionOptionLabel(a)}
                 {!req.actions.includes(a) && actions.includes(a) && <span className="chip info">added</span>}

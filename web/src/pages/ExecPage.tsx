@@ -20,6 +20,7 @@ import { describeEnd } from '../lib/endReason';
 import type { EndInfo } from '../lib/endReason';
 import { workloadUrl } from '../lib/routes';
 import { fmtCountdown, fmtTime, msUntil } from '../lib/time';
+import { requestUrl } from '../lib/requestLink';
 import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 type Phase = 'connect' | 'session' | 'ended';
@@ -254,7 +255,7 @@ function ConnectDialog(p: {
       {blocked && (
         <div className="banner red" role="alert" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
           <span>{p.denial}</span>
-          {p.cta === 'request' && <Link to="/access?request=1">Request access</Link>}
+          {p.cta === 'request' && <Link to={requestUrl({ cluster: p.wl.cluster, namespace: p.wl.namespace, action: 'exec', workload: { kind: p.wl.kind, name: p.wl.name } })}>Request access</Link>}
           {p.cta === 'breakglass' && <button type="button" className="linklike blue" onClick={p.onBreakGlass}>{p.breakGlassLabel}</button>}
         </div>
       )}

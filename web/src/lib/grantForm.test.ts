@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GrantView } from '../api/types';
-import { actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, validateGrantForm } from './grantForm';
+import { APP_SCOPE_HINT, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, validateGrantForm } from './grantForm';
 
 const NOW = Date.parse('2026-10-20T10:00:00Z');
 
@@ -35,6 +35,8 @@ describe('grant form', () => {
     expect(validateGrantForm({ ...base, scopeKind: 'cluster', cluster: '' }, NOW)).toEqual({ cluster: 'Choose a cluster.' });
     expect(validateGrantForm({ ...base, scopeKind: 'environment', environment: '' }, NOW)).toEqual({ environment: 'Choose an environment.' });
     expect(validateGrantForm({ ...base, scopeKind: 'cluster', actions: ['sync'] }, NOW)).toEqual({});
+    expect(validateGrantForm({ ...base, scopeKind: 'cluster', actions: ['rollback'] }, NOW)).toEqual({});
+    expect(validateGrantForm({ ...base, scopeKind: 'workloads', actions: ['logs', 'rollback'] }, NOW)).toEqual({ actions: APP_SCOPE_HINT });
     // Fields left over from another kind are not sent.
     expect(grantInputFromForm({ ...base, scopeKind: 'cluster' }).scope).toEqual({ kind: 'cluster', cluster: 'prod-1' });
     expect(grantInputFromForm({ ...base, scopeKind: 'environment' }).scope).toEqual({ kind: 'environment', environment: 'prod' });

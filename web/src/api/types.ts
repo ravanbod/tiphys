@@ -1,8 +1,9 @@
 // Mirrors docs/api.md. Keep in sync with the backend contract.
 
-/** `sync` acts on a whole Argo CD application; the others on a workload. */
-export type Action = 'logs' | 'exec' | 'restart' | 'run-job' | 'sync';
-export type WorkloadAction = Exclude<Action, 'sync'>;
+/** `sync` and `rollback` act on a whole Argo CD application; the others on a workload. */
+export type Action = 'logs' | 'exec' | 'restart' | 'run-job' | 'sync' | 'rollback';
+export type AppAction = Extract<Action, 'sync' | 'rollback'>;
+export type WorkloadAction = Exclude<Action, AppAction>;
 export type Role = 'user' | 'auditor' | 'admin';
 export type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet' | 'Rollout' | 'CronJob';
 export type DenyReason =
@@ -118,10 +119,20 @@ export interface NamespaceApp {
   /** End of the last sync operation; null if none finished (never synced, or running). */
   lastSyncAt: string | null;
   lastSyncPhase: 'Running' | 'Succeeded' | 'Failed' | 'Error' | 'Terminating' | null;
-  /** Whether the viewer may sync the whole app (every namespace it deploys to). */
-  access: { sync: DecisionInfo };
-  /** The namespace that decision is about: the one that denied, or the destination. */
+  /**
+   * Whether the viewer may sync / roll back the whole app (every namespace it
+   * deploys to). A rollback to a deploy is decided again with that deploy's
+   * resources (`ArgoRollbackPlan`).
+   */
+  access: { sync: DecisionInfo; rollback: DecisionInfo };
+  /** The namespace the sync decision is about: the one that denied, or the destination. */
   syncNamespace: string;
+  /** Cluster-scoped resources ("Kind/name") that leave the sync to admins; empty unless the reason is app_scope. */
+  adminOnlyResources: string[];
+  /** Argo CD refuses to roll back apps that sync automatically. */
+  autoSync: boolean;
+  /** Multi-source apps are rolled back in Argo CD only. */
+  multiSource: boolean;
 }
 
 /** An Argo CD application's conditions and last operation (GET .../apps/{appNs}/{name}/status). */
@@ -158,6 +169,30 @@ export interface ArgoDeploy {
   source: string;
   current: boolean;
   commit: { author: string; date: string | null; message: string; tags: string[] } | null;
+  /** Who started it through the portal (Argo CD's `initiatedBy` is then the token's account); null otherwise. */
+  portalUser: string | null;
+  portalAction: 'argo.sync' | 'argo.rollback' | null;
+  /** Why the app cannot be rolled back to it here; null when it can (subject to the plan's decision). */
+  rollbackBlocked: 'current' | 'auto_sync' | 'multi_source' | 'source_changed' | null;
+}
+
+export interface ArgoResourceRef { group: string; kind: string; namespace: string; name: string }
+
+/** What a rollback to a deploy would do (GET .../history/{id}/rollback, needs rollback on the app). */
+export interface ArgoRollbackPlan {
+  id: number;
+  revision: string;
+  /** Covers what the app manages now and what the revision deploys (a rollback never prunes). */
+  decision: DecisionInfo;
+  /** The namespace the decision is about (the one that denied, else the destination). */
+  decisionNamespace: string;
+  /** Cluster-scoped resources that leave the rollback to admins; empty unless the reason is app_scope. */
+  adminOnlyResources: string[];
+  /** In the revision, not managed now. */
+  added: ArgoResourceRef[];
+  /** Managed now, not in the revision: they stay, since a rollback never prunes. */
+  kept: ArgoResourceRef[];
+  truncated: boolean;
 }
 
 /** What a sync would change (GET .../diff, needs sync on the app). */
@@ -630,6 +665,8 @@ export interface SettingsView {
   retentionRecordingsDays: number;
   rocket: { webhookUrl: string; channel: string; events: Record<RocketEvent, boolean> };
   lokiRetentionInfo: string | null;
+  /** Cluster-scoped kinds ("Kind.group") whose resources do not leave syncing an Argo CD app to admins. */
+  argoSyncClusterKinds: string[];
 }
 export interface DecisionExplain extends DecisionInfo {
   cluster: string;

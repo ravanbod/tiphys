@@ -211,14 +211,37 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   `domain.DecideApp` allows it only when `Decide` allows `sync` on **every**
   namespace the app deploys to (destination and status.resources), with a
   fresh Argo cache; apps with cluster-scoped resources other than their own
-  Namespace objects are admins only (`app_scope`). Always the target
+  Namespace objects are admins only (`app_scope`), except for kinds listed in
+  `Settings.ArgoSyncClusterKinds` (Settings page, `Kind.group` like kubectl,
+  key `argo.sync_cluster_kinds`; `domain.CheckSyncClusterKind` refuses core
+  kinds, RBAC, admission, CRDs, API services, StorageClass and PriorityClass,
+  also in `Policy.AdminOnlyResources`). Always the target
   revision, never prune/dry run/revision; the username goes into the
-  operation's `infos`. Audited as `argo.sync`, followed by polling
+  operation's `infos`. Audited as `argo.sync` (details name the cluster-scoped
+  resources it applies, `clusterResources`), followed by polling
   `operationState` (10 min), then the Argo cache is refreshed.
   Clicking an app opens its details, read live from Argo CD (`applications,
   get`): status/conditions/last operation and history (anyone who sees the
   namespace's apps), and the diff a sync would apply (`.../diff`, same right
   as the sync, audited as `argo.diff`; Secret contents are never shown).
+- **Argo CD rollback**: a separate `rollback` action (same places and scope
+  rule as `sync`; sync does not imply it, since it deploys what is no longer
+  in Git) offers Roll back on earlier deploys of the History tab
+  (`GET`/`POST .../apps/{appNs}/{name}/history/{id}/rollback`, plan and run,
+  `argorollback.go`). Argo CD authorizes it as `applications, sync` and
+  refuses apps with auto-sync (409 `auto_sync_enabled`; the portal never turns
+  it off); multi-source apps, the current deploy and deploys whose source
+  differs from the current one but for `targetRevision` (`ArgoDeploy.SameSource`)
+  are refused with 422. `rollbackPlan` reads the revision's manifests
+  (`ArgoClient.Manifests`, current source at that revision) and places them
+  with `ClusterAccess.ResourceScopes` (discovery as `tiphys:user`; no
+  namespace → destination; unserved kinds count as cluster-scoped), then
+  `DecideApp` runs on `ArgoApp.Including(...)`: the app now **plus** the
+  revision, since a rollback never prunes. Never prune/dry run. Rollback
+  requests carry no `infos`, so only the audit (`argo.rollback`, started then
+  outcome) names the user; outcomes of sync and rollback record
+  `operationStartedAt`, which `AppHistory` matches to the deploy's
+  `deployStartedAt` to show the portal user (`portalUser`).
 - **Live changes**: `GET /api/v1/live?ns=<cluster>/<ns>` (SSE, ≤10 namespaces,
   ≤8 streams per user and pod) is one stream per browser tab
   (`web/src/context/live.tsx`) for the namespaces the open page shows.

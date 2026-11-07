@@ -1,6 +1,6 @@
 // Package argocd implements application.ArgoClient over the Argo CD REST API
 // with a bearer token: it reads Applications, AppProjects and Clusters, and
-// syncs single applications.
+// syncs and rolls back single applications.
 package argocd
 
 import (
@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -66,9 +67,12 @@ type applicationList struct {
 				Name      string `json:"name"`
 				Namespace string `json:"namespace"`
 			} `json:"destination"`
+			SyncPolicy *syncPolicy       `json:"syncPolicy"`
+			Sources    []json.RawMessage `json:"sources"`
 		} `json:"spec"`
 		Status struct {
 			Resources []struct {
+				Group     string `json:"group"`
 				Kind      string `json:"kind"`
 				Name      string `json:"name"`
 				Namespace string `json:"namespace"`
@@ -85,6 +89,18 @@ type applicationList struct {
 			} `json:"operationState"`
 		} `json:"status"`
 	} `json:"items"`
+}
+
+// syncPolicy is the part of spec.syncPolicy that decides whether the app
+// syncs automatically. Argo CD 3 can turn automated off with enabled: false.
+type syncPolicy struct {
+	Automated *struct {
+		Enabled *bool `json:"enabled"`
+	} `json:"automated"`
+}
+
+func (p *syncPolicy) automated() bool {
+	return p != nil && p.Automated != nil && (p.Automated.Enabled == nil || *p.Automated.Enabled)
 }
 
 type projectList struct {
@@ -140,6 +156,8 @@ func (c *HTTPClient) ListApplications(ctx context.Context) ([]domain.ArgoApp, er
 			Health:       it.Status.Health.Status,
 			Sync:         it.Status.Sync.Status,
 			AppNamespace: it.Metadata.Namespace,
+			AutoSync:     it.Spec.SyncPolicy.automated(),
+			MultiSource:  len(it.Spec.Sources) > 0,
 		}
 		// A running sync has no finishedAt yet; its phase still shows.
 		if op := it.Status.OperationState; op != nil {
@@ -171,7 +189,7 @@ func (c *HTTPClient) ListApplications(ctx context.Context) ([]domain.ArgoApp, er
 		seen := map[string]struct{}{}
 		for _, r := range it.Status.Resources {
 			if r.Namespace == "" { // cluster-scoped
-				app.ClusterResources = append(app.ClusterResources, r.Kind+"/"+r.Name)
+				app.ClusterResources = append(app.ClusterResources, domain.ClusterResource{Group: r.Group, Kind: r.Kind, Name: r.Name})
 				continue
 			}
 			if _, ok := seen[r.Namespace]; ok {
@@ -250,10 +268,17 @@ func (a appState) operation() application.ArgoOperation {
 // details is the part of an Application the details panel shows.
 type details struct {
 	Spec struct {
-		Source  *source  `json:"source"`
-		Sources []source `json:"sources"`
+		Source     *source     `json:"source"`
+		Sources    []source    `json:"sources"`
+		SyncPolicy *syncPolicy `json:"syncPolicy"`
 	} `json:"spec"`
 	Status struct {
+		Resources []struct {
+			Group     string `json:"group"`
+			Kind      string `json:"kind"`
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+		} `json:"resources"`
 		Health struct {
 			Status  string `json:"status"`
 			Message string `json:"message"`
@@ -291,15 +316,42 @@ type details struct {
 			} `json:"syncResult"`
 		} `json:"operationState"`
 		History []struct {
-			ID          int64       `json:"id"`
-			Revision    string      `json:"revision"`
-			Revisions   []string    `json:"revisions"`
-			DeployedAt  time.Time   `json:"deployedAt"`
-			InitiatedBy initiatedBy `json:"initiatedBy"`
-			Source      *source     `json:"source"`
-			Sources     []source    `json:"sources"`
+			ID              int64       `json:"id"`
+			Revision        string      `json:"revision"`
+			Revisions       []string    `json:"revisions"`
+			DeployedAt      time.Time   `json:"deployedAt"`
+			DeployStartedAt *time.Time  `json:"deployStartedAt"`
+			InitiatedBy     initiatedBy `json:"initiatedBy"`
+			Source          *source     `json:"source"`
+			Sources         []source    `json:"sources"`
 		} `json:"history"`
 	} `json:"status"`
+}
+
+// rawSources are the app's and its deploys' sources as sent, to compare them
+// whole (sameSource).
+type rawSources struct {
+	Spec struct {
+		Source json.RawMessage `json:"source"`
+	} `json:"spec"`
+	Status struct {
+		History []struct {
+			Source json.RawMessage `json:"source"`
+		} `json:"history"`
+	} `json:"status"`
+}
+
+// sameSource reports whether two single sources are equal but for
+// targetRevision (the deploy's is the revision it resolved to). Anything
+// that cannot be compared is not the same.
+func sameSource(current, deployed json.RawMessage) bool {
+	var a, b map[string]any
+	if json.Unmarshal(current, &a) != nil || json.Unmarshal(deployed, &b) != nil || a == nil || b == nil {
+		return false
+	}
+	delete(a, "targetRevision")
+	delete(b, "targetRevision")
+	return reflect.DeepEqual(a, b)
 }
 
 type initiatedBy struct {
@@ -332,14 +384,26 @@ func sourcesString(one *source, many []source) string {
 
 // GetAppDetails reads the application's conditions, last operation and history.
 func (c *HTTPClient) GetAppDetails(ctx context.Context, appNamespace, name string) (application.ArgoAppDetails, error) {
-	var d details
+	var body json.RawMessage
 	q := url.Values{"appNamespace": {appNamespace}}
-	if err := c.do(ctx, http.MethodGet, "/api/v1/applications/"+url.PathEscape(name), q, nil, &d); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/applications/"+url.PathEscape(name), q, nil, &body); err != nil {
 		return application.ArgoAppDetails{}, err
+	}
+	var d details
+	var raw rawSources
+	if err := json.Unmarshal(body, &d); err != nil {
+		return application.ArgoAppDetails{}, fmt.Errorf("failed to decode argo application %s: %w", name, err)
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return application.ArgoAppDetails{}, fmt.Errorf("failed to decode argo application %s: %w", name, err)
 	}
 	st := d.Status
 	out := application.ArgoAppDetails{Health: st.Health.Status, HealthMessage: st.Health.Message,
-		SyncStatus: st.Sync.Status, SyncRevision: st.Sync.Revision}
+		SyncStatus: st.Sync.Status, SyncRevision: st.Sync.Revision,
+		AutoSync: d.Spec.SyncPolicy.automated(), MultiSource: len(d.Spec.Sources) > 0}
+	for _, r := range st.Resources {
+		out.Resources = append(out.Resources, application.ArgoResourceRef{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name})
+	}
 	for _, cnd := range st.Conditions {
 		out.Conditions = append(out.Conditions, application.ArgoCondition{Type: cnd.Type, Message: cnd.Message, At: cnd.LastTransitionTime})
 	}
@@ -355,9 +419,17 @@ func (c *HTTPClient) GetAppDetails(ctx context.Context, appNamespace, name strin
 		}
 		out.LastOperation = r
 	}
-	for _, h := range st.History {
-		out.History = append(out.History, application.ArgoDeploy{ID: h.ID, Revision: h.Revision, Revisions: h.Revisions, DeployedAt: h.DeployedAt.UTC(),
-			InitiatedBy: h.InitiatedBy.Username, Automated: h.InitiatedBy.Automated, Source: sourcesString(h.Source, h.Sources)})
+	for i, h := range st.History {
+		dep := application.ArgoDeploy{ID: h.ID, Revision: h.Revision, Revisions: h.Revisions, DeployedAt: h.DeployedAt.UTC(),
+			InitiatedBy: h.InitiatedBy.Username, Automated: h.InitiatedBy.Automated, Source: sourcesString(h.Source, h.Sources)}
+		if h.DeployStartedAt != nil {
+			t := h.DeployStartedAt.UTC()
+			dep.StartedAt = &t
+		}
+		if !out.MultiSource && i < len(raw.Status.History) {
+			dep.SameSource = sameSource(raw.Spec.Source, raw.Status.History[i].Source)
+		}
+		out.History = append(out.History, dep)
 	}
 	return out, nil
 }
@@ -444,6 +516,60 @@ func (c *HTTPClient) SyncApplication(ctx context.Context, appNamespace, name, tr
 	return app.operation(), nil
 }
 
+// errAutoSync is Argo's FailedPrecondition message for a rollback of an app
+// that syncs automatically.
+const errAutoSync = "auto-sync is enabled"
+
+// RollbackApplication rolls the application back to a deploy of its history:
+// never prune or dry run. Argo CD's rollback request has no infos, so unlike
+// a sync the user is not named in Argo CD (the audit names them).
+func (c *HTTPClient) RollbackApplication(ctx context.Context, appNamespace, name string, id int64) (application.ArgoOperation, error) {
+	body := map[string]any{
+		"name":         name,
+		"appNamespace": appNamespace,
+		"id":           id,
+		"prune":        false,
+		"dryRun":       false,
+	}
+	var app appState
+	err := c.do(ctx, http.MethodPost, "/api/v1/applications/"+url.PathEscape(name)+"/rollback", nil, body, &app)
+	if err != nil {
+		return application.ArgoOperation{}, err
+	}
+	return app.operation(), nil
+}
+
+// Manifests reads the objects the app's source generates at a revision.
+func (c *HTTPClient) Manifests(ctx context.Context, appNamespace, name, revision string) ([]application.ArgoResourceRef, error) {
+	var m struct {
+		Manifests []string `json:"manifests"`
+	}
+	q := url.Values{"appNamespace": {appNamespace}, "revision": {revision}}
+	if err := c.do(ctx, http.MethodGet, "/api/v1/applications/"+url.PathEscape(name)+"/manifests", q, nil, &m); err != nil {
+		return nil, err
+	}
+	out := make([]application.ArgoResourceRef, 0, len(m.Manifests))
+	for _, raw := range m.Manifests {
+		var obj struct {
+			APIVersion string     `json:"apiVersion"`
+			Kind       string     `json:"kind"`
+			Metadata   objectMeta `json:"metadata"`
+		}
+		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
+			return nil, fmt.Errorf("failed to decode a manifest of argo application %s: %w", name, err)
+		}
+		if obj.Kind == "" {
+			return nil, fmt.Errorf("a manifest of argo application %s has no kind", name)
+		}
+		group, _, ok := strings.Cut(obj.APIVersion, "/")
+		if !ok {
+			group = "" // core: apiVersion is just "v1"
+		}
+		out = append(out, application.ArgoResourceRef{Group: group, Kind: obj.Kind, Namespace: obj.Metadata.Namespace, Name: obj.Metadata.Name})
+	}
+	return out, nil
+}
+
 // GetOperation reads the application's operation state.
 func (c *HTTPClient) GetOperation(ctx context.Context, appNamespace, name string) (application.ArgoOperation, error) {
 	var app appState
@@ -520,6 +646,9 @@ func (c *HTTPClient) request(ctx context.Context, method, path string, query url
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, logBodyLimit))
 		if method == http.MethodPost && strings.Contains(string(body), errInProgress) {
 			return application.ErrSyncInProgress
+		}
+		if method == http.MethodPost && strings.Contains(string(body), errAutoSync) {
+			return application.ErrAutoSyncEnabled
 		}
 		if logFailures {
 			c.logger.Error("argo upstream returned non-200", zap.String("method", method), zap.String("url", requestURL), zap.Int("status", resp.StatusCode), zap.String("body", string(body)))

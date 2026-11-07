@@ -23,6 +23,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 
 	"tiphys/internal/application"
 	"tiphys/internal/domain"
@@ -68,14 +69,57 @@ func (s *memSink) count(eventType string) int {
 	return n
 }
 
-// fakeArgo serves fixed apps; a sync finishes at once unless busy is set.
+// fakeArgo serves fixed apps; a sync or rollback finishes at once unless
+// busy is set.
 type fakeArgo struct {
 	apps []domain.ArgoApp
 
-	mu    sync.Mutex
-	busy  bool
-	syncs []string // "appNamespace/name by user"
-	runs  int
+	mu        sync.Mutex
+	busy      bool
+	syncs     []string // "appNamespace/name by user"
+	rollbacks []string // "appNamespace/name to id"
+	runs      int
+	autoSync  bool
+	// manifests are the objects of each revision (old111 by default: the
+	// Deployment and a ConfigMap).
+	manifests map[string][]application.ArgoResourceRef
+}
+
+// firstRunStartedAt is when the first sync or rollback of fakeArgo starts;
+// the current deploy (ID 2) records it.
+var firstRunStartedAt = time.Date(2026, 10, 30, 9, 0, 1, 0, time.UTC)
+
+func (f *fakeArgo) RollbackApplication(_ context.Context, appNamespace, name string, id int64) (application.ArgoOperation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case f.busy:
+		return application.ArgoOperation{}, application.ErrSyncInProgress
+	case f.autoSync:
+		return application.ArgoOperation{}, application.ErrAutoSyncEnabled
+	}
+	f.rollbacks = append(f.rollbacks, fmt.Sprintf("%s/%s to %d", appNamespace, name, id))
+	prev := f.operation()
+	f.runs++
+	return prev, nil
+}
+
+func (f *fakeArgo) Manifests(_ context.Context, _, _, revision string) ([]application.ArgoResourceRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if m, ok := f.manifests[revision]; ok {
+		return m, nil
+	}
+	return []application.ArgoResourceRef{
+		{Group: "apps", Kind: "Deployment", Name: "payments-api"},
+		{Kind: "ConfigMap", Namespace: "payments-api", Name: "old-config"},
+	}, nil
+}
+
+func (f *fakeArgo) rollbackCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.rollbacks...)
 }
 
 func (f *fakeArgo) ListApplications(context.Context) ([]domain.ArgoApp, error) { return f.apps, nil }
@@ -111,11 +155,18 @@ func (f *fakeArgo) operation() application.ArgoOperation {
 }
 
 func (f *fakeArgo) GetAppDetails(context.Context, string, string) (application.ArgoAppDetails, error) {
-	return application.ArgoAppDetails{Health: "Healthy", SyncStatus: "OutOfSync", SyncRevision: "abc123",
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	started := firstRunStartedAt
+	return application.ArgoAppDetails{Health: "Healthy", SyncStatus: "OutOfSync", SyncRevision: "abc123", AutoSync: f.autoSync,
+		Resources: []application.ArgoResourceRef{{Group: "apps", Kind: "Deployment", Namespace: "payments-api", Name: "payments-api"},
+			{Kind: "Service", Namespace: "payments-api", Name: "payments-api"}},
 		Conditions: []application.ArgoCondition{{Type: "SyncError", Message: "one or more objects failed to apply"}},
 		LastOperation: &application.ArgoOperationResult{Phase: "Failed", Revision: "abc123", Resources: []application.ArgoResourceResult{
 			{Group: "apps", Kind: "Deployment", Namespace: "payments-api", Name: "payments-api", Status: "SyncFailed", Message: "field is immutable"}}},
-		History: []application.ArgoDeploy{{ID: 1, Revision: "old111", Automated: true}, {ID: 2, Revision: "abc123", InitiatedBy: "sara"}}}, nil
+		History: []application.ArgoDeploy{{ID: 0, Revision: "older0", Automated: true},
+			{ID: 1, Revision: "old111", Automated: true, SameSource: true},
+			{ID: 2, Revision: "abc123", InitiatedBy: "argocd-token", StartedAt: &started, SameSource: true}}}, nil
 }
 
 func (f *fakeArgo) ManagedResources(context.Context, string, string) ([]application.ArgoManagedResource, error) {
@@ -297,10 +348,13 @@ func newEnvAuth(t *testing.T, tune func(*serverhttp.Options), tuneAuth func(*app
 		t.Fatal(err)
 	}
 	policy.SetBreakGlassEnabled(func() bool { return settings.Get().BreakGlassMode.Enabled() })
+	policy.SetSyncClusterKinds(func() []string { return settings.Get().ArgoSyncClusterKinds })
 	access := application.NewAccessService(policy, audit, clock)
 	notify := application.NewNotificationService(nopNotifier{}, settings, audit, publicURL, logger)
 	oidcStub := &stubOIDC{}
-	authCfg := application.AuthConfig{AdminGroups: []string{"tiphys-admins", "/platform/sre"}, BootstrapAdmins: []string{"Boot.Admin", " mina "}}
+	// The lowest bcrypt cost: cost 12 takes seconds per hash under -race.
+	authCfg := application.AuthConfig{AdminGroups: []string{"tiphys-admins", "/platform/sre"}, BootstrapAdmins: []string{"Boot.Admin", " mina "},
+		PasswordCost: bcrypt.MinCost}
 	if tuneAuth != nil {
 		tuneAuth(&authCfg)
 	}

@@ -4,7 +4,7 @@ This document defines how Tiphys behaves; it describes the current code. The scr
 
 ## Scope
 
-Tiphys is a brokered access portal: developers log in with Keycloak and read logs, exec, restart workloads, trigger CronJobs and sync Argo CD applications in Kubernetes **without ever holding cluster credentials**. Authorization lives in the portal's own database; every action is audited and every exec session is recorded.
+Tiphys is a brokered access portal: developers log in with Keycloak and read logs, exec, restart workloads, trigger CronJobs and sync or roll back Argo CD applications in Kubernetes **without ever holding cluster credentials**. Authorization lives in the portal's own database; every action is audited and every exec session is recorded.
 
 **Goals**
 
@@ -20,7 +20,7 @@ Tiphys is a brokered access portal: developers log in with Keycloak and read log
 - Reading Secrets or ConfigMaps. (One exception: the Argo CD diff shows an application's manifests, ConfigMaps included, to users who may sync that application. Secret contents are never shown.)
 - Storing application logs. Logs are streamed live from Kubernetes and never persisted (only the fact that someone viewed them is audited).
 - Jira integration.
-- Replacing Argo CD for deployment; Argo CD stays the source of truth for apps and ownership. The portal can ask Argo CD to sync an application to its target revision, nothing more.
+- Replacing Argo CD for deployment; Argo CD stays the source of truth for apps and ownership. The portal can ask Argo CD to sync an application to its target revision or roll it back to a deploy of its history, nothing more.
 
 **Stack**: Go for the portal backend (gin, client-go, pgx), React + TypeScript (Vite) for the frontend, xterm.js for the terminal, asciinema-player for replay, PostgreSQL, MinIO (S3 API), Loki.
 
@@ -73,7 +73,7 @@ All decisions are made by one pure function in the portal, `Decide(user, target,
 
 ### Concepts
 
-- **Action**: `logs` (includes events and pod status), `exec`, `restart`, `run-job` on workloads; `sync` on a whole Argo CD application (see Whole-application decisions).
+- **Action**: `logs` (includes events and pod status), `exec`, `restart`, `run-job` on workloads; `sync` and `rollback` on a whole Argo CD application (see Whole-application decisions).
 - **Target**: cluster + namespace + optional workload (kind, name) + optional pod/container.
 - **Grant**: holder (team or user) + scope + actions + optional `expires_at`.
 - **Scope kinds**:
@@ -81,11 +81,11 @@ All decisions are made by one pure function in the portal, `Decide(user, target,
   - `namespace`: one namespace on one cluster.
   - `cluster` (admin grants only, not requestable): every non-protected namespace of one cluster, including namespaces created later.
   - `environment` (admin grants only, not requestable): every non-protected namespace whose environment (namespace override → Argo project override → cluster label) is the scope's. It follows label and override changes and does not depend on the Argo cache's age. `unlabeled` cannot be granted.
-  - `workloads`: listed workloads (Deployment, StatefulSet, DaemonSet, Argo Rollout, CronJob) in one namespace on one cluster. Pods match when their owner chain resolves to a listed workload (Pod → ReplicaSet → Deployment/Rollout; Pod → StatefulSet; Pod → DaemonSet; Pod → Job → CronJob). A `workloads` scope cannot hold `sync`, since it cannot cover a whole application.
+  - `workloads`: listed workloads (Deployment, StatefulSet, DaemonSet, Argo Rollout, CronJob) in one namespace on one cluster. Pods match when their owner chain resolves to a listed workload (Pod → ReplicaSet → Deployment/Rollout; Pod → StatefulSet; Pod → DaemonSet; Pod → Job → CronJob). A `workloads` scope cannot hold `sync` or `rollback`, since it cannot cover a whole application.
 
 ### Resolving Argo projects
 
-- The portal reads Applications, AppProjects and Clusters through the Argo CD API, and refreshes its cache every 60 seconds and on demand from the admin UI. Its token's account needs `get` on applications, projects and clusters, and `sync` on applications.
+- The portal reads Applications, AppProjects and Clusters through the Argo CD API, and refreshes its cache every 60 seconds and on demand from the admin UI. Its token's account needs `get` on applications, projects and clusters, and `sync` on applications (Argo CD authorizes a rollback as sync).
 - For each application it records project, destination cluster, destination namespace, the namespaces of all resources in `status.resources`, and its cluster-scoped resources.
 - A project scope covers the union of those (cluster, namespace) pairs. A namespace is never covered just because its name matches.
 - If Argo is unreachable, the last good cache is used and the admin UI shows its age. If the cache is older than 15 minutes, project-scoped grants are treated as not matching (fail closed) and the UI says why.
@@ -129,7 +129,7 @@ Effective environment of a target, first match wins: namespace override → Argo
 
 ### Whole-application decisions
 
-`sync` and the Argo CD diff act on a whole Argo CD application, which may deploy to several namespaces. `DecideApp(user, app, action, now)` allows it only when `Decide` allows the action on **every** (cluster, namespace) the application deploys to: its destination and the namespaces of its resources. The first denial is returned with the namespace it is about. It also denies when the Argo cache is older than 15 minutes (the application's namespaces may have changed), and leaves to admins (`app_scope`) an application that has cluster-scoped resources other than the Namespace objects of its own namespaces, or that deploys nowhere the portal knows. An allowed decision carries the earliest `closes_at` and any break-glass one of the namespaces needed.
+`sync`, `rollback` and the Argo CD diff act on a whole Argo CD application, which may deploy to several namespaces. `DecideApp(user, app, action, now)` allows it only when `Decide` allows the action on **every** (cluster, namespace) the application deploys to: its destination and the namespaces of its resources. The first denial is returned with the namespace it is about. It also denies when the Argo cache is older than 15 minutes (the application's namespaces may have changed), and leaves to admins (`app_scope`) an application that has cluster-scoped resources other than the Namespace objects of its own namespaces and the kinds an admin allows in the settings (`argoSyncClusterKinds`, `Kind.group`; core kinds, RBAC, admission, CRDs, API services, StorageClass and PriorityClass can never be allowed), or that deploys nowhere the portal knows. An allowed decision carries the earliest `closes_at` and any break-glass one of the namespaces needed.
 
 ### Long-lived streams
 
@@ -153,7 +153,7 @@ All cluster access goes through the internal `kubeaccess` module (see Cluster co
 | `Restart(workload)` | `restart` | PATCH the workload (see below) |
 | `RunCronJob(cronjob)` | `run-job` | GET CronJob, list Jobs, CREATE Job |
 
-"On the whole namespace" means a grant on single workloads is not enough, since the result shows the other workloads of the namespace too. Argo CD actions (sync, status, history, diff) do not go through `kubeaccess`; see Argo CD applications.
+"On the whole namespace" means a grant on single workloads is not enough, since the result shows the other workloads of the namespace too. Argo CD actions (sync, rollback, status, history, diff) do not go through `kubeaccess`, except the discovery a rollback plan reads; see Argo CD applications.
 
 Before every verb that names a pod, kubeaccess re-reads the pod and verifies its owner chain matches the workload in the request. A mismatch is refused and audited.
 
@@ -202,7 +202,8 @@ Before every verb that names a pod, kubeaccess re-reads the pod and verifies its
 ### Argo CD applications
 
 - **Sync** (`sync` via `DecideApp`): asks Argo CD to sync the application to its target revision, always without prune, dry run, a chosen revision or a subset of resources. The username goes into the operation's info, since every call is made as the token's account. The "started" audit event (`argo.sync`) is written before the request; the operation is then followed until it finishes or for 10 minutes, and the outcome is audited. Another running operation is refused with `already_running`.
-- **Status and history** (anyone who sees the namespace's applications): health and sync with their messages, the application's conditions, the last operation with each resource's result, and the last 10 deploys with the commit behind each Git revision. Read from Argo CD on every request.
+- **Rollback** (`rollback` via `DecideApp`, a separate action because it deploys what is no longer in Git): asks Argo CD to roll the application back to a deploy of its history, like Rollback in Argo CD, always without prune or dry run. Argo CD refuses it for applications that sync automatically (`auto_sync_enabled`); the portal never turns auto-sync off. Multi-source applications, the current deploy and deploys whose source differs from the application's current one (but for the revision) are refused, since the portal cannot check what they would deploy. Before deciding, the portal reads the manifests of the current source at the deploy's revision from Argo CD and places them with the cluster's discovery (a namespaced object without a namespace goes to the destination; a kind the cluster does not serve counts as cluster-scoped), and decides on the application as it is now **plus** those namespaces and cluster-scoped resources, since a rollback never prunes. The plan (what the revision adds, what stays) is shown before confirming. Argo CD's rollback request carries no info, so only the audit names the user: `argo.rollback` is written before the request and the outcome after it, like a sync. The application stays OutOfSync with Git until the next sync.
+- **Status and history** (anyone who sees the namespace's applications): health and sync with their messages, the application's conditions, the last operation with each resource's result, and the last 10 deploys with the commit behind each Git revision and the portal user who started it, when the audit shows one (the outcome of `argo.sync`/`argo.rollback` names the operation's start time, which Argo CD records on the deploy). Read from Argo CD on every request.
 - **Diff** (same right as sync, audited as `argo.diff`): what a sync would change, from Argo CD's managed resources (normalized live state against predicted state): resources that differ, are missing from the cluster, or exist only in the cluster (never pruned). Hooks are left out, and Secrets are listed without content.
 
 ## Cluster connection
@@ -360,7 +361,7 @@ grants           (id, holder_kind CHECK (holder_kind IN ('team','user')),
                   team_id NULL, user_id NULL,
                   scope_kind CHECK (scope_kind IN ('argo_project','namespace','workloads','cluster','environment')),
                   argo_project NULL, cluster_id NULL, namespace NULL, environment NULL,
-                  actions TEXT[] CHECK (actions <@ ARRAY['logs','exec','restart','run-job','sync']),
+                  actions TEXT[] CHECK (actions <@ ARRAY['logs','exec','restart','run-job','sync','rollback']),
                   expires_at NULL, note, created_by)
 grant_workloads  (grant_id, kind CHECK (kind IN ('Deployment','StatefulSet','DaemonSet','Rollout','CronJob')),
                   name, PRIMARY KEY (grant_id, kind, name))
@@ -402,7 +403,7 @@ settings         (key PRIMARY KEY, value JSONB)
 
 ### Audit events
 
-- Written for: login and logout; every `Decide` that ends in deny; every action started and its outcome (including Argo CD syncs); log views and downloads; Argo CD diff views; exec start and end; break-glass requests, their decisions and cancellations, start and end (a start after approval is recorded with the approving admin as actor and the owner in `details`); access requests and decisions; every admin change, with before and after values in `details`.
+- Written for: login and logout; every `Decide` that ends in deny; every action started and its outcome (including Argo CD syncs and rollbacks); log views and downloads; Argo CD diff views; exec start and end; break-glass requests, their decisions and cancellations, start and end (a start after approval is recorded with the approving admin as actor and the owner in `details`); access requests and decisions; every admin change, with before and after values in `details`.
 - Each event is written to PostgreSQL (for the UI) **and** pushed to Loki as one JSON line with label `app=tiphys`. The portal's Loki credentials can push but not delete. Loki is the copy that the portal cannot alter.
 - An action must not run if its "started" audit event cannot be written to PostgreSQL. A Loki push failure is retried in the background and does not block.
 - Kubernetes' own audit log (if enabled on the clusters) independently shows `tiphys:user` with the real username as an extra.
@@ -434,7 +435,7 @@ settings         (key PRIMARY KEY, value JSONB)
 1. **Single decision point**: all authorization goes through `Decide`. HTTP handlers, WebSocket handlers and background re-evaluation call it; none re-implement checks.
 2. **No pass-through**: The portal API and the kubeaccess module accept only typed verbs with validated names (DNS-1123 for namespaces and object names, allow-listed shells and kinds). No raw paths, bodies, label selectors or field selectors from clients.
 3. **kubeaccess verifies** that the pod belongs to the requested workload, that the namespace is not protected, and that the verb is allowed, before every call. Admission policies back this up for writes.
-4. **Least privilege**: connector RBAC and admission policies exactly as in Cluster connection. The Argo CD token can read applications, projects and clusters and sync applications, nothing else. MinIO and Loki credentials cannot delete.
+4. **Least privilege**: connector RBAC and admission policies exactly as in Cluster connection. The Argo CD token can read applications, projects and clusters and sync applications (which also covers rollback), nothing else. MinIO and Loki credentials cannot delete.
 5. **Web**: CSRF protection on state-changing requests, strict Content-Security-Policy, `Origin` check on WebSockets, rate limit of 30 actions per user per minute (excluding streams).
 6. **Secrets** (Keycloak client secret, DB, MinIO, Loki, Argo token, CA key) come from Kubernetes Secrets mounted as files; never logged.
 7. **Reviews**: `Decide`, the kubeaccess module, the impersonation setup and the admission policies require human review before merge, plus tests listed in Acceptance criteria.
@@ -474,7 +475,7 @@ settings         (key PRIMARY KEY, value JSONB)
 - [ ] Namespace environment override beats project override, which beats the cluster label.
 - [ ] With the Argo cache older than 15 minutes, project-scoped grants do not match.
 - [ ] `logs` stays open outside every time window and on holidays.
-- [ ] Syncing an application is allowed only with `sync` on every namespace it deploys to; a missing namespace denies with that namespace, and an application with other cluster-scoped resources needs an admin.
+- [ ] Syncing an application is allowed only with `sync` on every namespace it deploys to; a missing namespace denies with that namespace, and an application with other cluster-scoped resources needs an admin unless their kinds are allowed in the settings.
 
 **End to end (against a test cluster)**
 
@@ -486,6 +487,7 @@ settings         (key PRIMARY KEY, value JSONB)
 - [ ] Restart of a Deployment, StatefulSet, DaemonSet and Rollout each completes and reports progress.
 - [ ] Run CronJob creates a Job owned by the CronJob; a second run with `concurrencyPolicy: Forbid` while the first is active is refused.
 - [ ] Sync of an Argo CD application runs without prune, records the username in the operation's info, and reports its outcome; a sync while another operation runs is refused.
+- [ ] Rolling back an application needs `rollback` (not `sync`) on every namespace it deploys to now and every namespace the deploy's revision deploys to; a revision with cluster-scoped resources needs an admin unless their kinds are allowed; applications with auto-sync, multi-source applications and deploys of another source are refused; it never prunes.
 - [ ] The Kubernetes audit log shows `tiphys:user` with the real username extra for each of the above.
 
 **Defense in depth (call the API server directly as `tiphys:user`)**

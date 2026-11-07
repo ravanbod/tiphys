@@ -17,11 +17,18 @@ const (
 
 // NamespaceAppView is an Argo CD application on the namespace page, with
 // whether the principal may sync it; SyncAt is the namespace that decision
-// is about (the one that denied, or the destination).
+// is about (the one that denied, or the destination). AdminOnlyResources
+// names the cluster-scoped resources that leave the sync to admins, set only
+// when that is why it was denied (domain.ReasonAppScope).
 type NamespaceAppView struct {
-	App    domain.ArgoApp
-	Sync   domain.Decision
-	SyncAt domain.ClusterNS
+	App                domain.ArgoApp
+	Sync               domain.Decision
+	SyncAt             domain.ClusterNS
+	AdminOnlyResources []domain.ClusterResource
+	// Rollback is the decision for rolling the app back as it is now; a
+	// rollback to a deploy is decided again with the deploy's resources
+	// (ArgoRollbackPlan).
+	Rollback domain.Decision
 }
 
 // ArgoSyncProgress is the payload of a sync's progress events.
@@ -46,7 +53,11 @@ func (s *WorkloadService) NamespaceApps(ctx context.Context, p Principal, cluste
 	out := make([]NamespaceAppView, len(apps))
 	for i, a := range apps {
 		d, at := s.access.DecideApp(p, a, domain.ActionSync)
-		out[i] = NamespaceAppView{App: a, Sync: d, SyncAt: at}
+		rb, _ := s.access.DecideApp(p, a, domain.ActionRollback)
+		out[i] = NamespaceAppView{App: a, Sync: d, SyncAt: at, Rollback: rb}
+		if d.Reason == domain.ReasonAppScope {
+			out[i].AdminOnlyResources = s.access.AdminOnlyResources(a)
+		}
 	}
 	return out, nil
 }
@@ -76,6 +87,15 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 	e.BreakGlassID = d.BreakGlassID
 	e.Result = domain.ResultAllowed
 	e.Details = map[string]any{"app": app.Name, "appNamespace": app.AppNamespace, "project": app.Project, "namespaces": namespaces}
+	// What the sync applies beyond namespaces: kinds the settings allow, or
+	// anything for an admin.
+	if rs := app.ForeignClusterResources(); len(rs) > 0 {
+		names := make([]string, len(rs))
+		for i, r := range rs {
+			names[i] = r.String()
+		}
+		e.Details["clusterResources"] = names
+	}
 	started, err := s.audit.Record(ctx, e)
 	if err != nil {
 		monitoring.ActionsTotal.WithLabelValues(string(domain.ActionSync), "failed").Inc()
@@ -92,7 +112,7 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 		return OperationStarted{}, &ArgoError{Err: err}
 	}
 	op := s.ops.Create(p.User.ID, s.clock.Now())
-	go s.followSync(op, app, prev, started)
+	go s.followArgoOperation(op, app, prev, started, "Sync")
 	return OperationStarted{OperationID: op.ID}, nil
 }
 
@@ -106,11 +126,12 @@ func (s *WorkloadService) namespaceApp(cluster, ns, appNamespace, name string) (
 	return domain.ArgoApp{}, false
 }
 
-// followSync polls the application until the sync it started finishes (an
-// operation that started after prev), then refreshes the Argo cache so the
-// namespace page shows the new state. Failed polls are retried until the
-// deadline.
-func (s *WorkloadService) followSync(op *Operation, app domain.ArgoApp, prev ArgoOperation, started domain.AuditEvent) {
+// followArgoOperation polls the application until the sync or rollback
+// (what) it started finishes (an operation that started after prev), then
+// refreshes the Argo cache so the namespace page shows the new state. Failed
+// polls are retried until the deadline. The outcome names the operation's
+// startedAt, which Argo CD records on the deploy (argoDeployers).
+func (s *WorkloadService) followArgoOperation(op *Operation, app domain.ArgoApp, prev ArgoOperation, started domain.AuditEvent, what string) {
 	ctx, cancel := context.WithTimeout(s.rootCtx, argoSyncDeadline)
 	defer cancel()
 	defer func() { _ = s.argo.Refresh(s.rootCtx) }()
@@ -129,14 +150,15 @@ func (s *WorkloadService) followSync(op *Operation, app domain.ArgoApp, prev Arg
 				op.Publish(OpEvent{Name: "progress", Data: p})
 			}
 			if ours {
+				details[detailOperationStartedAt] = operationStartedAt(cur.StartedAt)
 				switch cur.Phase {
 				case "Succeeded":
-					op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "succeeded", Message: orText(cur.Message, "Sync succeeded")}})
+					op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "succeeded", Message: orText(cur.Message, what+" succeeded")}})
 					details["outcome"] = "succeeded"
 					s.outcome(started, domain.ResultSucceeded, "", details)
 					return
 				case "Failed", "Error":
-					op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "failed", Message: orText(cur.Message, "Sync failed")}})
+					op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "failed", Message: orText(cur.Message, what+" failed")}})
 					details["outcome"] = "failed"
 					s.outcome(started, domain.ResultFailed, cur.Message, details)
 					return
@@ -145,7 +167,7 @@ func (s *WorkloadService) followSync(op *Operation, app domain.ArgoApp, prev Arg
 		}
 		select {
 		case <-ctx.Done():
-			msg := "Sync did not finish within " + argoSyncDeadline.String()
+			msg := what + " did not finish within " + argoSyncDeadline.String()
 			op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "timed_out", Message: msg}})
 			details["outcome"] = "timed_out"
 			s.outcome(started, domain.ResultFailed, "timed_out", details)

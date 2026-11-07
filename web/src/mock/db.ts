@@ -41,11 +41,15 @@ export interface AppDef {
   namespace: string;
   health: 'Healthy' | 'Progressing' | 'Degraded';
   sync: 'Synced' | 'OutOfSync';
+  /** Cluster-scoped resources other than its own Namespace ("Kind.group/name"): syncing it is for admins unless the settings allow the kind. */
+  clusterResources?: string[];
+  /** spec.syncPolicy.automated: Argo CD refuses to roll it back. */
+  autoSync?: boolean;
 }
 
 export interface Operation {
   id: string;
-  kind: 'restart' | 'run-job' | 'sync';
+  kind: 'restart' | 'run-job' | 'sync' | 'rollback';
   cluster: string;
   namespace: string;
   name: string;
@@ -145,9 +149,10 @@ function seed(): Db {
 
   const apps: AppDef[] = [
     { name: 'payments-api', project: 'payments', cluster: 'prod-1', namespace: 'payments-api', health: 'Healthy', sync: 'Synced' },
-    { name: 'payments-api-config', project: 'payments', cluster: 'prod-1', namespace: 'payments-api', health: 'Healthy', sync: 'OutOfSync' },
+    { name: 'payments-api-config', project: 'payments', cluster: 'prod-1', namespace: 'payments-api', health: 'Healthy', sync: 'OutOfSync',
+      clusterResources: ['ClusterInput.fluentbit.fluent.io/payments-config-tail', 'ClusterRole.rbac.authorization.k8s.io/payments-config-reader'] },
     { name: 'search-indexer', project: 'search', cluster: 'prod-2', namespace: 'search-indexer', health: 'Progressing', sync: 'OutOfSync' },
-    { name: 'payments-worker', project: 'payments', cluster: 'prod-1', namespace: 'payments-worker', health: 'Healthy', sync: 'Synced' },
+    { name: 'payments-worker', project: 'payments', cluster: 'prod-1', namespace: 'payments-worker', health: 'Healthy', sync: 'Synced', autoSync: true },
     { name: 'notifications-api', project: 'notifications', cluster: 'prod-1', namespace: 'notifications-api', health: 'Degraded', sync: 'Synced' },
     { name: 'search-api', project: 'search', cluster: 'prod-2', namespace: 'search-api', health: 'Healthy', sync: 'Synced' },
     { name: 'payments-api', project: 'payments', cluster: 'staging-1', namespace: 'payments-api', health: 'Healthy', sync: 'OutOfSync' },
@@ -187,7 +192,7 @@ function seed(): Db {
     createdBy, createdAt: iso(now - 20 * DAY), environment: null, ...extra,
   });
   const grants: GrantView[] = [
-    g(1, { kind: 'team', id: 1, name: 'Payments' }, { kind: 'argo_project', argoProject: 'payments' }, ['logs', 'exec', 'restart', 'run-job', 'sync'], null, 'Core team'),
+    g(1, { kind: 'team', id: 1, name: 'Payments' }, { kind: 'argo_project', argoProject: 'payments' }, ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'], null, 'Core team'),
     g(2, { kind: 'team', id: 1, name: 'Payments' }, { kind: 'namespace', cluster: 'prod-2', namespace: 'search-indexer' }, ['logs'], null, 'Cross-team debugging'),
     g(3, { kind: 'user', id: 1, name: 'Sara Moradi' }, { kind: 'workloads', cluster: 'staging-1', namespace: 'payments-api', workloads: [{ kind: 'Deployment', name: 'payments-api' }, { kind: 'Deployment', name: 'payments-gateway' }] }, ['logs', 'exec', 'run-job'], now + 13 * DAY, 'Release prep'),
     g(4, { kind: 'team', id: 1, name: 'Payments' }, { kind: 'namespace', cluster: 'staging-1', namespace: 'notifications-worker' }, ['logs'], null, ''),
@@ -238,6 +243,7 @@ function seed(): Db {
     retentionAuditDays: 365, retentionRecordingsDays: 90,
     rocket: { webhookUrl: 'https://chat.internal/hooks/9fK2xQ7', channel: '#platform-access', events: { break_glass_started: true, break_glass_requested: true, request_created: true, request_decided: false, exec_in_prod: true, admin_changes: true } },
     lokiRetentionInfo: 'Loki keeps audit lines for 400 days (set by operations).',
+    argoSyncClusterKinds: [],
   };
 
   const bgNima: BreakGlass = { id: 1, userId: 4, username: 'nima.karimi', reason: 'Index rebuild is stuck on shard 4 and the time window closed at 13:00; need to inspect lock files.', startedAt: iso(now - 45 * MIN), expiresAt: iso(now - 15 * MIN), endedAt: iso(now - 15 * MIN), endedBy: 'nima.karimi', active: false };

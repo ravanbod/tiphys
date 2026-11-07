@@ -822,6 +822,88 @@ func TestSyncApp(t *testing.T) {
 		t.Fatalf("denial audit for monitoring: %v, syncs %v", evs, e.argoAPI.syncCalls())
 	}
 
+	// Cluster-scoped resources other than its own Namespace leave the sync to
+	// admins, and the list names them.
+	setClusterResources := func(r ...domain.ClusterResource) {
+		for i, a := range e.argoAPI.apps {
+			if a.Name == "payments-api" && a.Cluster == "prod-1" {
+				e.argoAPI.apps[i].ClusterResources = r
+			}
+		}
+		if err := e.argo.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clusterRole := domain.ClusterResource{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "payments-read"}
+	clusterInput := domain.ClusterResource{Group: "fluentbit.fluent.io", Kind: "ClusterInput", Name: "payments-tail"}
+	setClusterResources(domain.ClusterResource{Kind: "Namespace", Name: "payments-api"}, clusterRole)
+	_, l = dev.list(apps)
+	if a := syncAccess(l[0]); a["allowed"] != false || a["reason"] != "app_scope" ||
+		fmt.Sprint(l[0]["adminOnlyResources"]) != "[ClusterRole.rbac.authorization.k8s.io/payments-read]" {
+		t.Fatalf("app_scope: %v", l[0])
+	}
+	if status, m, _ := dev.do("POST", syncPath, nil); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("sync of a cluster-scoped app: %d %v", status, m)
+	}
+	_, l = admin.list(apps)
+	if a := syncAccess(l[0]); a["allowed"] != true || fmt.Sprint(l[0]["adminOnlyResources"]) != "[]" {
+		t.Fatalf("admin app_scope: %v", l[0])
+	}
+
+	// Kinds the settings allow do not need an admin; others still do.
+	putKinds := func(kinds any) (int, map[string]any) {
+		_, cur, _ := admin.get("/api/v1/admin/settings")
+		if kinds == nil {
+			delete(cur, "argoSyncClusterKinds")
+		} else {
+			cur["argoSyncClusterKinds"] = kinds
+		}
+		status, m, _ := admin.do("PUT", "/api/v1/admin/settings", cur)
+		return status, m
+	}
+	if status, m := putKinds([]string{"ClusterRole.rbac.authorization.k8s.io"}); status != 422 || errCode(m) != "invalid" {
+		t.Fatalf("never-allowed kind: %d %v", status, m)
+	}
+	if status, m := putKinds([]string{"ClusterInput.fluentbit.fluent.io"}); status != 200 {
+		t.Fatalf("allow kind: %d %v", status, m)
+	}
+	// A client that does not know the setting keeps it.
+	if status, m := putKinds(nil); status != 200 || fmt.Sprint(m["argoSyncClusterKinds"]) != "[ClusterInput.fluentbit.fluent.io]" {
+		t.Fatalf("settings without the field: %d %v", status, m)
+	}
+	setClusterResources(clusterInput, clusterRole)
+	if _, l = dev.list(apps); fmt.Sprint(l[0]["adminOnlyResources"]) != "[ClusterRole.rbac.authorization.k8s.io/payments-read]" {
+		t.Fatalf("only the other kind is admin-only: %v", l[0])
+	}
+	setClusterResources(domain.ClusterResource{Kind: "Namespace", Name: "payments-api"}, clusterInput)
+	if _, l = dev.list(apps); syncAccess(l[0])["allowed"] != true {
+		t.Fatalf("allowed kind: %v", l[0])
+	}
+	if status, m, _ := dev.do("POST", syncPath, nil); status != 202 {
+		t.Fatalf("sync with an allowed kind: %d %v", status, m)
+	}
+	evs, _ = e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoSync})
+	found = false
+	for _, ev := range evs {
+		if fmt.Sprint(ev.Details["clusterResources"]) == "[ClusterInput.fluentbit.fluent.io/payments-tail]" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("sync audit names the cluster resources: %v", evs)
+	}
+	setClusterResources()
+	waitFor(t, 5*time.Second, "allowed-kind sync finished", func() bool {
+		evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoSync})
+		n := 0
+		for _, ev := range evs {
+			if ev.Result == domain.ResultSucceeded {
+				n++
+			}
+		}
+		return n >= 2
+	})
+
 	e.argoAPI.mu.Lock()
 	e.argoAPI.busy = true
 	e.argoAPI.mu.Unlock()
@@ -852,7 +934,7 @@ func TestAppDetails(t *testing.T) {
 		t.Fatalf("last operation: %v", op)
 	}
 	status, h := dev.list(app + "/history")
-	if status != 200 || len(h) != 2 || h[0]["revision"] != "abc123" || h[0]["current"] != true || h[1]["current"] != false {
+	if status != 200 || len(h) != 3 || h[0]["revision"] != "abc123" || h[0]["current"] != true || h[1]["current"] != false {
 		t.Fatalf("history: %d %v", status, h)
 	}
 	if c, _ := h[0]["commit"].(map[string]any); c["message"] != "Bump replicas" || h[1]["commit"] != nil {
@@ -890,6 +972,145 @@ func TestAppDetails(t *testing.T) {
 	evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoDiff})
 	if len(evs) != 1 || evs[0].Username != "sara" || evs[0].Details["app"] != "payments-api" {
 		t.Fatalf("diff audit: %v", evs)
+	}
+}
+
+func TestRollbackApp(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	const apps = "/api/v1/clusters/prod-1/namespaces/payments-api/apps"
+	const app = apps + "/argocd/payments-api"
+	const rollback = app + "/history/1/rollback"
+	grant := func(scope map[string]any, actions ...string) {
+		t.Helper()
+		status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+			"holder": map[string]any{"kind": "team", "id": e.teamID}, "scope": scope, "actions": actions})
+		if status != 201 && status != 200 {
+			t.Fatalf("grant %v: %d %v", actions, status, m)
+		}
+	}
+	rollbackAccess := func() map[string]any {
+		_, l := dev.list(apps)
+		return l[0]["access"].(map[string]any)["rollback"].(map[string]any)
+	}
+	payments := map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "payments-api"}
+
+	// Sync does not include rollback.
+	grant(payments, "sync")
+	if a := rollbackAccess(); a["allowed"] != false || a["reason"] != "no_grant" {
+		t.Fatalf("rollback access with only sync: %v", a)
+	}
+	if status, m, _ := dev.do("POST", rollback, nil); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("rollback without grant: %d %v", status, m)
+	}
+	// Like sync, rollback is for whole applications.
+	status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+		"holder": map[string]any{"kind": "team", "id": e.teamID}, "actions": []string{"rollback"},
+		"scope": map[string]any{"kind": "workloads", "cluster": "prod-1", "namespace": "payments-api",
+			"workloads": []map[string]any{{"kind": "Deployment", "name": "payments-api"}}}})
+	if status != 422 {
+		t.Fatalf("rollback on workloads scope: %d %v", status, m)
+	}
+	grant(payments, "rollback")
+	if a := rollbackAccess(); a["allowed"] != true {
+		t.Fatalf("rollback access: %v", a)
+	}
+
+	// The history says which deploys can be rolled back to.
+	_, h := dev.list(app + "/history")
+	if h[0]["rollbackBlocked"] != "current" || h[1]["rollbackBlocked"] != nil || h[2]["rollbackBlocked"] != "source_changed" {
+		t.Fatalf("rollbackBlocked: %v", h)
+	}
+
+	// The plan names what the revision adds and what it leaves in place; the
+	// Deployment without a namespace lands in the destination.
+	status, m, _ = dev.get(rollback)
+	if status != 200 || m["revision"] != "old111" || m["decision"].(map[string]any)["allowed"] != true {
+		t.Fatalf("plan: %d %v", status, m)
+	}
+	if fmt.Sprint(m["added"]) != "[map[group: kind:ConfigMap name:old-config namespace:payments-api]]" ||
+		fmt.Sprint(m["kept"]) != "[map[group: kind:Service name:payments-api namespace:payments-api]]" {
+		t.Fatalf("plan resources: %v / %v", m["added"], m["kept"])
+	}
+	for _, path := range []string{app + "/history/2/rollback", app + "/history/0/rollback", app + "/history/9/rollback"} {
+		if status, m, _ := dev.do("POST", path, nil); status != 422 || errCode(m) != "invalid" {
+			t.Fatalf("%s: %d %v", path, status, m)
+		}
+	}
+
+	// A revision that deploys into another namespace needs rollback there too,
+	// and one with a cluster-scoped resource (or a kind the cluster does not
+	// serve) needs an admin.
+	setManifests := func(objs ...application.ArgoResourceRef) {
+		e.argoAPI.mu.Lock()
+		e.argoAPI.manifests = map[string][]application.ArgoResourceRef{"old111": objs}
+		e.argoAPI.mu.Unlock()
+	}
+	deployment := application.ArgoResourceRef{Group: "apps", Kind: "Deployment", Name: "payments-api"}
+	setManifests(deployment, application.ArgoResourceRef{Kind: "ConfigMap", Namespace: "monitoring", Name: "scrape"})
+	if status, m, _ := dev.get(rollback); status != 200 || m["decision"].(map[string]any)["allowed"] != false || m["decisionNamespace"] != "monitoring" {
+		t.Fatalf("plan into monitoring: %d %v", status, m)
+	}
+	if status, m, _ := dev.do("POST", rollback, nil); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("rollback into monitoring: %d %v", status, m)
+	}
+	setManifests(deployment, application.ArgoResourceRef{Group: "example.io", Kind: "Widget", Name: "w"})
+	if status, m, _ := dev.get(rollback); status != 200 || m["decision"].(map[string]any)["reason"] != "app_scope" ||
+		fmt.Sprint(m["adminOnlyResources"]) != "[Widget.example.io/w]" {
+		t.Fatalf("plan with an unknown kind: %d %v", status, m)
+	}
+	setManifests(deployment, application.ArgoResourceRef{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole", Name: "payments-read"})
+	if status, m, _ := dev.do("POST", rollback, nil); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("rollback with a ClusterRole: %d %v", status, m)
+	}
+	if len(e.argoAPI.rollbackCalls()) != 0 {
+		t.Fatalf("denied rollbacks reached Argo CD: %v", e.argoAPI.rollbackCalls())
+	}
+	setManifests(deployment)
+
+	status, m, _ = dev.do("POST", rollback, nil)
+	if status != 202 || m["operationId"] == nil {
+		t.Fatalf("rollback: %d %v", status, m)
+	}
+	waitFor(t, 5*time.Second, "rollback outcome audited", func() bool {
+		evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoRollback})
+		for _, ev := range evs {
+			if ev.Result == domain.ResultSucceeded && ev.Action == "rollback" && ev.Details["operationStartedAt"] == "2026-10-30T09:00:01Z" {
+				return true
+			}
+		}
+		return false
+	})
+	if calls := e.argoAPI.rollbackCalls(); len(calls) != 1 || calls[0] != "argocd/payments-api to 1" {
+		t.Fatalf("argo rollbacks: %v", calls)
+	}
+	evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoRollback, Result: domain.ResultAllowed})
+	if len(evs) != 1 || evs[0].Username != "sara" || evs[0].Details["revision"] != "old111" || evs[0].Details["historyId"] != float64(1) {
+		t.Fatalf("rollback started audit: %v", evs)
+	}
+	status, _, raw := dev.get("/api/v1/operations/" + m["operationId"].(string) + "/stream")
+	if status != 200 || !strings.Contains(string(raw), "event:done") || !strings.Contains(string(raw), "succeeded") {
+		t.Fatalf("operation stream: %d %s", status, raw)
+	}
+	// The deploy it made names the portal user, not the token's account.
+	_, h = dev.list(app + "/history")
+	if h[0]["portalUser"] != "sara" || h[0]["portalAction"] != "argo.rollback" || h[1]["portalUser"] != nil {
+		t.Fatalf("history users: %v", h)
+	}
+
+	// Apps that sync automatically cannot be rolled back.
+	e.argoAPI.mu.Lock()
+	e.argoAPI.autoSync = true
+	e.argoAPI.mu.Unlock()
+	if status, m, _ := dev.do("POST", rollback, nil); status != 409 || errCode(m) != "auto_sync_enabled" {
+		t.Fatalf("rollback with auto-sync: %d %v", status, m)
+	}
+	if _, h = dev.list(app + "/history"); h[1]["rollbackBlocked"] != "auto_sync" {
+		t.Fatalf("rollbackBlocked with auto-sync: %v", h[1])
+	}
+	if status, _, _ := e.login(e.audID).do("POST", rollback, nil); status != 403 {
+		t.Fatalf("auditor: %d", status)
 	}
 }
 

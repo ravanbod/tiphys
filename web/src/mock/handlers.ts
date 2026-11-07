@@ -1,15 +1,16 @@
 import type {
   AccessRequest, Action, AppSummary, AuditEvent, BreakGlass, BreakGlassRequest, CronJobSummary, DecisionExplain, ExecSessionView,
   GrantInput, GrantView, JobSummary, K8sEvent, Me, NamespaceApp, NamespaceSummary, Pod, Role, ScopeView, SettingsView,
-  ArgoAppStatus, ArgoDeploy, ArgoDiff, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
+  ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, DecisionInfo, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
 } from '../api/types';
 import { kindFromSegment } from '../api/query';
 import { CSRF, DAY, HOUR, MIN, currentUser, getDb, nextId, personaRole } from './db';
-import type { MockUser, NsDef, WlDef } from './db';
+import type { AppDef, MockUser, NsDef, WlDef } from './db';
 import { WORKLOAD_ACTIONS, accessMap, covers, decide, envOf, nsActions, userGrants } from './decide';
 import { buildCast, commandList } from './scripts';
 import { mergeTarget } from '../lib/requestMerge';
 import { ACTIONS } from '../lib/grantForm';
+import { checkSyncClusterKind, syncClusterKindsError } from '../lib/syncClusterKinds';
 import { terminateSocket } from './sockets';
 
 export class MockError extends Error {
@@ -282,9 +283,27 @@ on('GET', '/clusters/:c/namespaces/:ns/apps', (c) => {
     name: a.name, project: a.project, appNamespace: 'argocd', health: a.health, sync: a.sync,
     lastSyncAt: a.sync === 'Synced' ? new Date(Date.now() - (i + 1) * 47 * 60_000).toISOString() : new Date(Date.now() - 26 * 3600_000).toISOString(),
     lastSyncPhase: a.health === 'Degraded' ? 'Failed' : 'Succeeded',
-    access: { sync: decide(c.user, cluster, ns, null, null, 'sync') }, syncNamespace: ns,
+    access: { sync: decideApp(c.user, a, ns, 'sync'), rollback: decideApp(c.user, a, ns, 'rollback') }, syncNamespace: ns,
+    adminOnlyResources: decideApp(c.user, a, ns, 'sync').reason === 'app_scope' ? adminOnly(a) : [],
+    autoSync: !!a.autoSync, multiSource: false,
   }));
 });
+/** Like DecideApp: cluster-scoped resources leave the sync to admins. */
+/** Like Policy.AdminOnlyResources: what the settings do not allow ("Kind.group/name"). */
+function adminOnly(a: AppDef): string[] {
+  const allowed = getDb().settings.argoSyncClusterKinds;
+  return (a.clusterResources ?? []).filter((r) => {
+    const kind = r.slice(0, r.indexOf('/'));
+    return !allowed.includes(kind) || checkSyncClusterKind(kind) !== '';
+  });
+}
+function decideApp(u: MockUser, a: AppDef, ns: string, action: 'sync' | 'rollback', extra: string[] = []): DecisionInfo {
+  const info = decide(u, a.cluster, ns, null, null, action);
+  if (info.allowed && info.reason !== 'admin' && (adminOnly(a).length || extra.length)) {
+    return { ...info, allowed: false, reason: 'app_scope', grantIds: [], closesAt: null };
+  }
+  return info;
+}
 function mockApp(c: { user: MockUser; params: Record<string, string> }) {
   clusterGuard(c.params.c);
   const { c: cluster, ns, app } = c.params;
@@ -315,15 +334,45 @@ on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/status', (c): ArgoAppSta
 on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/history', (c): ArgoDeploy[] => {
   mockApp(c);
   const msgs = ['Bump api image to 2026.10.17-4', 'Raise memory limit to 512Mi', 'Add readiness probe'];
-  return REVS.map((rev, i) => ({
-    id: 3 - i, revision: rev, revisions: [], deployedAt: iso(Date.now() - (i * 26 + 1) * 3600_000), initiatedBy: i === 1 ? 'sara.moradi' : '',
+  const a = mockApp(c);
+  return REVS.map((rev, i): ArgoDeploy => ({
+    id: 3 - i, revision: rev, revisions: [], deployedAt: iso(Date.now() - (i * 26 + 1) * 3600_000), initiatedBy: i === 1 ? 'tiphys' : '',
     automated: i !== 1, source: 'https://git.example.com/platform/deploy.git', current: i === 0,
     commit: { author: ['Nima Karimi', 'Sara Moradi', 'Reza Ahmadi'][i], date: iso(Date.now() - (i * 26 + 2) * 3600_000), message: msgs[i], tags: [] },
+    portalUser: i === 1 ? 'sara.moradi' : null, portalAction: i === 1 ? 'argo.sync' : null,
+    rollbackBlocked: i === 0 ? 'current' : a.autoSync ? 'auto_sync' : i === 2 ? 'source_changed' : null,
   }));
+});
+/** The mock's rollback plan: the oldest revision added a ConfigMap; payments-api-config's adds a ClusterRole too. */
+function rollbackPlan(c: { user: MockUser; params: Record<string, string> }): ArgoRollbackPlan {
+  const a = mockApp(c);
+  const id = Number(c.params.id);
+  if (a.autoSync) throw new MockError(409, 'auto_sync_enabled', 'This application syncs automatically, so Argo CD does not roll it back. Turn off auto-sync in Git or Argo CD first.');
+  if (id !== 2) throw invalid({ id: id === 3 ? 'This deploy is the one running now.' : "The application's source changed since this deploy, so the portal cannot check what it would deploy; use Argo CD." });
+  const now = decideApp(c.user, a, c.params.ns, 'rollback');
+  if (!now.allowed) throw denied(now);
+  const extra = a.name === 'payments-api-config' ? ['ClusterRole.rbac.authorization.k8s.io/payments-config-legacy'] : [];
+  const decision = decideApp(c.user, a, c.params.ns, 'rollback', extra);
+  return {
+    id, revision: REVS[1], decision, decisionNamespace: a.namespace,
+    adminOnlyResources: decision.reason === 'app_scope' ? [...adminOnly(a), ...extra] : [],
+    added: [{ group: '', kind: 'ConfigMap', namespace: a.namespace, name: `${a.name}-legacy` },
+      ...extra.map((r) => ({ group: 'rbac.authorization.k8s.io', kind: 'ClusterRole', namespace: '', name: r.slice(r.indexOf('/') + 1) }))],
+    kept: [{ group: '', kind: 'ConfigMap', namespace: a.namespace, name: `${a.name}-config` }],
+    truncated: false,
+  };
+}
+on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/history/:id/rollback', (c) => rollbackPlan(c));
+on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/history/:id/rollback', (c) => {
+  const plan = rollbackPlan(c);
+  if (!plan.decision.allowed) throw denied(plan.decision);
+  const id = opId();
+  getDb().ops[id] = { id, kind: 'rollback', cluster: c.params.c, namespace: c.params.ns, name: c.params.app, owner: c.user.id, willFail: false };
+  return { __status: 202, data: { operationId: id } };
 });
 on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/diff', (c): ArgoDiff => {
   const a = mockApp(c);
-  const info = decide(c.user, c.params.c, c.params.ns, null, null, 'sync');
+  const info = decideApp(c.user, a, c.params.ns, 'sync');
   if (!info.allowed) throw denied(info);
   if (a.sync === 'Synced') return { resources: [], truncated: false };
   return {
@@ -342,7 +391,7 @@ on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/sync', (c) => {
   const { c: cluster, ns, app } = c.params;
   const a = getDb().apps.find((x) => x.cluster === cluster && x.namespace === ns && x.name === app);
   if (!a) throw notFound(`Application ${app} not found`);
-  const info = decide(c.user, cluster, ns, null, null, 'sync');
+  const info = decideApp(c.user, a, ns, 'sync');
   if (!info.allowed) throw denied(info);
   const id = opId();
   getDb().ops[id] = { id, kind: 'sync', cluster, namespace: ns, name: app, owner: c.user.id, willFail: a.health === 'Degraded' };
@@ -459,7 +508,7 @@ on('POST', '/clusters/:c/namespaces/:ns/cronjobs/:name/run', (c) => {
 
 on('GET', '/catalog/argo-projects', () => { return [...new Set([...getDb().apps.map((a) => a.project), 'search-lab'])].sort(); });
 const hiddenCluster = (u: MockUser, name?: string) => !isAdmin(u) && !!getDb().clusters.find((x) => x.name === name)?.protected;
-on('GET', '/catalog/clusters', (c) => { return getDb().clusters.filter((x) => x.usable && !hiddenCluster(c.user, x.name)).map((x) => ({ name: x.name, environment: x.environment ?? 'unlabeled' })); });
+on('GET', '/catalog/clusters', (c) => { return getDb().clusters.filter((x) => !hiddenCluster(c.user, x.name)).map((x) => ({ name: x.name, environment: x.environment ?? 'unlabeled' })); });
 on('GET', '/catalog/clusters/:c/namespaces', (c) => {
   const d = getDb();
   if (hiddenCluster(c.user, c.params.c)) return [];
@@ -1011,10 +1060,13 @@ R('/admin/settings', (c) => {
     if (!Number.isInteger(b[k]) || b[k] < 1) f[k] = 'Must be a positive whole number.';
   }
   if (!f.breakGlassDefaultMinutes && b.breakGlassDefaultMinutes > b.breakGlassMaxMinutes) f.breakGlassDefaultMinutes = 'Default cannot exceed the maximum.';
+  const kinds = syncClusterKindsError(b.argoSyncClusterKinds ?? []);
+  if (kinds) f.argoSyncClusterKinds = kinds;
   if (Object.keys(f).length) throw invalid(f);
   const d = getDb();
   const before = d.settings;
-  d.settings = { ...b, lokiRetentionInfo: before.lokiRetentionInfo };
+  // Like the server: a body without the kinds keeps them.
+  d.settings = { ...b, lokiRetentionInfo: before.lokiRetentionInfo, argoSyncClusterKinds: b.argoSyncClusterKinds ?? before.argoSyncClusterKinds };
   logAudit(c.user, 'admin.settings.updated', null, 'succeeded', { details: { before: { ...before, rocket: undefined }, after: { ...d.settings, rocket: undefined } } });
   return d.settings;
 }, 'PUT');

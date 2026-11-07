@@ -26,9 +26,10 @@ export const ACTION_LABEL: Record<Action, string> = {
   restart: 'Restart',
   'run-job': 'Run now',
   sync: 'Sync',
+  rollback: 'Rollback',
 };
 
-const ACTION_NOUN: Record<Action, string> = { logs: 'logs', exec: 'exec', restart: 'restart', 'run-job': 'run', sync: 'sync' };
+const ACTION_NOUN: Record<Action, string> = { logs: 'logs', exec: 'exec', restart: 'restart', 'run-job': 'run', sync: 'sync', rollback: 'rollback' };
 
 export const REASON_TEXT: Record<DenyReason, string> = {
   protected_namespace: 'This namespace is not available through the portal.',
@@ -39,8 +40,33 @@ export const REASON_TEXT: Record<DenyReason, string> = {
   outside_window: 'Closed by a time window.',
   holiday: 'Closed today: holiday.',
   argo_stale: 'Project-scoped access is paused: Argo CD data is out of date.',
-  app_scope: 'This application manages cluster-wide resources, so only an admin can sync it.',
+  app_scope: 'This application manages cluster-wide resources, so only an admin can sync or roll it back.',
 };
+
+/** At most this many admin-only resources are named; the rest are counted. */
+const APP_SCOPE_SHOWN = 10;
+
+/**
+ * Why only an admin can sync an Argo CD app (reason app_scope): the
+ * cluster-scoped resources that cause it, or, with none, that the app deploys
+ * nowhere the portal knows. Null for any other decision.
+ */
+export function appScopeNote(info: DecisionInfo, resources: string[]): { text: string; shown: string[]; more: number } | null {
+  if (info.allowed || info.reason !== 'app_scope') return null;
+  if (!resources.length) {
+    return { text: 'It deploys to no cluster or namespace the portal knows.', shown: [], more: 0 };
+  }
+  const shown = resources.slice(0, APP_SCOPE_SHOWN);
+  return { text: 'It manages cluster-wide resources:', shown, more: resources.length - shown.length };
+}
+
+/**
+ * What a denied sync of an Argo CD app is about: the app, or the other
+ * namespace it also deploys to that denied it (the page shows `ns`).
+ */
+export function appSyncTarget(app: { name: string; syncNamespace: string }, ns: string): string {
+  return app.syncNamespace && app.syncNamespace !== ns ? `namespace ${app.syncNamespace}, where this app also deploys` : app.name;
+}
 
 /** Human explanation of a denied DecisionInfo. Returns null if the action is allowed. */
 export function explainDecision(info: DecisionInfo | undefined | null, ctx: ExplainContext): Explanation | null {

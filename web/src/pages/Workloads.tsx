@@ -14,8 +14,11 @@ import { rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
 import { starKey, useStars } from '../hooks/useStars';
 import { useLocalStorage } from '../hooks/useLocalStorage';
+import { useUrlState } from '../hooks/useUrlState';
 import { logsUrl, namespaceUrl, workloadUrl } from '../lib/routes';
 import { ARGO_UI } from '../lib/features';
+import { filtersOf, loadFilters, restoredQuery, saveFilters } from '../lib/workloadFilters';
+import type { FilterKey } from '../lib/workloadFilters';
 
 function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace: string; cols: number }) {
   const { me } = useAuth();
@@ -78,10 +81,10 @@ export function Workloads() {
   const [storedGroup, setGroup] = useLocalStorage<'app' | 'ns'>('tiphys.group', 'app');
   // Without the Argo UI the namespace view (read from the clusters) is the only one.
   const group: 'app' | 'ns' = ARGO_UI ? storedGroup : 'ns';
-  const q = sp.get('q') ?? '';
-  const [cluster, setCluster] = useState('');
-  const [env, setEnv] = useState('');
-  const [project, setProject] = useState('');
+  // Filters live in the URL; the last ones of this tab come back on return.
+  const [restore] = useState(() => restoredQuery(sp, loadFilters(me.id)));
+  const restoring = useRef(restore !== null);
+  const [{ q, cluster, env, project }, setFilters] = useUrlState({ q: '', cluster: '', env: '', project: '' });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const { stars, toggle, isStarred } = useStars();
   const apps = useApi(() => api.apps(), [me.breakGlass?.id], { enabled: group === 'app' });
@@ -93,11 +96,19 @@ export function Workloads() {
     if (expand) setOpen((o) => new Set(o).add(expand));
   }, [expand]);
 
-  const setQ = (v: string) => {
-    const n = new URLSearchParams(sp);
-    if (v) n.set('q', v); else n.delete('q');
-    setSp(n, { replace: true });
-  };
+  useEffect(() => {
+    if (restoring.current && restore) {
+      restoring.current = false;
+      setSp(restore, { replace: true });
+      return;
+    }
+    // A starred app's link (?expand=) brings no filters; keep the saved ones.
+    if (!filtersOf(sp) && sp.has('expand')) return;
+    saveFilters(me.id, filtersOf(sp));
+  }, [sp, restore, setSp, me.id]);
+
+  const setFilter = (k: FilterKey, v: string) => setFilters({ [k]: v });
+  const setQ = (v: string) => setFilter('q', v);
 
   const rows = group === 'app' ? (apps.data ?? NO_APPS) : NO_APPS;
   const nsRows = group === 'ns' ? (nss.data ?? NO_NS) : NO_NS;
@@ -157,14 +168,14 @@ export function Workloads() {
       </PageHeader>
 
       <div className="row wrap">
-        <select className="sel" aria-label="Cluster" value={cluster} onChange={(e) => setCluster(e.target.value)}>
+        <select className="sel" aria-label="Cluster" value={cluster} onChange={(e) => setFilter('cluster', e.target.value)}>
           <option value="">All clusters</option>{clusters.map((c) => <option key={c}>{c}</option>)}
         </select>
-        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setEnv(e.target.value)}>
+        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setFilter('env', e.target.value)}>
           <option value="">All environments</option>{envs.map((c) => <option key={c}>{c}</option>)}
         </select>
         {ARGO_UI && (
-          <select className="sel" aria-label="Argo project" value={project} onChange={(e) => setProject(e.target.value)}>
+          <select className="sel" aria-label="Argo project" value={project} onChange={(e) => setFilter('project', e.target.value)}>
             <option value="">All Argo projects</option>{projects.map((c) => <option key={c}>{c}</option>)}
           </select>
         )}

@@ -336,7 +336,7 @@ class FakeEventSource {
         }
       }, 900);
       this.timers.push(t);
-    } else if (op.kind === 'sync') {
+    } else if (op.kind === 'sync' || op.kind === 'rollback') {
       // Pending, then Running over a few resources, then the outcome.
       const total = 6;
       let tick = 0;

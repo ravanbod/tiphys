@@ -259,6 +259,15 @@ func (k *fakeKube) emit(ns string, c application.NamespaceChange) {
 	}
 }
 
+// ResourceScopes serves a few core kinds; others are unknown.
+func (k *fakeKube) ResourceScopes(_ context.Context, a application.KubeActor, _ string) (map[application.KubeGroupKind]bool, error) {
+	k.record(a)
+	return map[application.KubeGroupKind]bool{
+		{Group: "apps", Kind: "Deployment"}: true, {Kind: "Service"}: true, {Kind: "ConfigMap"}: true,
+		{Kind: "Namespace"}: false, {Group: "rbac.authorization.k8s.io", Kind: "ClusterRole"}: false,
+	}, nil
+}
+
 func (k *fakeKube) ProbeKubeconfig(context.Context, []byte) (application.ClusterProbe, error) {
 	return application.ClusterProbe{Version: "v1.31.0", PrivilegeOK: true, AdmissionMode: domain.AdmissionVAP}, nil
 }

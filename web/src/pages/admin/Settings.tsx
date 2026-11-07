@@ -10,6 +10,7 @@ import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
 import { useApi } from '../../hooks/useApi';
 import { adminErrorText, adminFieldErrors } from '../../lib/adminErrorText';
+import { ProtectedNamespacesCard, SyncKindsCard } from './SettingsLists';
 import { useAdminMutation } from '../../lib/useAdminMutation';
 
 type NumKey =
@@ -79,8 +80,12 @@ function validate(d: Draft): Record<string, string> {
   return errs;
 }
 
+/** The PUT body. It leaves out argoSyncClusterKinds, which SyncKindsCard saves on its own (the server keeps it). */
 function toSettings(d: Draft, base: SettingsView): SettingsView {
-  const out: SettingsView = { ...base, breakGlassMode: d.breakGlassMode, rocket: { webhookUrl: d.webhookUrl.trim(), channel: d.channel.trim(), events: { ...d.events } } };
+  const { argoSyncClusterKinds: _kinds, ...rest } = base;
+  const out = {
+    ...rest, breakGlassMode: d.breakGlassMode, rocket: { webhookUrl: d.webhookUrl.trim(), channel: d.channel.trim(), events: { ...d.events } },
+  } as SettingsView;
   NUM_KEYS.forEach((k) => {
     out[k] = Number(d.nums[k]);
   });
@@ -218,6 +223,10 @@ export function Settings() {
               )}
             </div>
           </div>
+
+          {/* These two apply at once, not through Save changes. */}
+          <ProtectedNamespacesCard isAdmin={isAdmin} />
+          <SyncKindsCard isAdmin={isAdmin} />
 
           <div className="card">
             <div className="hd">Session limits</div>

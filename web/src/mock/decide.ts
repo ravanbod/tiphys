@@ -3,7 +3,7 @@ import { zonedParts, zonedToInstant } from '../lib/time';
 import { DAY, HOUR, getDb } from './db';
 import type { MockUser } from './db';
 
-export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
+export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'];
 export const WORKLOAD_ACTIONS: WorkloadAction[] = ['logs', 'exec', 'restart', 'run-job'];
 
 export function envOf(cluster: string, ns: string): string {
@@ -65,7 +65,7 @@ export function decide(u: MockUser, cluster: string, ns: string, kind: WorkloadK
   if (u.role === 'admin') return { allowed: true, reason: 'admin', ...base };
   if (kind === 'CronJob' && action === 'restart') return { allowed: false, reason: 'no_grant', ...base };
   if (kind && kind !== 'CronJob' && action === 'run-job') return { allowed: false, reason: 'no_grant', ...base };
-  if (kind && action === 'sync') return { allowed: false, reason: 'no_grant', ...base };
+  if (kind && (action === 'sync' || action === 'rollback')) return { allowed: false, reason: 'no_grant', ...base };
   const now = Date.now();
   const mine = userGrants(u).filter((g) => g.actions.includes(action));
   const matched = mine.map((g) => ({ g, c: covers(g, cluster, ns, kind, name) })).filter((x) => x.c.match);
@@ -105,8 +105,8 @@ export function nsActions(u: MockUser, cluster: string, ns: string): Action[] {
   const out = new Set<Action>();
   const open = (d: DecisionInfo) => d.allowed || d.reason === 'outside_window';
   for (const a of ACTIONS) {
-    // sync is decided for the namespace (whole Argo CD apps), the rest per workload.
-    if (a === 'sync' ? open(decide(u, cluster, ns, null, null, a)) : kinds.some((w) => open(decide(u, cluster, ns, w.kind, w.name || null, a)))) out.add(a);
+    // sync and rollback are decided for the namespace (whole Argo CD apps), the rest per workload.
+    if (a === 'sync' || a === 'rollback' ? open(decide(u, cluster, ns, null, null, a)) : kinds.some((w) => open(decide(u, cluster, ns, w.kind, w.name || null, a)))) out.add(a);
   }
   return ACTIONS.filter((a) => out.has(a));
 }

@@ -18,7 +18,7 @@ import { fmtDay, fmtTime } from '../../lib/time';
 import '../../styles/auditpages.css';
 
 const PAGE = 50;
-const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync'];
+const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'];
 const RESULTS = ['allowed', 'denied', 'succeeded', 'failed'];
 // ---- data: cursor-paged audit events
 

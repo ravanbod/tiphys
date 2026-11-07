@@ -23,7 +23,7 @@ import { ARGO_UI } from '../../lib/features';
 import { actionOptionLabel } from '../../lib/grantForm';
 
 // Logs are never limited by time windows (they never need break-glass), so a rule cannot list them.
-const ACTIONS: Action[] = ['exec', 'restart', 'run-job', 'sync'];
+const ACTIONS: Action[] = ['exec', 'restart', 'run-job', 'sync', 'rollback'];
 const COMMON_TZ = ['Asia/Tehran', 'UTC', 'Asia/Dubai', 'Europe/Istanbul', 'Europe/London', 'Europe/Berlin', 'America/New_York'];
 const SCOPE_LABEL: Record<TimeWindowView['scopeKind'], string> = {
   global: 'Global', environment: 'Environment', cluster: 'Cluster', argo_project: 'Argo project', team: 'Team',

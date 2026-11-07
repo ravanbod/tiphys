@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pmezard/go-difflib/difflib"
 	"sigs.k8s.io/yaml"
@@ -27,6 +28,15 @@ type ArgoHistoryEntry struct {
 	ArgoDeploy
 	Commit  *ArgoRevision
 	Current bool // the deploy the app runs now
+	// PortalUser started the deploy through the portal (PortalAction is
+	// argo.sync or argo.rollback); empty when it did not come from the portal
+	// or the audit cannot tell. Argo CD's InitiatedBy is then the token's
+	// account.
+	PortalUser, PortalAction string
+	// RollbackBlocked says why the app cannot be rolled back to this deploy
+	// here ("" when it can, subject to the decision): current, auto_sync,
+	// multi_source or source_changed.
+	RollbackBlocked string
 }
 
 // ArgoResourceDiff is an out-of-sync resource of an app.
@@ -82,18 +92,36 @@ func (s *WorkloadService) AppStatus(ctx context.Context, p Principal, cluster, n
 
 // AppHistory returns an app's last deploys, newest first, with their commits
 // (looked up in parallel; a revision Argo CD cannot describe, e.g. a Helm
-// chart version, has none).
+// chart version, has none) and, from the audit, who started them through the
+// portal.
 func (s *WorkloadService) AppHistory(ctx context.Context, p Principal, cluster, ns, appNamespace, name string) ([]ArgoHistoryEntry, error) {
-	d, err := s.AppStatus(ctx, p, cluster, ns, appNamespace, name)
+	app, err := s.appFor(ctx, p, cluster, ns, appNamespace, name)
 	if err != nil {
 		return nil, err
 	}
+	d, err := s.argo.Details(ctx, app.AppNamespace, app.Name)
+	if err != nil {
+		return nil, &ArgoError{Err: err}
+	}
 	n := min(len(d.History), argoHistoryShown)
 	out := make([]ArgoHistoryEntry, n)
+	var deployers map[string]argoDeployer
+	if n > 0 {
+		since := d.History[len(d.History)-n].DeployedAt
+		if !since.IsZero() {
+			since = since.Add(-argoSyncDeadline - time.Hour) // the operation started before it deployed
+		}
+		deployers = s.argoDeployers(ctx, app, since)
+	}
 	var wg sync.WaitGroup
 	for i := range n {
 		h := d.History[len(d.History)-1-i]
-		out[i] = ArgoHistoryEntry{ArgoDeploy: h, Current: i == 0}
+		out[i] = ArgoHistoryEntry{ArgoDeploy: h, Current: i == 0, RollbackBlocked: rollbackBlocked(d, h, i == 0)}
+		if h.StartedAt != nil {
+			if who, ok := deployers[operationStartedAt(*h.StartedAt)]; ok {
+				out[i].PortalUser, out[i].PortalAction = who.Username, who.Action
+			}
+		}
 		if h.Revision == "" {
 			continue
 		}
@@ -107,6 +135,22 @@ func (s *WorkloadService) AppHistory(ctx context.Context, p Principal, cluster, 
 	}
 	wg.Wait()
 	return out, nil
+}
+
+// rollbackBlocked says why the app cannot be rolled back to the deploy here,
+// "" when it can (the checks of rollbackPlan before the manifests).
+func rollbackBlocked(d ArgoAppDetails, h ArgoDeploy, current bool) string {
+	switch {
+	case current:
+		return "current"
+	case d.AutoSync:
+		return "auto_sync"
+	case d.MultiSource:
+		return "multi_source"
+	case h.Revision == "" || !h.SameSource:
+		return "source_changed"
+	}
+	return ""
 }
 
 // AppDiff shows what a sync of the app would change. It reveals the app's

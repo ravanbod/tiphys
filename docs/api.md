@@ -10,18 +10,18 @@ Contract between `web/` and the Go portal. The frontend is served by the portal 
 - Errors: HTTP status + body `{"error": {"code": string, "message": string, "details"?: object}}`.
   - `401 unauthenticated` → frontend redirects to `/auth/login?next=<path>`, or to the login page `/login?next=<path>` when `GET /auth/options` says `localLogin`.
   - `403 denied` → authorization decision; `details` is a `DecisionInfo` (below), so the UI can show the reason, `reopensAt` and `closesAt`.
-  - `403 forbidden_role` → role does not allow the endpoint. `403 break_glass_disabled` → break-glass is turned off in the settings. `409 break_glass_approval_required` → `POST /break-glass` in mode `approval`: request it instead. `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
+  - `403 forbidden_role` → role does not allow the endpoint. `403 break_glass_disabled` → break-glass is turned off in the settings. `409 break_glass_approval_required` → `POST /break-glass` in mode `approval`: request it instead. `409 auto_sync_enabled` → a rollback of an app that syncs automatically (Argo CD refuses it). `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
 - Health: `GET /healthz`, `GET /readyz` (no auth). Metrics are on a separate port.
 - Lists are returned as plain arrays unless stated (audit uses a cursor).
 
 ```ts
-type Action = 'logs' | 'exec' | 'restart' | 'run-job' | 'sync'; // sync: a whole Argo CD application; workload access maps hold the other four
+type Action = 'logs' | 'exec' | 'restart' | 'run-job' | 'sync' | 'rollback'; // sync, rollback: a whole Argo CD application; workload access maps hold the other four
 type Role = 'user' | 'auditor' | 'admin';
 type WorkloadKind = 'Deployment' | 'StatefulSet' | 'DaemonSet' | 'Rollout' | 'CronJob';
 type DenyReason =
   | 'protected_namespace' | 'user_disabled' | 'role' | 'no_grant' | 'grant_expired'
   | 'outside_window' | 'holiday' | 'argo_stale'
-  | 'app_scope'; // sync of an app with cluster-scoped resources (other than its own Namespace objects): admins only
+  | 'app_scope'; // sync or rollback of an app with cluster-scoped resources (other than its own Namespace objects and kinds in settings.argoSyncClusterKinds): admins only
 
 interface DecisionInfo {
   allowed: boolean;
@@ -87,9 +87,11 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | GET | `/clusters/{c}/namespaces/{ns}/cronjobs` | `CronJobSummary[]` incl. recent jobs (user needs `run-job` or `logs` on at least one CronJob; list is filtered to allowed ones) |
 | POST | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/restart` | 202 `{ operationId }` (needs `restart`; not for CronJob) |
 | POST | `/clusters/{c}/namespaces/{ns}/cronjobs/{name}/run` | 202 `{ operationId, jobName }` (needs `run-job`); 409 `already_running` when `concurrencyPolicy: Forbid` and a job is active |
-| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync` | 202 `{ operationId }`. Syncs an Argo CD application that deploys to the namespace (404 otherwise) to its target revision, always without prune, dry run or a chosen revision; the user is named in the operation's info. Needs `sync` on **every** namespace the app deploys to (destination and resources) and a fresh Argo cache; an app with other cluster-scoped resources needs an admin (`app_scope`). 403 names the denying namespace in the audit event. 409 `already_running` when Argo CD has another operation running; 502 `argo_error` when Argo CD fails. Audited as `argo.sync` (started, then the outcome). |
+| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync` | 202 `{ operationId }`. Syncs an Argo CD application that deploys to the namespace (404 otherwise) to its target revision, always without prune, dry run or a chosen revision; the user is named in the operation's info. Needs `sync` on **every** namespace the app deploys to (destination and resources) and a fresh Argo cache; an app with other cluster-scoped resources needs an admin (`app_scope`), unless their kinds are in `settings.argoSyncClusterKinds`; the `argo.sync` details then name them (`clusterResources`). 403 names the denying namespace in the audit event. 409 `already_running` when Argo CD has another operation running; 502 `argo_error` when Argo CD fails. Audited as `argo.sync` (started, then the outcome). |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/status` | `ArgoAppStatus`: health and sync (with messages), `status.conditions` and the last operation with its per-resource results, read from Argo CD on each call. Same check as listing the namespace's apps (checked before the app is looked up, so 404 reveals nothing); 502 `argo_error`. |
-| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history` | `ArgoDeploy[]`: the last 10 deploys of `status.history`, newest first, each with its commit (author, message) when Argo CD can describe the revision (Git, single source). Same check as `status`. |
+| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history` | `ArgoDeploy[]`: the last 10 deploys of `status.history`, newest first, each with its commit (author, message) when Argo CD can describe the revision (Git, single source), `portalUser`/`portalAction` (`argo.sync` or `argo.rollback`) when the audit shows it was started through the portal (matched by the operation's `startedAt`; Argo CD's `initiatedBy` is then the token's account), and `rollbackBlocked`: `current`, `auto_sync`, `multi_source`, `source_changed` (the deploy's source differs from the app's current one but for `targetRevision`) or null. Same check as `status`. |
+| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | `ArgoRollbackPlan`: what rolling back to deploy `id` would do. Reads the manifests of the app's current source at the deploy's revision from Argo CD (`applications, get`) and places them with the cluster's discovery (as `tiphys:user`): a namespaced object without a namespace goes to the destination, a kind the cluster does not serve counts as cluster-scoped. Needs `rollback` on the app as it is now (a denial is audited); the plan's own decision is not audited. 409 `auto_sync_enabled`; 422 for a deploy not in the history, the current one, a multi-source app or a changed source; 502 `argo_error` / `cluster_error`. |
+| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | 202 `{ operationId }`. Rolls the app back to deploy `id`, like Rollback in Argo CD, always without prune or dry run. Allowed only when the plan's decision is (`rollback` on every namespace of the app and of the revision, a fresh Argo cache, `app_scope` for cluster-scoped resources of either). Argo CD's rollback request carries no info, so the user is named only in the audit: `argo.rollback` (started, with `historyId`, `revision`, `namespaces`, `clusterResources`; then the outcome with `operationStartedAt`). Same errors as the plan, plus 409 `already_running`. Progress on `/operations/{id}/stream` like a sync. The app is then OutOfSync with Git until the next sync. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/diff` | `ArgoDiff`: what a sync would change, from Argo CD's managed resources (normalized live vs predicted state): `changed`, `missing` (only in Git) or `extra` (only in the cluster; never pruned), each with a unified YAML diff without `status`, managed fields and server-set metadata; hooks left out; Secrets listed with `hidden: true` and no content. At most 200 resources and 2,000 lines per diff. It shows manifests, so it needs what a sync needs (`sync` on every namespace of the app) and is audited as `argo.diff` before Argo CD is asked. |
 | GET | `/operations/{id}/stream` | Server-Sent Events for restart / run / sync progress (see below). Only the operation's owner or an admin. |
 | GET | `/live?ns={cluster}/{namespace}&ns=...` | Server-Sent Events: what changes in 1–10 namespaces (see below). `422` for a bad or missing `ns`, `429 rate_limited` over 8 open streams per user. |
@@ -118,8 +120,23 @@ interface NamespaceApp {
   health: string; sync: string;       // 'Unknown' when Argo reports none
   lastSyncAt: string | null;          // status.operationState.finishedAt; null if never synced or a sync is running
   lastSyncPhase: 'Running' | 'Succeeded' | 'Failed' | 'Error' | 'Terminating' | null;
-  access: { sync: DecisionInfo };     // sync of the whole app: allowed only if allowed on every namespace it deploys to
-  syncNamespace: string;              // the namespace that decision is about (the one that denied, else the destination)
+  access: { sync: DecisionInfo; rollback: DecisionInfo }; // the whole app: allowed only if allowed on every namespace it deploys to; a rollback to a deploy is decided again with that deploy's resources (ArgoRollbackPlan)
+  syncNamespace: string;              // the namespace the sync decision is about (the one that denied, else the destination)
+  adminOnlyResources: string[];       // cluster-scoped resources ("Kind.group/name", core kinds "Kind/name"; other than its own Namespaces and allowed kinds) that leave the sync to admins; empty unless access.sync.reason is app_scope
+  autoSync: boolean;                  // spec.syncPolicy.automated: Argo CD refuses a rollback
+  multiSource: boolean;               // spec.sources: rolled back in Argo CD only
+}
+
+interface ArgoResourceRef { group: string; kind: string; namespace: string; name: string } // namespace '' when cluster-scoped
+
+interface ArgoRollbackPlan {
+  id: number; revision: string;       // the deploy
+  decision: DecisionInfo;             // rollback on what the app manages now plus what the revision deploys (a rollback never prunes)
+  decisionNamespace: string;          // the namespace the decision is about (the one that denied, else the destination)
+  adminOnlyResources: string[];       // like NamespaceApp.adminOnlyResources, for both; empty unless decision.reason is app_scope
+  added: ArgoResourceRef[];           // in the revision, not managed now (hooks included)
+  kept: ArgoResourceRef[];            // managed now, not in the revision: they stay
+  truncated: boolean;                 // more than 200 in either list
 }
 
 interface NamespaceSummary {
@@ -173,7 +190,7 @@ interface JobSummary {
 
 `GET /operations/{id}/stream` → `text/event-stream`, events with JSON `data`:
 
-- `event: progress` — restart: `{ desired, updated, ready, available }`; run-job: a `JobSummary`; sync: `{ phase, message, synced, failed, total }` (`phase` is `Pending` until Argo CD starts the operation, then its `operationState.phase`; counts are the sync result's resources).
+- `event: progress` — restart: `{ desired, updated, ready, available }`; run-job: a `JobSummary`; sync and rollback: `{ phase, message, synced, failed, total }` (`phase` is `Pending` until Argo CD starts the operation, then its `operationState.phase`; counts are the sync result's resources).
 - `event: done` — `{ outcome: 'succeeded' | 'failed' | 'timed_out', message: string }`. The server then closes the stream.
 
 ### Live changes (SSE)
@@ -366,6 +383,7 @@ interface SettingsView {
   retentionAuditDays: number; retentionRecordingsDays: number;
   rocket: { webhookUrl: string; channel: string; events: Record<'break_glass_started' | 'break_glass_requested' | 'request_created' | 'request_decided' | 'exec_in_prod' | 'admin_changes', boolean> };
   lokiRetentionInfo: string | null;   // informational only
+  argoSyncClusterKinds: string[];     // cluster-scoped kinds ("Kind.group", ≤50) that do not leave an app's sync to admins; core kinds, rbac/admissionregistration/apiextensions/apiregistration groups, StorageClass and PriorityClass are refused (422). Optional on PUT: left out, it is kept.
 }
 interface DecisionExplain extends DecisionInfo { cluster: string; namespace: string; workload: string | null; action: Action; evaluatedAt: string; userRole: Role; teams: string[]; matchedGrants: GrantView[] }
 ```

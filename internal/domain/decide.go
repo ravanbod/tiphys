@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -82,26 +83,57 @@ type ArgoApp struct {
 	LastSyncAt    time.Time
 	LastSyncPhase string
 	// ClusterResources are the cluster-scoped resources (no namespace) in
-	// status.resources, as "Kind/name", e.g. "ClusterRole/payments-reader".
-	ClusterResources []string
+	// status.resources.
+	ClusterResources []ClusterResource
+	// AutoSync is set when spec.syncPolicy.automated is: Argo CD then
+	// refuses a rollback (it would be synced back right away).
+	AutoSync bool
+	// MultiSource is set for apps with spec.sources.
+	MultiSource bool
 }
 
-// clusterScopedBeyond reports whether the app manages a cluster-scoped
-// resource other than the Namespace objects of the given namespaces.
-func (a ArgoApp) clusterScopedBeyond(pairs []ClusterNS) bool {
+// Including returns the app as it would be with these resources added (a
+// rollback deploys the resources of an earlier revision next to the ones it
+// manages now, since it never prunes): their namespaces and cluster-scoped
+// resources join the app's, so DecideApp covers both.
+func (a ArgoApp) Including(namespaces []string, clusterResources []ClusterResource) ArgoApp {
+	out := a
+	out.ResourceNamespaces = slices.Clone(a.ResourceNamespaces)
+	for _, ns := range namespaces {
+		if !slices.Contains(out.ResourceNamespaces, ns) {
+			out.ResourceNamespaces = append(out.ResourceNamespaces, ns)
+		}
+	}
+	sort.Strings(out.ResourceNamespaces)
+	out.ClusterResources = slices.Clone(a.ClusterResources)
+	for _, r := range clusterResources {
+		if !slices.Contains(out.ClusterResources, r) {
+			out.ClusterResources = append(out.ClusterResources, r)
+		}
+	}
+	return out
+}
+
+// ForeignClusterResources returns the app's cluster-scoped resources other
+// than the Namespace objects of the namespaces it deploys to. Those not of a
+// kind the settings allow leave syncing the app to admins
+// (Policy.AdminOnlyResources, ReasonAppScope).
+func (a ArgoApp) ForeignClusterResources() []ClusterResource {
+	pairs := a.Pairs()
+	var out []ClusterResource
 	for _, r := range a.ClusterResources {
 		own := false
 		for _, p := range pairs {
-			if r == "Namespace/"+p.Namespace {
+			if r.Group == "" && r.Kind == "Namespace" && r.Name == p.Namespace {
 				own = true
 				break
 			}
 		}
 		if !own {
-			return true
+			out = append(out, r)
 		}
 	}
-	return false
+	return out
 }
 
 // Pairs returns every (cluster, namespace) the app deploys to.
@@ -183,6 +215,9 @@ type Policy struct {
 	argo         ArgoSnapshot
 	argoMaxAge   time.Duration
 	defaultTZ    string
+	// syncClusterKinds are the cluster-scoped kinds ("Kind.group") that do
+	// not leave syncing an app to admins (Settings.ArgoSyncClusterKinds).
+	syncClusterKinds map[string]struct{}
 }
 
 // PolicyInput is the raw data a Policy is built from.
@@ -197,20 +232,26 @@ type PolicyInput struct {
 	Argo            ArgoSnapshot
 	ArgoMaxAge      time.Duration // zero = DefaultArgoMaxAge
 	DefaultTimezone string        // empty = DefaultTimezone
+	// SyncClusterKinds is Settings.ArgoSyncClusterKinds.
+	SyncClusterKinds []string
 }
 
 // NewPolicy indexes the input.
 func NewPolicy(in PolicyInput) *Policy {
 	p := &Policy{
-		grantsByUser: map[int64][]Grant{},
-		grantsByTeam: map[int64][]Grant{},
-		clusterEnv:   in.ClusterEnv,
-		namespaceEnv: in.NamespaceEnv,
-		projectEnv:   in.ProjectEnv,
-		protected:    map[string]struct{}{},
-		argo:         in.Argo,
-		argoMaxAge:   in.ArgoMaxAge,
-		defaultTZ:    in.DefaultTimezone,
+		grantsByUser:     map[int64][]Grant{},
+		grantsByTeam:     map[int64][]Grant{},
+		clusterEnv:       in.ClusterEnv,
+		namespaceEnv:     in.NamespaceEnv,
+		projectEnv:       in.ProjectEnv,
+		protected:        map[string]struct{}{},
+		argo:             in.Argo,
+		argoMaxAge:       in.ArgoMaxAge,
+		defaultTZ:        in.DefaultTimezone,
+		syncClusterKinds: map[string]struct{}{},
+	}
+	for _, k := range in.SyncClusterKinds {
+		p.syncClusterKinds[k] = struct{}{}
 	}
 	if p.argoMaxAge == 0 {
 		p.argoMaxAge = DefaultArgoMaxAge
@@ -309,7 +350,7 @@ func DecideApp(p *Policy, sub Subject, app ArgoApp, action Action, now time.Time
 		}
 		out.GrantIDs = append(out.GrantIDs, d.GrantIDs...)
 	}
-	if len(pairs) == 0 || (out.Reason != ReasonAdmin && app.clusterScopedBeyond(pairs)) {
+	if len(pairs) == 0 || (out.Reason != ReasonAdmin && len(p.AdminOnlyResources(app)) > 0) {
 		return Decision{Reason: ReasonAppScope, Environment: p.Environment(dest.Cluster, dest.Namespace)}, dest
 	}
 	return out, pairs[0]
