@@ -76,6 +76,7 @@ All decisions are made by one pure function in the portal, `Decide(user, target,
 - **Action**: `logs` (includes events and pod status), `exec`, `restart`, `run-job` on workloads; `sync` and `rollback` on a whole Argo CD application (see Whole-application decisions).
 - **Target**: cluster + namespace + optional workload (kind, name) + optional pod/container.
 - **Grant**: holder (team or user) + scope + actions + optional `expires_at`.
+- **Team managers**: an admin may name managers for a team (Keycloak users, members or not). A manager adds and removes the team's members, so the people they add receive the team's grants; only admins change the team itself, its grants and its managers. Every change is audited under the manager's name. A manager may also request access for the team; approval grants the team.
 - **Scope kinds**:
   - `argo_project`: every (cluster, namespace) that any Argo application in that project deploys to, on any cluster.
   - `namespace`: one namespace on one cluster.
@@ -106,10 +107,10 @@ Effective environment of a target, first match wins: namespace override → Argo
 
 ### Break-glass
 
-- A user with role `user` or `auditor` starts break-glass with a reason (≥ 20 characters) and a duration (default 60 minutes, at most the admin-set maximum).
+- A user with role `user` or `auditor` starts break-glass with a reason (≥ 20 characters) and a duration (default 60 minutes, at most the admin-set maximum), now or **scheduled** for a later start (at most 7 days ahead, e.g. tonight at 19:00 for a planned change). A scheduled one applies from its start; until then the user (or an admin) can cancel it. A user has one active or scheduled break-glass at a time.
 - The admin setting **break-glass mode** decides how it starts:
   - `self` (default): the user starts it, no approval.
-  - `approval`: the user sends a break-glass request instead; it starts when an admin approves it, from that moment, for the requested duration or one the admin sets (shorter or longer, at most the maximum). The admin can also reject it (with a note); the requester can cancel it. A request not decided within the admin-set expiry (default 60 minutes) expires. A user has at most one pending request and none while a break-glass is active. Requests send a Rocket.Chat alert; the decision is sent to the requester too.
+  - `approval`: the user sends a break-glass request instead; it starts when an admin approves it, from that moment or from the requested start if that is later, for the requested duration or one the admin sets (shorter or longer, at most the maximum). The admin can also reject it (with a note); the requester can cancel it. A request not decided within the admin-set expiry (default 60 minutes, counted from the requested start when that is later) expires. A user has at most one pending request and none while a break-glass is active or scheduled. Requests send a Rocket.Chat alert; the decision is sent to the requester too.
   - `off`: see below.
 - While active, it overrides **only** time windows and holidays, for all of that user's grants. It never grants a scope or action the user lacks.
 - Starting it sends an immediate Rocket.Chat alert and writes an audit event. Every action taken under it is tagged with its id.
@@ -347,6 +348,7 @@ users            (id, keycloak_sub UNIQUE NULL, username UNIQUE, display_name,
                   password_hash NULL)           -- local users only; never together with keycloak_sub
 teams            (id, name UNIQUE, description)
 team_members     (team_id, user_id, PRIMARY KEY (team_id, user_id))
+team_managers    (team_id, user_id, PRIMARY KEY (team_id, user_id))  -- may change the team's members
 
 clusters         (id, name UNIQUE,            -- as named in Argo CD
                   environment,                 -- cluster-level label
@@ -395,7 +397,7 @@ settings         (key PRIMARY KEY, value JSONB)
 **Rules**
 
 - Grant holder and scope fields are validated by CHECK constraints so that exactly the fields for the chosen kind are set.
-- Approving a request grants it in the same transaction: the actions are added to the requester's own unexpired grant on exactly the same scope when that grant ends no later than the approved access (the longest such grant; it then takes the new expiry), so the new actions never outlast what was approved; otherwise, or when the admin asks for a separate grant, a new grant is created. Team grants are never changed. The request form shows actions already held on the chosen scope as held and says which way approval will go; the admin sees the resulting grant before approving.
+- Approving a request grants it in the same transaction: the actions are added to the requester's own unexpired grant on exactly the same scope when that grant ends no later than the approved access (the longest such grant; it then takes the new expiry), so the new actions never outlast what was approved; otherwise, or when the admin asks for a separate grant, a new grant is created. A user's request never changes a team grant. A team manager may also request access for their team: approving it works the same way on the team's own grants (never the requester's), so every member gets it. The request form shows actions already held on the chosen scope as held and says which way approval will go; the admin sees the resulting grant before approving.
 - `audit_events` is **append-only** for the application's database role: grant it INSERT and SELECT only. Retention deletes run under a separate role used only by the retention job.
 - Expired grants are kept (the UI greys them out); a nightly job marks pending requests older than 7 days as `expired`.
 
@@ -472,6 +474,7 @@ settings         (key PRIMARY KEY, value JSONB)
 - [ ] A window 22:00–06:00 behaves correctly at 23:00 and 05:00.
 - [ ] A holiday for `prod` denies prod and not staging.
 - [ ] Active break-glass allows outside a window but still denies a scope with no grant.
+- [ ] A scheduled break-glass changes nothing before its start, overrides windows from it (a session open at the window's close continues), and never applies once cancelled.
 - [ ] Namespace environment override beats project override, which beats the cluster label.
 - [ ] With the Argo cache older than 15 minutes, project-scoped grants do not match.
 - [ ] `logs` stays open outside every time window and on holidays.

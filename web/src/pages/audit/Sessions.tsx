@@ -5,6 +5,7 @@ import type { ExecSessionView } from '../../api';
 import { BreakGlassMark, EnvBadge } from '../../components/Badges';
 import { Empty, ErrorBanner, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { Select } from '../../components/Select';
 import { PageHeader } from '../../components/PageHeader';
 import { TerminateSessionDialog } from '../../components/TerminateSessionDialog';
 import { useAuth } from '../../context/auth';
@@ -126,10 +127,7 @@ export function Sessions() {
           value={user}
           onChange={(e) => setF({ user: e.target.value })}
         />
-        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setF({ env: e.target.value })}>
-          <option value="">Any environment</option>
-          {envs.map((x) => <option key={x} value={x}>{x}</option>)}
-        </select>
+        <Select label="Environment" value={env} onChange={(v) => setF({ env: v })} options={[{ value: '', label: 'Any environment' }, ...envs.map((x) => ({ value: x, label: x }))]} />
         <label className="chk">
           <input type="checkbox" checked={bgOnly} onChange={(e) => setF({ bg: e.target.checked })} /> Break-glass only
         </label>

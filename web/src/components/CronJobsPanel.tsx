@@ -15,6 +15,7 @@ import { JobStatusChip } from './Badges';
 import { Bump } from './Bump';
 import { ErrorBanner, Loading } from './Feedback';
 import { RunCronDialog } from './OperationDialogs';
+import { breakGlassKey } from '../lib/breakGlass';
 
 /**
  * The namespace's CronJobs with Run now, and their recent jobs. With `only`,
@@ -23,7 +24,7 @@ import { RunCronDialog } from './OperationDialogs';
 export function CronJobsPanel({ cluster, namespace, flatTop, only }: { cluster: string; namespace: string; flatTop?: boolean; only?: string }) {
   const { me } = useAuth();
   const now = useNow(30000);
-  const list = useApi(() => api.cronJobs(cluster, namespace), [cluster, namespace, me.breakGlass?.id]);
+  const list = useApi(() => api.cronJobs(cluster, namespace), [cluster, namespace, breakGlassKey(me)]);
   const [run, setRun] = useState<CronJobSummary | null>(null);
   const [hl, setHl] = useState<string | null>(null);
   useLive({ cluster, namespace, ...(only ? { kind: 'CronJob', name: only } : {}) }, (changes) => {

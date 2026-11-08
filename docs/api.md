@@ -54,8 +54,9 @@ interface Me {
   displayName: string;
   role: Role;
   teams: { id: number; name: string }[];
+  managedTeams: { id: number; name: string }[]; // teams whose members the user may change (My teams); empty for local users
   csrfToken: string;
-  breakGlass: BreakGlass | null;     // active one, if any
+  breakGlass: BreakGlass | null;     // active or scheduled one, if any
   breakGlassRequest: BreakGlassRequest | null; // own pending request (mode approval), if any; the UI polls /me while it is set
   settings: { breakGlassMode: 'off' | 'self' | 'approval'; breakGlassDefaultMinutes: number; breakGlassMaxMinutes: number; execIdleTimeoutMinutes: number; execMaxSessionMinutes: number; clusterRegistration: boolean; debugEnabled: boolean; argoUrl: string /* Argo CD in the browser (ARGO_PUBLIC_URL), for app links */; localUsers: boolean /* LOCAL_USERS_ENABLED */ };
   argo: { fetchedAt: string | null; ageSeconds: number | null; stale: boolean };  // stale => project-scoped grants do not match
@@ -65,6 +66,7 @@ interface BreakGlass {
   id: number; userId: number; username: string; reason: string;
   startedAt: string; expiresAt: string; endedAt: string | null; endedBy: string | null;
   active: boolean;
+  scheduled: boolean; // not started yet (startedAt ahead), not cancelled
 }
 ```
 
@@ -253,16 +255,22 @@ Client → server control messages (exec only): `{ type: 'resize', cols: number,
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/my/access` | `MyAccess` (own grants and own requests; `user` and `auditor`) |
+| GET | `/my/teams` | `ManagedTeamView[]`: the teams the caller manages (`[]` for most users and for local users). `interface ManagedTeamView { id: number; name: string; description: string; members: { id: number; username: string; displayName: string }[]; grants: { id: number; scope: ScopeView; actions: Action[]; expiresAt: string \| null; expired: boolean }[]; requests: AccessRequest[] }` (the team's grants, what a new member receives, with no note or author; and the team's access requests by any of its managers, newest first). |
+| GET | `/my/teams/candidates` | `{ id, username, displayName }[]`: enabled Keycloak users a manager may add. 403 `forbidden_role` unless the caller manages a team. |
+| POST | `/my/teams/{id}/members` | `{ userId }` → 204. Manager of that team only (403 `forbidden_role` otherwise, also for an unknown team; admins may too). 422 for an unknown, disabled or local user (an admin adds local users). Adding a member again changes nothing. Audited as `admin.change` (`entity: team`, `operation: add_member`, `after: { userId, username }`) by the manager; admins are notified. |
+| DELETE | `/my/teams/{id}/members/{userId}` | → 204. Same rule; any member may be removed, also one an admin added. Audited as `remove_member` (`before`). Removing a non-member changes nothing. |
 | GET | `/access-requests` | Own requests for `user`; all (optionally `?status=pending`) for `admin`/`auditor`. |
-| POST | `/access-requests` | `user` or `auditor`. `CreateAccessRequest` → `AccessRequest`. `422` for a protected namespace or a protected cluster. |
-| POST | `/access-requests/{id}/approve` | admin. Body `{ note?: string, durationHours?: number \| null, actions?: Action[], separate?: boolean }` (override of the requested duration; `actions` replaces the requested ones, fewer or more, as long as they fit the scope — e.g. no `sync` on a `workloads` scope; the `access_request.decide` audit details carry `requestedActions` and `actions`). In the same transaction it adds the actions to the requester's own unexpired grant on exactly the same scope (workloads as a set) that ends no later than the approved access — the longest of them; that grant then takes the new expiry — or, when there is none or `separate` is true, creates a grant. `resultingGrantId` is that grant; the audit details carry `merged` and, when merged, the grant's `before`/`after` actions and expiry. Team grants are never changed. Returns `AccessRequest`. |
+| POST | `/access-requests` | `user` or `auditor`. `CreateAccessRequest` → `AccessRequest`. `422` for a protected namespace or a protected cluster. With `teamId` the request is for that team: 403 `forbidden_role` unless the caller manages it (local users never do); the audit details and notifications name the team. |
+| POST | `/access-requests/{id}/approve` | admin. Body `{ note?: string, durationHours?: number \| null, actions?: Action[], separate?: boolean }` (override of the requested duration; `actions` replaces the requested ones, fewer or more, as long as they fit the scope — e.g. no `sync` on a `workloads` scope; the `access_request.decide` audit details carry `requestedActions` and `actions`). In the same transaction it adds the actions to the requester's own unexpired grant on exactly the same scope (workloads as a set) that ends no later than the approved access — the longest of them; that grant then takes the new expiry — or, when there is none or `separate` is true, creates a grant. `resultingGrantId` is that grant; the audit details carry `merged` and, when merged, the grant's `before`/`after` actions and expiry. A user's request never changes a team grant. A team's request (`team` set) works the same on the **team's** grants: it adds to the team's own grant on the same scope or creates a team grant, never one of the requester's (audit details carry `teamId` and `team`). Returns `AccessRequest`. |
 | POST | `/access-requests/{id}/reject` | admin. Body `{ note?: string }` |
-| POST | `/break-glass` | role `user` or `auditor`. Body `{ reason: string /* ≥ 20 chars */, durationMinutes?: number }` → `BreakGlass` |
-| POST | `/break-glass/{id}/end` | owner or admin. |
+| POST | `/access-requests/batch` | `user` or `auditor`. Body `{ cluster: string; namespaces: string[]; actions: Action[]; durationHours?: number \| null; reason: string; teamId?: number }` → `AccessRequest[]` (201): one `namespace` request per namespace (duplicates dropped, 2–20), sharing a `batchId`, created in one transaction — all or, with 422 naming it (`namespaces` or `cluster`), none for a protected namespace or cluster or an invalid name. `teamId` as for a single request. Each request is audited as `access_request.create` (details carry `batchId`, `batchSize`); one notification announces the batch. |
+| POST | `/access-requests/batch/{batchId}/decide` | admin. Body `{ approve?: number[]; note?: string; durationHours?: number \| null; actions?: Action[]; separate?: boolean }` → `AccessRequest[]`: the requests in `approve` are approved like `/approve` with these options (each merges into its own same-scope grant), every other one is rejected; `note` goes on all. One transaction: 409 `conflict` naming a request that is no longer pending (nothing changes), 422 for an id outside the batch or actions that do not fit. Audited per request (`access_request.decide`, details carry `batchId`); one notification goes to the requester. `/approve` and `/reject` refuse a request of a batch with 409. |
+| POST | `/break-glass` | role `user` or `auditor`. Body `{ reason: string /* ≥ 20 chars */, durationMinutes?: number, startsAt?: string /* ISO; omitted: now */ }` → `BreakGlass`. With `startsAt` it is scheduled: it applies from then (up to a minute ahead or five minutes past counts as now; more than five minutes past or beyond 7 days → 422 on `startsAt`). `409` while the user has one active or scheduled (one at a time). Audited as `break_glass.start` with `startsAt` in the details. |
+| POST | `/break-glass/{id}/end` | owner or admin. Before a scheduled one starts it cancels it (`break_glass.end` details carry `beforeStart: true`). `409` once it is over. |
 | GET | `/break-glass` | admin/auditor: recent ones (`BreakGlass[]`, newest first). |
-| POST | `/break-glass/requests` | role `user` or `auditor`, mode `approval` (`403 break_glass_disabled` when off, `409` in mode `self`). Body as `POST /break-glass` → `201 BreakGlassRequest`. `409` with a pending request or an active break-glass. |
+| POST | `/break-glass/requests` | role `user` or `auditor`, mode `approval` (`403 break_glass_disabled` when off, `409` in mode `self`). Body as `POST /break-glass` (`startsAt`: the requested start, same limits) → `201 BreakGlassRequest`. `409` with a pending request or an active or scheduled break-glass. |
 | GET | `/break-glass/requests?status=` | admin/auditor: up to 200, newest first. A pending request past its expiry reads as `expired`. |
-| POST | `/break-glass/requests/{id}/approve` | admin. Body `{ note?: string, durationMinutes?: number /* omitted or 0: as requested; 1..max */ }`. Starts the break-glass now; `409` if no longer pending or the requester already has one active, `403 break_glass_disabled` when off. → `BreakGlassRequest` |
+| POST | `/break-glass/requests/{id}/approve` | admin. Body `{ note?: string, durationMinutes?: number /* omitted or 0: as requested; 1..max */ }`. Starts the break-glass now, or at the request's `startsAt` if that is later; `409` if no longer pending or the requester already has one active or scheduled, `403 break_glass_disabled` when off. → `BreakGlassRequest` |
 | POST | `/break-glass/requests/{id}/reject` | admin. Body `{ note?: string }` → `BreakGlassRequest` |
 | POST | `/break-glass/requests/{id}/cancel` | the requester only → `BreakGlassRequest` |
 
@@ -270,13 +278,14 @@ Client → server control messages (exec only): `{ type: 'resize', cols: number,
 interface BreakGlassRequest {
   id: number; userId: number; username: string; reason: string;
   durationMinutes: number;             // requested
+  startsAt: string | null;             // requested start; null: when approved
   status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
   decidedBy: string | null;            // 'system' when expired
   decidedAt: string | null; decisionNote: string | null;
   approvedMinutes: number | null;      // approved: the duration the admin approved
   breakGlassId: number | null;         // approved: the break-glass it started
   createdAt: string;
-  expiresAt: string;                   // when it expires if still pending (createdAt + the setting)
+  expiresAt: string;                   // when it expires if still pending (createdAt, or startsAt if later, + the setting)
 }
 
 interface MyAccess {
@@ -301,6 +310,7 @@ interface CreateAccessRequest {
   scope: ScopeView; actions: Action[];
   durationHours: number | null;   // null = permanent
   reason: string;
+  teamId?: number;                 // for a team the caller manages: approval grants the team
 }
 interface AccessRequest {
   id: number; userId: number; username: string; scope: ScopeView; actions: Action[];
@@ -308,6 +318,8 @@ interface AccessRequest {
   status: 'pending' | 'approved' | 'rejected' | 'expired';
   decidedBy: string | null; decidedAt: string | null; decisionNote: string | null;
   resultingGrantId: number | null; createdAt: string;
+  team: { id: number; name: string } | null; // a manager's request for their team (userId is the manager)
+  batchId: string | null; // requests filed together (POST /access-requests/batch); decided as a whole
 }
 ```
 
@@ -319,7 +331,7 @@ interface AccessRequest {
 | GET | `/sessions/{id}` | `ExecSessionView & { commands: { at: string; offsetSeconds: number; text: string }[] }` — command list is best-effort |
 | GET | `/sessions/{id}/recording` | asciicast v2 (`application/x-asciicast`), assembled from the segments. Writing this read is itself audited. |
 | POST | `/sessions/{id}/terminate` | admin. 204. Stream ends within 5 s. |
-| GET | `/audit?from=&to=&user=&eventType=&action=&result=&cluster=&namespace=&environment=&breakGlassId=&sessionId=&q=&limit=50&cursor=` | `{ items: AuditEvent[]; nextCursor: string \| null }` |
+| GET | `/audit?from=&to=&user=&eventType=&action=&result=&cluster=&namespace=&environment=&breakGlassId=&breakGlass=true&sessionId=&entity=&entityId=&q=&limit=50&cursor=` | `{ items: AuditEvent[]; nextCursor: string \| null }`. `breakGlass=true` keeps only events under some break-glass (`breakGlassId` names one). `entity`/`entityId` match an admin change's `details.entity`/`details.id` (e.g. `entity=team&entityId=12`, the Teams page's change history). |
 | GET | `/audit/export.csv?...same filters...` | CSV, max 10,000 rows |
 
 ```ts
@@ -354,7 +366,7 @@ interface UserView {
   keycloakBound: boolean; local: boolean /* portal password, never Keycloak */; lastLoginAt: string | null; teams: { id: number; name: string }[];
   activeSessions: number;
 }
-interface TeamView { id: number; name: string; description: string; members: { id: number; username: string; displayName: string }[] }
+interface TeamView { id: number; name: string; description: string; members: { id: number; username: string; displayName: string }[]; managers: { id: number; username: string; displayName: string }[] }
 interface GrantView {
   id: number; holder: { kind: 'team' | 'user'; id: number; name: string };
   scope: ScopeView; actions: Action[]; expiresAt: string | null; note: string; expired: boolean;
@@ -396,7 +408,9 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | GET / POST | `/admin/teams` | POST `{ name, description }` |
 | PATCH / DELETE | `/admin/teams/{id}` | PATCH `{ name?, description? }` |
 | PUT | `/admin/teams/{id}/members` | `{ userIds: number[] }` |
+| PUT | `/admin/teams/{id}/managers` | `{ userIds: number[] }` → 204. Replaces the team's managers (they need not be members); 422 for a local user. Audited as `set_managers`. |
 | GET / POST | `/admin/grants` | GET filters: `holderKind, holderId, scopeKind, cluster, argoProject, action, expiring=true, expired=true`. `GrantView.environment` is the namespace's environment for namespace/workloads grants, the scope's for environment grants, else null. |
+| POST | `/admin/grants/batch` | `GrantInput & { namespaces: string[] }` with `scope: { kind: 'namespace', cluster }` → `GrantView[]` (201): the same grant on each namespace (duplicates dropped, 2–50), one grant each, created in one transaction — all or, with 422 `namespaces` naming it, none for a protected or invalid namespace. Existing grants are left alone (like `POST /admin/grants`). Each is audited as `admin.change` (`entity: grant`, `operation: create`, `id`, details `batchId`, `batchSize`); one notification. |
 | GET | `/admin/grants/covering` | `?cluster=&namespace=&kind=&name=` → `GrantView[]`: grants whose scope reaches the namespace or workload (namespace, Argo project, cluster, environment, workloads grants), expired ones included. Without `kind`/`name` a workloads grant in the namespace counts. 422 without cluster/namespace. |
 | PUT / DELETE | `/admin/grants/{id}` | PUT takes `GrantInput` |
 | POST | `/admin/access-check` | `{ userId, cluster, namespace, workload?: {kind,name}, action, at?: string }` → `DecisionExplain` (the "access checker") |
@@ -418,4 +432,4 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | POST | `/admin/argo/refresh` | refresh now |
 | GET / PUT | `/admin/settings` | `SettingsView` |
 | POST | `/admin/settings/rocket/test` | sends a test message |
-| GET | `/admin/overview` | `{ activeExecSessions, openLogStreams, pendingRequests, pendingBreakGlassRequests, activeBreakGlasses, clustersUnreachable }` for badges |
+| GET | `/admin/overview` | `{ activeExecSessions, openLogStreams, pendingRequests, pendingBreakGlassRequests, activeBreakGlasses, clustersUnreachable }` for badges (`pendingRequests` counts a batch once) |

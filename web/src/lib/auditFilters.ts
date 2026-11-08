@@ -24,7 +24,7 @@ export interface AuditUiFilters {
   cluster: string;
   namespace: string;
   sessionId: string;
-  /** Client-side only: the API supports breakGlassId=<id> but not "any". */
+  /** Only events under some break-glass (API `breakGlass=true`). */
   breakGlassOnly: boolean;
   q: string;
 }
@@ -91,6 +91,7 @@ export function toApiFilters(f: AuditUiFilters, now: number, extra: { limit?: nu
   set('namespace', f.namespace);
   set('sessionId', f.sessionId);
   set('q', f.q);
+  if (f.breakGlassOnly) out.breakGlass = true;
   if (extra.limit) out.limit = extra.limit;
   if (extra.cursor) out.cursor = extra.cursor;
   return out;
@@ -101,11 +102,9 @@ export function moreFilterCount(f: AuditUiFilters): number {
   return [f.eventType, f.cluster, f.namespace, f.sessionId].filter((v) => v.trim()).length;
 }
 
-/** Stable key that changes only when a server-side filter changes (break-glass-only is client side). */
+/** Stable key that changes when a filter changes (all of them are applied by the server). */
 export function serverFilterKey(f: AuditUiFilters): string {
-  const { breakGlassOnly: _bg, ...rest } = f;
-  void _bg;
-  return JSON.stringify(rest);
+  return JSON.stringify(f);
 }
 
 export function isDefaultFilters(f: AuditUiFilters): boolean {

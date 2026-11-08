@@ -1,6 +1,6 @@
 import type { AccessMap, Action, DecisionInfo, GrantView, WorkloadAction, WorkloadKind } from '../api/types';
 import { zonedParts, zonedToInstant } from '../lib/time';
-import { DAY, HOUR, getDb } from './db';
+import { DAY, HOUR, bgAt, getDb } from './db';
 import type { MockUser } from './db';
 
 export const ACTIONS: Action[] = ['logs', 'exec', 'restart', 'run-job', 'sync', 'rollback'];
@@ -80,7 +80,7 @@ export function decide(u: MockUser, cluster: string, ns: string, kind: WorkloadK
   const expiries = usable.map((x) => (x.g.expiresAt ? Date.parse(x.g.expiresAt) : Infinity));
   const grantClose = Math.min(...expiries);
   const closed = closedBy(cluster, ns, action);
-  const bg = d.breakGlasses.find((b) => b.userId === u.id && b.active && Date.parse(b.expiresAt) > now);
+  const bg = d.breakGlasses.find((b) => b.userId === u.id && bgAt(b, now).active);
   if (closed) {
     if (bg) {
       const close = Math.min(grantClose, Date.parse(bg.expiresAt));

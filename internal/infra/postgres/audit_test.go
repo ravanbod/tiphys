@@ -104,6 +104,8 @@ func TestAuditList(t *testing.T) {
 	check("namespace", application.AuditFilter{Namespace: "other"}, denied)
 	check("environment", application.AuditFilter{Environment: "prod"}, exec, logs)
 	check("break-glass", application.AuditFilter{BreakGlassID: 9}, exec)
+	check("any break-glass", application.AuditFilter{BreakGlass: true}, exec)
+	check("any break-glass with limit 1", application.AuditFilter{BreakGlass: true, Environment: "prod", Limit: 1}, exec)
 	check("session", application.AuditFilter{SessionID: "s-1"}, exec)
 	check("combined", application.AuditFilter{Username: "alice", Cluster: "c1"}, logs)
 	check("none", application.AuditFilter{Cluster: "nope"})
@@ -121,6 +123,31 @@ func TestAuditList(t *testing.T) {
 	check("before id", application.AuditFilter{BeforeID: ids[exec]}, logs)
 	check("limit", application.AuditFilter{Limit: 2}, login, denied)
 	check("page 2", application.AuditFilter{Limit: 2, BeforeID: ids[denied]}, exec, logs)
+
+	// Admin changes by details.entity and details.id.
+	var changes []int64
+	for _, d := range []map[string]any{
+		{"entity": "team", "operation": "update", "id": 12},
+		{"entity": "team", "operation": "create", "id": 3},
+		{"entity": "grant", "operation": "create", "id": 12},
+	} {
+		got, err := f.r.Audit.Insert(f.ctx, domain.AuditEvent{Username: "root", EventType: domain.EventAdminChange, Result: domain.ResultSucceeded, Details: d})
+		must(t, err)
+		changes = append(changes, got.ID)
+	}
+	for name, c := range map[string]struct {
+		flt  application.AuditFilter
+		want []int64
+	}{
+		"entity and id": {application.AuditFilter{Entity: "team", EntityID: "12"}, []int64{changes[0]}},
+		"entity":        {application.AuditFilter{Entity: "team"}, []int64{changes[1], changes[0]}},
+		"id":            {application.AuditFilter{EntityID: "12"}, []int64{changes[2], changes[0]}},
+		"no such id":    {application.AuditFilter{Entity: "team", EntityID: "1"}, nil},
+	} {
+		if got := list(c.flt); !slices.Equal(got, c.want) {
+			t.Fatalf("%s: got %v want %v", name, got, c.want)
+		}
+	}
 }
 
 func TestAuditPagination(t *testing.T) {
@@ -266,7 +293,7 @@ func TestMigrate(t *testing.T) {
 
 	var version int64
 	must(t, f.owner.QueryRow(f.ctx, `SELECT max(version_id) FROM goose_db_version`).Scan(&version))
-	if version != 8 {
+	if version != 12 {
 		t.Fatalf("version %d", version)
 	}
 	// The app role keeps working after a second migration run.

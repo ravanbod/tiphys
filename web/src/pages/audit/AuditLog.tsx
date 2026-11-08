@@ -6,13 +6,16 @@ import { AuditDrawer, AuditSheet } from '../../components/AuditEventPanel';
 import { BreakGlassMark, EnvBadge, ResultChip } from '../../components/Badges';
 import { Empty, ErrorBanner, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { ComboBox } from '../../components/ComboBox';
+import { Select } from '../../components/Select';
+import type { SelectOption } from '../../components/Select';
 import { PageHeader } from '../../components/PageHeader';
 import { useApi } from '../../hooks/useApi';
 import { useMedia } from '../../hooks/useMedia';
 import {
   RANGE_OPTIONS, filtersFromParams, filtersToParams, isDefaultFilters, moreFilterCount, serverFilterKey, toApiFilters,
 } from '../../lib/auditFilters';
-import type { AuditUiFilters, RangeKey } from '../../lib/auditFilters';
+import type { AuditUiFilters } from '../../lib/auditFilters';
 import { KNOWN_EVENT_TYPES, eventTitle, reasonText, targetFull, targetLine } from '../../lib/auditLabels';
 import { fmtDay, fmtTime } from '../../lib/time';
 import '../../styles/auditpages.css';
@@ -85,15 +88,18 @@ function useAuditPages(filters: AuditUiFilters) {
 
 // ---- small inputs
 
-/** Text input that commits to the URL after a short pause (or on blur / Enter). */
+/**
+ * Text input that commits to the URL after a short pause (or on blur / Enter).
+ * With suggestions it is a free-text ComboBox, so they show in the page's font.
+ */
 function TextFilter({
-  value, onCommit, label, placeholder, list, className = 'input', style, type = 'text',
+  value, onCommit, label, placeholder, suggestions, className = 'input', style, type = 'text',
 }: {
   value: string;
   onCommit: (v: string) => void;
   label: string;
   placeholder?: string;
-  list?: string;
+  suggestions?: string[];
   className?: string;
   style?: React.CSSProperties;
   type?: string;
@@ -116,23 +122,28 @@ function TextFilter({
     }, 350);
     return () => window.clearTimeout(t);
   }, [local]);
-  const flush = () => {
-    if (local !== committed.current) {
-      committed.current = local;
-      cb.current(local);
+  const flush = (v = local) => {
+    if (v !== committed.current) {
+      committed.current = v;
+      cb.current(v);
     }
   };
+  if (suggestions) {
+    return (
+      <ComboBox free small label={label} placeholder={placeholder} value={local} onChange={setLocal} onCommit={flush}
+        inputStyle={style} options={suggestions.map((x) => ({ value: x }))} />
+    );
+  }
   return (
     <input
       className={className}
       style={style}
       type={type}
-      list={list}
       aria-label={label}
       placeholder={placeholder}
       value={local}
       onChange={(e) => setLocal(e.target.value)}
-      onBlur={flush}
+      onBlur={() => flush()}
       onKeyDown={(e) => {
         if (e.key === 'Enter') flush();
       }}
@@ -155,26 +166,10 @@ interface Suggest {
   envs: string[];
 }
 
-function Sel({
-  label, value, onChange, children, className = 'sel',
-}: { label: string; value: string; onChange: (v: string) => void; children: React.ReactNode; className?: string }) {
-  return (
-    <select className={className} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}>
-      {children}
-    </select>
-  );
-}
-
-function EnvOptions({ envs, current }: { envs: string[]; current: string }) {
+/** Environment filter options: the known ones and the current one, after "Any environment". */
+function envOptions(envs: string[], current: string): SelectOption<string>[] {
   const all = current && !envs.includes(current) ? [...envs, current] : envs;
-  return (
-    <>
-      <option value="">Any environment</option>
-      {all.map((e) => (
-        <option key={e} value={e}>{e}</option>
-      ))}
-    </>
-  );
+  return [{ value: '', label: 'Any environment' }, ...all.map((e) => ({ value: e, label: e }))];
 }
 
 function RangeInputs({ f, set, tall }: { f: AuditUiFilters; set: (p: Partial<AuditUiFilters>) => void; tall?: boolean }) {
@@ -195,11 +190,11 @@ function MoreFields({ f, set, suggest, tall }: { f: AuditUiFilters; set: (p: Par
     <>
       <label>
         Event type
-        <TextFilter label="Event type" list="au-eventtypes" placeholder="e.g. exec.start" value={f.eventType} onCommit={(v) => set({ eventType: v })} style={st} />
+        <TextFilter label="Event type" suggestions={KNOWN_EVENT_TYPES} placeholder="e.g. exec.start" value={f.eventType} onCommit={(v) => set({ eventType: v })} style={st} />
       </label>
       <label>
         Cluster
-        <TextFilter label="Cluster" list="au-clusters" placeholder="Any cluster" value={f.cluster} onCommit={(v) => set({ cluster: v })} style={st} />
+        <TextFilter label="Cluster" suggestions={suggest.clusters} placeholder="Any cluster" value={f.cluster} onCommit={(v) => set({ cluster: v })} style={st} />
       </label>
       <label>
         Namespace
@@ -209,12 +204,6 @@ function MoreFields({ f, set, suggest, tall }: { f: AuditUiFilters; set: (p: Par
         Session id
         <TextFilter label="Session id" placeholder="Any session" value={f.sessionId} onCommit={(v) => set({ sessionId: v })} style={st} />
       </label>
-      <datalist id="au-eventtypes">
-        {KNOWN_EVENT_TYPES.map((t) => <option key={t} value={t} />)}
-      </datalist>
-      <datalist id="au-clusters">
-        {suggest.clusters.map((c) => <option key={c} value={c} />)}
-      </datalist>
     </>
   );
 }
@@ -328,10 +317,7 @@ export function AuditLog() {
     };
   }, [users.data, clusters.data]);
 
-  const visible = useMemo(
-    () => (filters.breakGlassOnly ? pages.items.filter((e) => e.breakGlassId !== null) : pages.items),
-    [pages.items, filters.breakGlassOnly],
-  );
+  const visible = pages.items;
 
   // Close the detail if the selected event disappears from the list (filters changed).
   useEffect(() => {
@@ -352,7 +338,7 @@ export function AuditLog() {
       style={phone ? { height: 36 } : undefined}
       href={csvHref}
       download
-      title={filters.breakGlassOnly ? 'Exports every event in the filters; "Break-glass only" is applied in this view only.' : 'Up to 10,000 rows'}
+      title="Up to 10,000 rows"
     >
       <Icon name="down" />{phone ? 'CSV' : 'Export CSV'}
     </a>
@@ -365,14 +351,7 @@ export function AuditLog() {
   ) : visible.length === 0 ? (
     <div className="card">
       <Empty>
-        {pages.items.length > 0 && filters.breakGlassOnly
-          ? 'No break-glass events in the loaded results.'
-          : 'No events match these filters.'}
-        {pages.next && (
-          <div style={{ marginTop: 10 }}>
-            <button type="button" className="btn" onClick={pages.loadMore} disabled={pages.loadingMore}>Load more</button>
-          </div>
-        )}
+        No events match these filters.
         {!isDefault && (
           <div style={{ marginTop: 10 }}>
             <button type="button" className="btn ghost sm" onClick={() => setParams({}, { replace: true })}>Reset filters</button>
@@ -396,11 +375,6 @@ export function AuditLog() {
           {pages.loadingMore ? 'Loading…' : 'Load more'}
         </button>
       )}
-      {filters.breakGlassOnly && pages.next && (
-        <span className="muted" style={{ fontSize: 12 }}>
-          &ldquo;Break-glass only&rdquo; filters the events loaded so far; load more to look further back.
-        </span>
-      )}
     </div>
   );
 
@@ -414,16 +388,12 @@ export function AuditLog() {
         <div className="col" style={{ gap: 10 }}>
           <SearchBox tall value={filters.q} onCommit={(v) => set({ q: v })} />
           <div className="au-chips" role="group" aria-label="Filters">
-            <Sel className="au-chip on" label="Time range" value={filters.range} onChange={(v) => set({ range: v as RangeKey })}>
-              {RANGE_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.short}</option>)}
-            </Sel>
-            <Sel className={`au-chip${filters.environment ? ' on' : ''}`} label="Environment" value={filters.environment} onChange={(v) => set({ environment: v })}>
-              <EnvOptions envs={suggest.envs} current={filters.environment} />
-            </Sel>
-            <Sel className={`au-chip${filters.result ? ' on' : ''}`} label="Result" value={filters.result} onChange={(v) => set({ result: v })}>
-              <option value="">Result</option>
-              {RESULTS.map((r) => <option key={r} value={r}>{r}</option>)}
-            </Sel>
+            <Select className="au-chip on" label="Time range" value={filters.range} onChange={(v) => set({ range: v })}
+              options={RANGE_OPTIONS.map((r) => ({ value: r.value, label: r.short }))} />
+            <Select className={`au-chip${filters.environment ? ' on' : ''}`} label="Environment" value={filters.environment} onChange={(v) => set({ environment: v })}
+              options={envOptions(suggest.envs, filters.environment)} />
+            <Select className={`au-chip${filters.result ? ' on' : ''}`} label="Result" value={filters.result} onChange={(v) => set({ result: v })}
+              options={[{ value: '', label: 'Result' }, ...RESULTS.map((r) => ({ value: r, label: r }))]} />
             <button type="button" className={`au-chip${filters.breakGlassOnly ? ' on' : ''}`} aria-pressed={filters.breakGlassOnly} onClick={() => set({ breakGlassOnly: !filters.breakGlassOnly })}>
               Break-glass
             </button>
@@ -436,14 +406,12 @@ export function AuditLog() {
             <div className="col au-more" style={{ alignItems: 'stretch' }}>
               <label>
                 User
-                <TextFilter label="User" list="au-users" placeholder="Any user" value={filters.user} onCommit={(v) => set({ user: v })} style={{ height: 44 }} />
+                <TextFilter label="User" suggestions={suggest.users} placeholder="Any user" value={filters.user} onCommit={(v) => set({ user: v })} style={{ height: 44 }} />
               </label>
               <label>
                 Action
-                <Sel className="sel" label="Action" value={filters.action} onChange={(v) => set({ action: v })}>
-                  <option value="">Any action</option>
-                  {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-                </Sel>
+                <Select label="Action" style={{ height: 44, width: '100%' }} value={filters.action} onChange={(v) => set({ action: v })}
+                  options={[{ value: '', label: 'Any action' }, ...ACTIONS.map((a) => ({ value: a, label: a }))]} />
               </label>
               <MoreFields f={filters} set={set} suggest={suggest} tall />
             </div>
@@ -452,22 +420,13 @@ export function AuditLog() {
       ) : (
         <div className="col" style={{ gap: 10 }}>
           <div className="au-filters" role="group" aria-label="Filters">
-            <Sel label="Time range" value={filters.range} onChange={(v) => set({ range: v as RangeKey })}>
-              {RANGE_OPTIONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </Sel>
+            <Select label="Time range" value={filters.range} onChange={(v) => set({ range: v })} options={RANGE_OPTIONS.map((r) => ({ value: r.value, label: r.label }))} />
             <RangeInputs f={filters} set={set} />
-            <TextFilter label="User" list="au-users" placeholder="Any user" value={filters.user} onCommit={(v) => set({ user: v })} style={{ width: 150 }} />
-            <Sel label="Action" value={filters.action} onChange={(v) => set({ action: v })}>
-              <option value="">Any action</option>
-              {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-            </Sel>
-            <Sel label="Environment" value={filters.environment} onChange={(v) => set({ environment: v })}>
-              <EnvOptions envs={suggest.envs} current={filters.environment} />
-            </Sel>
-            <Sel label="Result" value={filters.result} onChange={(v) => set({ result: v })}>
-              <option value="">Any result</option>
-              {RESULTS.map((r) => <option key={r} value={r}>{r.charAt(0).toUpperCase() + r.slice(1)}</option>)}
-            </Sel>
+            <TextFilter label="User" suggestions={suggest.users} placeholder="Any user" value={filters.user} onCommit={(v) => set({ user: v })} style={{ width: 150 }} />
+            <Select label="Action" value={filters.action} onChange={(v) => set({ action: v })} options={[{ value: '', label: 'Any action' }, ...ACTIONS.map((a) => ({ value: a, label: a }))]} />
+            <Select label="Environment" value={filters.environment} onChange={(v) => set({ environment: v })} options={envOptions(suggest.envs, filters.environment)} />
+            <Select label="Result" value={filters.result} onChange={(v) => set({ result: v })}
+              options={[{ value: '', label: 'Any result' }, ...RESULTS.map((r) => ({ value: r, label: r.charAt(0).toUpperCase() + r.slice(1) }))]} />
             <label className="chk">
               <input type="checkbox" checked={filters.breakGlassOnly} onChange={(e) => set({ breakGlassOnly: e.target.checked })} /> Break-glass only
             </label>
@@ -486,9 +445,6 @@ export function AuditLog() {
           )}
         </div>
       )}
-      <datalist id="au-users">
-        {suggest.users.map((u) => <option key={u} value={u} />)}
-      </datalist>
 
       {phone ? (
         <>

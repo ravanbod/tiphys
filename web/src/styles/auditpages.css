@@ -21,7 +21,7 @@
 .au-chips>*{flex:none}
 .au-chip{height:32px;padding:0 12px;border:1px solid var(--ln);background:var(--sf);border-radius:16px;font:500 12.5px 'IBM Plex Sans',sans-serif;color:var(--tx);cursor:pointer;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
 .au-chip.on{background:var(--acbg);color:var(--ac);border-color:transparent}
-select.au-chip{padding:0 6px}
+.au-chip.sel-btn{padding:0 28px 0 12px}
 .au-card{display:block;width:100%;padding:12px;text-align:left;color:var(--tx);font:inherit;cursor:pointer}
 .au-card.sel{border-color:var(--ac)}
 .au-sheet{position:fixed;inset:0;z-index:100;background:var(--bg);display:flex;flex-direction:column;color:var(--tx)}

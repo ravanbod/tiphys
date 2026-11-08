@@ -9,6 +9,7 @@ import { Avatar } from '../../components/Badges';
 import { Dialog } from '../../components/Dialog';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { Select } from '../../components/Select';
 import { PageHeader } from '../../components/PageHeader';
 import { Seg } from '../../components/Seg';
 import { useAuth } from '../../context/auth';
@@ -566,13 +567,8 @@ function AddToTeamDialog({
         ) : (
           <label className="f">
             Team
-            <select className="sel" style={{ height: 30 }} value={teamId} onChange={(e) => setTeamId(Number(e.target.value))} data-autofocus>
-              {available.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.members.length} members)
-                </option>
-              ))}
-            </select>
+            <Select label="Team" autoFocus style={{ height: 30, width: '100%' }} value={teamId} onChange={setTeamId}
+              options={available.map((t) => ({ value: t.id, label: t.name, hint: `${t.members.length} members` }))} />
           </label>
         )}
         <AdminErrorBanner error={m.error} />

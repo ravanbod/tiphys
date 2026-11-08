@@ -116,8 +116,12 @@ func (h *Handler) Me(c *gin.Context) {
 		teams = append(teams, idName{ID: id, Name: snap.Teams[id].Name})
 	}
 	sort.Slice(teams, func(i, j int) bool { return teams[i].Name < teams[j].Name })
+	managed := []idName{}
+	for _, t := range h.svc.Admin.ManagedTeams(p) {
+		managed = append(managed, idName{ID: t.Team.ID, Name: t.Team.Name})
+	}
 	var bg *breakGlassDTO
-	if b := h.svc.BreakGlass.Active(p.User.ID); b != nil && b.ActiveAt(now) {
+	if b := h.svc.BreakGlass.Active(p.User.ID); b.Current(now) {
 		d := toBreakGlass(*b, now)
 		bg = &d
 	}
@@ -138,7 +142,7 @@ func (h *Handler) Me(c *gin.Context) {
 	argo.AppCount, argo.ProjectCount, argo.LastError = 0, 0, nil
 	c.JSON(http.StatusOK, meDTO{
 		ID: p.User.ID, Username: p.User.Username, DisplayName: p.User.DisplayName, Role: p.User.Role, Teams: teams,
-		CSRFToken: p.CSRFToken, BreakGlass: bg, BreakGlassRequest: bgReq, Argo: argo,
+		ManagedTeams: managed, CSRFToken: p.CSRFToken, BreakGlass: bg, BreakGlassRequest: bgReq, Argo: argo,
 		Settings: meSettingsDTO{BreakGlassMode: st.BreakGlassMode, BreakGlassDefaultMinutes: st.BreakGlassDefaultMin, BreakGlassMaxMinutes: st.BreakGlassMaxMinutes,
 			ExecIdleTimeoutMinutes: st.ExecIdleTimeoutMinutes, ExecMaxSessionMinutes: st.ExecMaxSessionMinutes,
 			ClusterRegistration: h.opts.ClusterRegistrationFromUI, DebugEnabled: h.opts.DebugEnabled, ArgoURL: h.opts.ArgoPublicURL,
@@ -586,11 +590,107 @@ func (h *Handler) MyAccess(c *gin.Context) {
 		rd[i] = toRequest(r)
 	}
 	var bg *breakGlassDTO
-	if b := h.svc.BreakGlass.Active(p.User.ID); b != nil && b.ActiveAt(now) {
+	if b := h.svc.BreakGlass.Active(p.User.ID); b.Current(now) {
 		d := toBreakGlass(*b, now)
 		bg = &d
 	}
 	c.JSON(http.StatusOK, gin.H{"grants": grants, "teams": teams, "breakGlass": bg, "requests": rd})
+}
+
+// ---- my teams (team managers) ----
+
+type managedTeamDTO struct {
+	ID          int64          `json:"id"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Members     []memberDTO    `json:"members"`
+	Grants      []teamGrantDTO `json:"grants"`
+	// Requests are the team's access requests, by any of its managers.
+	Requests []accessRequestDTO `json:"requests"`
+}
+
+// teamGrantDTO is a team grant as its manager sees it: what a new member
+// receives (no note or author).
+type teamGrantDTO struct {
+	ID        int64    `json:"id"`
+	Scope     scopeDTO `json:"scope"`
+	Actions   []string `json:"actions"`
+	ExpiresAt *string  `json:"expiresAt"`
+	Expired   bool     `json:"expired"`
+}
+
+func (h *Handler) MyTeams(c *gin.Context) {
+	p := principal(c)
+	snap := h.svc.Policy.Current()
+	now := time.Now()
+	out := []managedTeamDTO{}
+	for _, mt := range h.svc.Admin.ManagedTeams(p) {
+		reqs, err := h.svc.Requests.ForTeam(c.Request.Context(), p, mt.Team.ID)
+		if err != nil {
+			h.writeError(c, err)
+			return
+		}
+		rd := make([]accessRequestDTO, len(reqs))
+		for i, r := range reqs {
+			rd[i] = toRequest(r)
+		}
+		grants := []teamGrantDTO{}
+		for _, g := range mt.Grants {
+			grants = append(grants, teamGrantDTO{ID: g.ID, Scope: toScope(g.Scope), Actions: actionStrings(g.Actions),
+				ExpiresAt: timeStr(g.ExpiresAt), Expired: g.Expired(now)})
+		}
+		sort.Slice(grants, func(i, j int) bool { return grants[i].ID < grants[j].ID })
+		out = append(out, managedTeamDTO{ID: mt.Team.ID, Name: mt.Team.Name, Description: mt.Team.Description,
+			Members: memberViews(snap, mt.Team.MemberIDs), Grants: grants, Requests: rd})
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) MyTeamCandidates(c *gin.Context) {
+	users, err := h.svc.Admin.TeamCandidates(principal(c))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	out := make([]memberDTO, len(users))
+	for i, u := range users {
+		out[i] = memberDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) AddMyTeamMember(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		UserID int64 `json:"userId"`
+	}
+	if !bindJSON(h, c, &in) {
+		return
+	}
+	if err := h.svc.Admin.AddTeamMember(c.Request.Context(), principal(c), id, in.UserID); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) RemoveMyTeamMember(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	userID, ok := pathID(c, "userId")
+	if !ok {
+		return
+	}
+	if err := h.svc.Admin.RemoveTeamMember(c.Request.Context(), principal(c), id, userID); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // accessGrantDTO is a grant as "Who has access" shows it to developers: no
@@ -662,13 +762,15 @@ func (h *Handler) CreateRequest(c *gin.Context) {
 		Actions       []string `json:"actions"`
 		DurationHours *int     `json:"durationHours"`
 		Reason        string   `json:"reason"`
+		TeamID        int64    `json:"teamId"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		h.writeError(c, application.Invalid("body", "invalid JSON body"))
 		return
 	}
 	r, err := h.svc.Requests.Create(c.Request.Context(), principal(c), application.CreateRequest{
-		Scope: in.Scope.toDomain(), Actions: parseActions(in.Actions), DurationHours: in.DurationHours, Reason: in.Reason})
+		Scope: in.Scope.toDomain(), Actions: parseActions(in.Actions), DurationHours: in.DurationHours, Reason: in.Reason,
+		TeamID: in.TeamID})
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -690,35 +792,78 @@ func (h *Handler) ApproveRequest(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var in struct {
-		Note          string `json:"note"`
-		DurationHours *int   `json:"durationHours"`
-	}
 	raw := map[string]any{}
 	_ = c.ShouldBindJSON(&raw)
-	var actions []domain.Action
-	if l, ok := raw["actions"].([]any); ok {
-		for _, v := range l {
-			if str, ok := v.(string); ok {
-				actions = append(actions, domain.Action(str))
-			}
-		}
-	}
-	if v, ok := raw["note"].(string); ok {
-		in.Note = v
-	}
-	_, override := raw["durationHours"]
-	if f, ok := raw["durationHours"].(float64); ok {
-		n := int(f)
-		in.DurationHours = &n
-	}
-	separate, _ := raw["separate"].(bool)
-	r, err := h.svc.Requests.Approve(c.Request.Context(), principal(c), id, in.Note, override, in.DurationHours, actions, separate)
+	r, err := h.svc.Requests.Approve(c.Request.Context(), principal(c), id, approveOptions(raw))
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, toRequest(r))
+}
+
+// approveOptions reads an approval body: note, actions, separate and
+// durationHours, where a present null means permanent and an absent one
+// keeps the requested duration.
+func approveOptions(raw map[string]any) application.ApproveOptions {
+	var o application.ApproveOptions
+	if l, ok := raw["actions"].([]any); ok {
+		for _, v := range l {
+			if str, ok := v.(string); ok {
+				o.Actions = append(o.Actions, domain.Action(str))
+			}
+		}
+	}
+	o.Note, _ = raw["note"].(string)
+	_, o.OverrideDuration = raw["durationHours"]
+	if f, ok := raw["durationHours"].(float64); ok {
+		n := int(f)
+		o.Duration = &n
+	}
+	o.Separate, _ = raw["separate"].(bool)
+	return o
+}
+
+func (h *Handler) CreateRequestBatch(c *gin.Context) {
+	var in struct {
+		Cluster       string   `json:"cluster"`
+		Namespaces    []string `json:"namespaces"`
+		Actions       []string `json:"actions"`
+		DurationHours *int     `json:"durationHours"`
+		Reason        string   `json:"reason"`
+		TeamID        int64    `json:"teamId"`
+	}
+	if err := c.ShouldBindJSON(&in); err != nil {
+		h.writeError(c, application.Invalid("body", "invalid JSON body"))
+		return
+	}
+	rs, err := h.svc.Requests.CreateBatch(c.Request.Context(), principal(c), application.CreateBatchRequest{
+		Cluster: in.Cluster, Namespaces: in.Namespaces, Actions: parseActions(in.Actions), DurationHours: in.DurationHours,
+		Reason: in.Reason, TeamID: in.TeamID})
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, toRequests(rs))
+}
+
+func (h *Handler) DecideRequestBatch(c *gin.Context) {
+	raw := map[string]any{}
+	_ = c.ShouldBindJSON(&raw)
+	d := application.BatchDecision{ApproveOptions: approveOptions(raw)}
+	if l, ok := raw["approve"].([]any); ok {
+		for _, v := range l {
+			if f, ok := v.(float64); ok {
+				d.Approve = append(d.Approve, int64(f))
+			}
+		}
+	}
+	rs, err := h.svc.Requests.DecideBatch(c.Request.Context(), principal(c), c.Param("batchId"), d)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toRequests(rs))
 }
 
 func (h *Handler) RejectRequest(c *gin.Context) {
@@ -740,14 +885,15 @@ func (h *Handler) RejectRequest(c *gin.Context) {
 
 func (h *Handler) StartBreakGlass(c *gin.Context) {
 	var in struct {
-		Reason          string `json:"reason"`
-		DurationMinutes int    `json:"durationMinutes"`
+		Reason          string     `json:"reason"`
+		DurationMinutes int        `json:"durationMinutes"`
+		StartsAt        *time.Time `json:"startsAt"` // omitted or null: now
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		h.writeError(c, application.Invalid("body", "invalid JSON body"))
 		return
 	}
-	bg, err := h.svc.BreakGlass.Start(c.Request.Context(), principal(c), in.Reason, in.DurationMinutes)
+	bg, err := h.svc.BreakGlass.Start(c.Request.Context(), principal(c), in.Reason, in.DurationMinutes, in.StartsAt)
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -769,14 +915,15 @@ func (h *Handler) EndBreakGlass(c *gin.Context) {
 
 func (h *Handler) RequestBreakGlass(c *gin.Context) {
 	var in struct {
-		Reason          string `json:"reason"`
-		DurationMinutes int    `json:"durationMinutes"`
+		Reason          string     `json:"reason"`
+		DurationMinutes int        `json:"durationMinutes"`
+		StartsAt        *time.Time `json:"startsAt"` // omitted or null: now
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		h.writeError(c, application.Invalid("body", "invalid JSON body"))
 		return
 	}
-	r, err := h.svc.BreakGlass.Request(c.Request.Context(), principal(c), in.Reason, in.DurationMinutes)
+	r, err := h.svc.BreakGlass.Request(c.Request.Context(), principal(c), in.Reason, in.DurationMinutes, in.StartsAt)
 	if err != nil {
 		h.writeError(c, err)
 		return

@@ -4,6 +4,7 @@ import type { BreakGlassRequest } from '../../api';
 import { Avatar } from '../../components/Badges';
 import { Empty, ErrorBanner, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { Select } from '../../components/Select';
 import { FieldError } from '../../components/AdminBits';
 import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
@@ -39,7 +40,7 @@ export function BreakGlassRequests() {
   return (
     <div className="card">
       <div className="hd">
-        Break-glass requests <small>{pending.length} pending · each starts when approved</small>
+        Break-glass requests <small>{pending.length} pending · each starts when approved, or at its requested start if later</small>
       </div>
       {reqs.error ? (
         <div className="bg-rq"><ErrorBanner error={reqs.error} onRetry={reqs.reload} /></div>
@@ -71,7 +72,7 @@ export function BreakGlassRequests() {
                       <td><b>{r.username}</b></td>
                       <td><StatusChip status={r.status} /></td>
                       <td className="muted">
-                        {r.status === 'approved' ? `${r.approvedMinutes} minutes` : r.status === 'expired' ? 'not decided in time' : ''}
+                        {r.status === 'approved' ? `${r.approvedMinutes} minutes${r.startsAt ? ` from ${fmtDateTime(r.startsAt)}` : ''}` : r.status === 'expired' ? 'not decided in time' : ''}
                         {r.decidedBy && r.decidedBy !== 'system' ? ` · by ${r.decidedBy}` : ''}
                       </td>
                       <td className="muted">{fmtWhen(r.decidedAt, now)}</td>
@@ -113,7 +114,8 @@ function PendingRow({
           ...(note.trim() ? { note: note.trim() } : {}),
           ...(minutes !== req.durationMinutes ? { durationMinutes: minutes } : {}),
         });
-        toast(`Approved ${req.username}’s break-glass for ${res.approvedMinutes} minutes.`);
+        const later = req.startsAt && Date.parse(req.startsAt) > Date.now() ? ` from ${fmtDateTime(req.startsAt)}` : '';
+        toast(`Approved ${req.username}’s break-glass${later} for ${res.approvedMinutes} minutes.`);
       } else {
         await api.rejectBreakGlassRequest(req.id, { note: note.trim() });
         toast(`Rejected ${req.username}’s break-glass request.`);
@@ -136,16 +138,15 @@ function PendingRow({
           {left !== null && left > 0 ? `expires in ${fmtCountdown(left)}` : 'expiring'}
         </span>
       </span>
-      <div className="quote">{req.durationMinutes} minutes · “{req.reason}”</div>
+      <div className="quote">
+        {req.durationMinutes} minutes{req.startsAt ? <> from <b>{fmtDateTime(req.startsAt)}</b></> : ''} · “{req.reason}”
+      </div>
       {canDecide && (
         <div className="row wrap" style={{ gap: 16, alignItems: 'flex-end' }}>
           <label className="f">
             Duration
-            <select className="sel" style={{ height: 30 }} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
-              {breakGlassDurations(max, req.durationMinutes).map((m) => (
-                <option key={m} value={m}>{m} minutes{m === req.durationMinutes ? ' (as requested)' : ''}</option>
-              ))}
-            </select>
+            <Select label="Duration" style={{ height: 30 }} value={minutes} onChange={setMinutes}
+              options={breakGlassDurations(max, req.durationMinutes).map((m) => ({ value: m, label: `${m} minutes${m === req.durationMinutes ? ' (as requested)' : ''}` }))} />
           </label>
           <label className="f grow" style={{ minWidth: 200 }}>
             <span>Note to requester <span className="hint">Required when rejecting</span></span>

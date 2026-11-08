@@ -54,8 +54,9 @@ type Decision struct {
 	ClosesAt *time.Time
 }
 
-// Subject is the user a decision is made for. BreakGlass is the user's most
-// recent break-glass (Decide checks whether it is active at the given time).
+// Subject is the user a decision is made for. BreakGlass is the user's
+// active or next scheduled break-glass (Decide checks whether it is active at
+// the given time).
 type Subject struct {
 	ID         int64
 	Role       Role
@@ -317,6 +318,11 @@ func (p *Policy) UserGrants(sub Subject) []Grant {
 		out = append(out, p.grantsByTeam[tid]...)
 	}
 	return out
+}
+
+// TeamGrants returns the grants held by a team.
+func (p *Policy) TeamGrants(teamID int64) []Grant {
+	return append([]Grant(nil), p.grantsByTeam[teamID]...)
 }
 
 // DecideApp decides an action on a whole Argo CD application. It is allowed
@@ -695,9 +701,16 @@ func (p *Policy) boundaries(sub Subject, t Target, env string, action Action, af
 	return out
 }
 
+// findReopensAt finds the first boundary, or the start of a scheduled
+// break-glass, after now at which time no longer closes the request.
 func (p *Policy) findReopensAt(sub Subject, t Target, action Action, now time.Time, env string) (time.Time, bool) {
-	for _, c := range p.boundaries(sub, t, env, action, now) {
-		if closed, _ := p.timeClosed(sub, t, env, action, c); !closed {
+	cands := p.boundaries(sub, t, env, action, now)
+	if bg := sub.BreakGlass; bg != nil && bg.StartedAt.After(now) && !bg.StartedAt.After(now.Add(scheduleHorizon)) {
+		cands = append(cands, bg.StartedAt)
+		sort.Slice(cands, func(i, j int) bool { return cands[i].Before(cands[j]) })
+	}
+	for _, c := range cands {
+		if closed, _ := p.timeClosed(sub, t, env, action, c); !closed || sub.BreakGlass.ActiveAt(c) {
 			return c, true
 		}
 	}

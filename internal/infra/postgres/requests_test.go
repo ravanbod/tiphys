@@ -182,3 +182,82 @@ func TestApproveRequestAtomic(t *testing.T) {
 		t.Fatalf("ok=%d conflict=%d grants=%d", ok, conflict, len(gs))
 	}
 }
+
+func TestTeamAccessRequests(t *testing.T) {
+	f := newFixture(t)
+	u := f.user("u1", domain.RoleUser)
+	tm := f.team("payments")
+	f.cluster("c1")
+	scope := domain.Scope{Kind: domain.ScopeNamespace, Cluster: "c1", Namespace: "pay"}
+	create := func() domain.AccessRequest {
+		r, err := f.r.Requests.Create(f.ctx, domain.AccessRequest{UserID: u.ID, TeamID: tm.ID, Reason: "team",
+			Scope: scope, Actions: []domain.Action{domain.ActionLogs}})
+		must(t, err)
+		return r
+	}
+	r := create()
+	if r.TeamID != tm.ID || r.TeamName != "payments" || r.UserID != u.ID {
+		t.Fatalf("team request: %+v", r)
+	}
+	own, err := f.r.Requests.Create(f.ctx, domain.AccessRequest{UserID: u.ID, Reason: "me", Scope: scope, Actions: []domain.Action{domain.ActionLogs}})
+	must(t, err)
+	if own.TeamID != 0 || own.TeamName != "" {
+		t.Fatalf("own request: %+v", own)
+	}
+	byTeam, err := f.r.Requests.ListByTeam(f.ctx, tm.ID)
+	must(t, err)
+	if len(byTeam) != 1 || byTeam[0].ID != r.ID {
+		t.Fatalf("list by team: %+v", byTeam)
+	}
+
+	// The previous release approves without approved_for_team; the CHECK
+	// refuses that for a team's request, and Decide sets it.
+	if _, err := f.store.pool.Exec(f.ctx, `UPDATE access_requests SET status = 'approved', decided_at = now() WHERE id = $1`, r.ID); err == nil {
+		t.Fatal("team request approved without approved_for_team")
+	}
+	if _, err := f.store.pool.Exec(f.ctx, `UPDATE access_requests SET status = 'approved', decided_at = now() WHERE id = $1`, own.ID); err != nil {
+		t.Fatalf("own request as the previous release approves it: %v", err)
+	}
+	must(t, f.r.Requests.Decide(f.ctx, r.ID, domain.RequestApproved, "boss", "", nil, time.Now()))
+
+	// Deleting the team removes its requests.
+	other := create()
+	must(t, f.r.Teams.Delete(f.ctx, tm.ID))
+	_, err = f.r.Requests.Get(f.ctx, other.ID)
+	isErr(t, err, application.ErrNotFound)
+}
+
+func TestAccessRequestBatch(t *testing.T) {
+	f := newFixture(t)
+	u := f.user("u1", domain.RoleUser)
+	f.cluster("c1")
+	batch := "6f1f8c2e-6d1a-4c55-9a43-1f5a2c3b4d5e"
+	var ids []int64
+	for _, ns := range []string{"a", "b"} {
+		r, err := f.r.Requests.Create(f.ctx, domain.AccessRequest{UserID: u.ID, Reason: "x", BatchID: batch,
+			Scope: domain.Scope{Kind: domain.ScopeNamespace, Cluster: "c1", Namespace: ns}, Actions: []domain.Action{domain.ActionLogs}})
+		must(t, err)
+		if r.BatchID != batch {
+			t.Fatalf("batch id: %+v", r)
+		}
+		ids = append(ids, r.ID)
+	}
+	single := newRequest(f, u.ID)
+	if single.BatchID != "" {
+		t.Fatalf("single request has a batch: %q", single.BatchID)
+	}
+	got, err := f.r.Requests.ListBatch(f.ctx, batch)
+	must(t, err)
+	if len(got) != 2 || got[0].ID != ids[0] || got[1].ID != ids[1] {
+		t.Fatalf("batch: %+v", got)
+	}
+	_, err = f.r.Requests.ListBatch(f.ctx, "00000000-0000-0000-0000-000000000000")
+	isErr(t, err, application.ErrNotFound)
+	_, err = f.r.Requests.ListBatch(f.ctx, "nope")
+	isErr(t, err, application.ErrNotFound)
+	_, err = f.r.Requests.Create(f.ctx, domain.AccessRequest{UserID: u.ID, Reason: "x", BatchID: "nope",
+		Scope: domain.Scope{Kind: domain.ScopeNamespace, Cluster: "c1", Namespace: "a"}, Actions: []domain.Action{domain.ActionLogs}})
+	if err == nil {
+		t.Fatal("malformed batch id accepted")
+	}
+}

@@ -28,4 +28,8 @@ describe('mergeTarget', () => {
     expect(pick(wl('b', 'a'), 24)).toBe(6);
     expect(pick(wl('a'), 24)).toBeNull();
   });
+  it('merges a team request into the team grant only', () => {
+    expect(mergeTarget(grants, ns, null, now, 'team')?.id).toBe(5);
+    expect(mergeTarget(grants.filter((g) => g.holder.kind === 'user'), ns, null, now, 'team')).toBeNull();
+  });
 });

@@ -15,8 +15,9 @@ import (
 // admin's duration) or rejects, the requester may cancel, and a request
 // pending longer than Settings.BreakGlassRequestMaxAgeMin expires.
 
-// Request asks an admin for a break-glass of minutes (0: the default).
-func (s *BreakGlassService) Request(ctx context.Context, p Principal, reason string, minutes int) (domain.BreakGlassRequest, error) {
+// Request asks an admin for a break-glass of minutes (0: the default),
+// starting when approved or at startsAt if later (see checkStart).
+func (s *BreakGlassService) Request(ctx context.Context, p Principal, reason string, minutes int, startsAt *time.Time) (domain.BreakGlassRequest, error) {
 	if err := RequireRole(p, domain.RoleUser, domain.RoleAuditor); err != nil {
 		return domain.BreakGlassRequest{}, err
 	}
@@ -31,12 +32,15 @@ func (s *BreakGlassService) Request(ctx context.Context, p Principal, reason str
 		return domain.BreakGlassRequest{}, err
 	}
 	now := s.clock.Now()
-	if s.activeFor(ctx, p.User.ID, now) {
-		return domain.BreakGlassRequest{}, fmt.Errorf("%w: break-glass is already active", ErrConflict)
+	if startsAt, err = s.checkStart(startsAt, now); err != nil {
+		return domain.BreakGlassRequest{}, err
 	}
 	var req domain.BreakGlassRequest
 	var ev domain.AuditEvent
 	err = s.store.InTx(ctx, func(r Repositories) error {
+		if err := s.checkNoCurrent(ctx, r, p.User.ID, now, "you"); err != nil {
+			return err
+		}
 		if _, err := r.BGRequests.ExpirePendingBefore(ctx, s.expiryCutoff(now)); err != nil {
 			return err
 		}
@@ -47,12 +51,15 @@ func (s *BreakGlassService) Request(ctx context.Context, p Principal, reason str
 		if len(pending) > 0 {
 			return fmt.Errorf("%w: you already have a pending break-glass request", ErrConflict)
 		}
-		if req, err = r.BGRequests.Create(ctx, domain.BreakGlassRequest{UserID: p.User.ID, Reason: reason, Minutes: minutes, CreatedAt: now}); err != nil {
+		if req, err = r.BGRequests.Create(ctx, domain.BreakGlassRequest{UserID: p.User.ID, Reason: reason, Minutes: minutes, StartsAt: startsAt, CreatedAt: now}); err != nil {
 			return err
 		}
 		e := s.audit.Event(p, domain.EventBreakGlassReq)
 		e.Result, e.Reason = domain.ResultSucceeded, reason
 		e.Details = map[string]any{"requestId": req.ID, "minutes": minutes}
+		if startsAt != nil {
+			e.Details["startsAt"] = *startsAt
+		}
 		ev, err = s.audit.RecordIn(ctx, r, e)
 		return err
 	})
@@ -60,20 +67,24 @@ func (s *BreakGlassService) Request(ctx context.Context, p Principal, reason str
 		return domain.BreakGlassRequest{}, err
 	}
 	s.audit.Publish(ev)
+	fields := []NotificationField{
+		{Name: "Who", Value: p.User.Username}, {Name: "Reason", Value: reason},
+		{Name: "Duration", Value: fmt.Sprintf("%d minutes", minutes)},
+	}
+	if startsAt != nil {
+		fields = append(fields, NotificationField{Name: "Starts", Value: startsAt.Format(time.RFC3339)})
+	}
+	fields = append(fields, NotificationField{Name: "Expires if not decided", Value: s.expiresAt(req).Format(time.RFC3339)})
 	s.notify.Notify(NotificationMessage{
-		Event: domain.NotifyBreakGlassRequest, Title: "Break-glass requested",
-		Fields: []NotificationField{
-			{Name: "Who", Value: p.User.Username}, {Name: "Reason", Value: reason},
-			{Name: "Duration", Value: fmt.Sprintf("%d minutes", minutes)},
-			{Name: "Expires if not decided", Value: s.expiresAt(req).Format(time.RFC3339)},
-		},
+		Event: domain.NotifyBreakGlassRequest, Title: "Break-glass requested", Fields: fields,
 		Link: s.notify.Link("/requests"),
 	})
 	return req, nil
 }
 
-// Approve starts the requested break-glass now, for minutes (0: as
-// requested, otherwise shorter or longer up to the maximum).
+// Approve starts the requested break-glass now, or schedules it for the
+// requested start if that is later, for minutes (0: as requested, otherwise
+// shorter or longer up to the maximum).
 func (s *BreakGlassService) Approve(ctx context.Context, p Principal, id int64, note string, minutes int) (domain.BreakGlassRequest, error) {
 	if err := RequireRole(p, domain.RoleAdmin); err != nil {
 		return domain.BreakGlassRequest{}, err
@@ -102,12 +113,16 @@ func (s *BreakGlassService) Approve(ctx context.Context, p Principal, id int64, 
 		if err := s.checkMinutes(minutes); err != nil {
 			return err
 		}
-		if cur, err := r.BreakGlass.LatestForUser(ctx, req.UserID); err == nil && cur.ActiveAt(now) {
-			return fmt.Errorf("%w: %s already has an active break-glass", ErrConflict, req.Username)
+		if err := s.checkNoCurrent(ctx, r, req.UserID, now, req.Username); err != nil {
+			return err
+		}
+		begin := now
+		if req.StartsAt != nil && req.StartsAt.After(now) {
+			begin = *req.StartsAt
 		}
 		bg, err = r.BreakGlass.Create(ctx, domain.BreakGlass{
 			UserID: req.UserID, Username: req.Username, Reason: req.Reason,
-			StartedAt: now, ExpiresAt: now.Add(time.Duration(minutes) * time.Minute),
+			StartedAt: begin, ExpiresAt: begin.Add(time.Duration(minutes) * time.Minute),
 		})
 		if err != nil {
 			return err
@@ -122,6 +137,9 @@ func (s *BreakGlassService) Approve(ctx context.Context, p Principal, id int64, 
 		e.BreakGlassID = &bg.ID
 		e.Details = map[string]any{"minutes": minutes, "expiresAt": bg.ExpiresAt, "owner": req.Username,
 			"requestId": id, "requestedMinutes": req.Minutes, "note": note}
+		if begin.After(now) {
+			e.Details["startsAt"] = begin
+		}
 		ev, err = s.audit.RecordIn(ctx, r, e)
 		return err
 	})
@@ -130,7 +148,7 @@ func (s *BreakGlassService) Approve(ctx context.Context, p Principal, id int64, 
 	}
 	s.audit.Publish(ev)
 	s.policy.Changed(ctx)
-	s.notifyStarted(bg, p.User.Username)
+	s.notifyStarted(bg, p.User.Username, now)
 	s.notifyDecided(req, "approved")
 	return req, nil
 }
@@ -196,6 +214,9 @@ func (s *BreakGlassService) notifyDecided(r domain.BreakGlassRequest, verdict st
 		{Name: "Requester", Value: r.Username}, {Name: "Decision", Value: verdict + " by " + r.DecidedBy},
 		{Name: "Duration", Value: fmt.Sprintf("%d minutes", minutes)}, {Name: "Reason", Value: r.Reason},
 	}
+	if r.StartsAt != nil {
+		fields = append(fields, NotificationField{Name: "Starts", Value: r.StartsAt.Format(time.RFC3339)})
+	}
 	if r.DecisionNote != "" {
 		fields = append(fields, NotificationField{Name: "Note", Value: r.DecisionNote})
 	}
@@ -253,7 +274,7 @@ func (s *BreakGlassService) current(reqs []domain.BreakGlassRequest, status doma
 
 // expiresAt is when a pending request expires.
 func (s *BreakGlassService) expiresAt(r domain.BreakGlassRequest) time.Time {
-	return r.CreatedAt.Add(time.Duration(s.settings.Get().BreakGlassRequestMaxAgeMin) * time.Minute)
+	return r.ExpiresAt(time.Duration(s.settings.Get().BreakGlassRequestMaxAgeMin) * time.Minute)
 }
 
 func (s *BreakGlassService) expiryCutoff(now time.Time) time.Time {

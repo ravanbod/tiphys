@@ -49,7 +49,9 @@ describe('toApiFilters', () => {
     const a = toApiFilters({ ...EMPTY_AUDIT_FILTERS, user: ' sara ', result: 'denied', q: 'x', breakGlassOnly: true }, NOW, { limit: 50, cursor: 'c1' });
     expect(a).toMatchObject({ user: 'sara', result: 'denied', q: 'x', limit: 50, cursor: 'c1' });
     expect(a.breakGlassId).toBeUndefined();
+    expect(a.breakGlass).toBe(true);
     expect(a.action).toBeUndefined();
+    expect(toApiFilters(EMPTY_AUDIT_FILTERS, NOW).breakGlass).toBeUndefined();
   });
 });
 
@@ -58,8 +60,8 @@ describe('helpers', () => {
     expect(moreFilterCount({ ...EMPTY_AUDIT_FILTERS, cluster: 'a', namespace: 'b' })).toBe(2);
     expect(moreFilterCount(EMPTY_AUDIT_FILTERS)).toBe(0);
   });
-  it('server key ignores client-side break-glass toggle', () => {
-    expect(serverFilterKey({ ...EMPTY_AUDIT_FILTERS, breakGlassOnly: true })).toBe(serverFilterKey(EMPTY_AUDIT_FILTERS));
+  it('server key changes with every filter, break-glass too (the server applies it)', () => {
+    expect(serverFilterKey({ ...EMPTY_AUDIT_FILTERS, breakGlassOnly: true })).not.toBe(serverFilterKey(EMPTY_AUDIT_FILTERS));
     expect(serverFilterKey({ ...EMPTY_AUDIT_FILTERS, user: 'x' })).not.toBe(serverFilterKey(EMPTY_AUDIT_FILTERS));
   });
 });

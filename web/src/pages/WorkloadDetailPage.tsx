@@ -22,6 +22,7 @@ import { closesSoonLabel, explainDecision } from '../lib/decision';
 import { execUrl, logsUrl, namespaceUrl } from '../lib/routes';
 import { fmtAge, fmtRelative } from '../lib/time';
 import { ARGO_UI } from '../lib/features';
+import { breakGlassKey } from '../lib/breakGlass';
 
 function Stat({ label, children, mono, small }: { label: string; children: React.ReactNode; mono?: boolean; small?: boolean }) {
   return (
@@ -55,7 +56,7 @@ export function WorkloadDetailPage() {
     }
     if (all || changes.some(eventChange)) events.reload();
   });
-  const wl = useApi(() => api.workload(ref), [cluster, ns, kind, name, me.breakGlass?.id], { poll: live ? 60000 : 30000 });
+  const wl = useApi(() => api.workload(ref), [cluster, ns, kind, name, breakGlassKey(me)], { poll: live ? 60000 : 30000 });
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
   const [restart, setRestart] = useState(false);
   const [running, setRunning] = useState(false);
@@ -64,7 +65,7 @@ export function WorkloadDetailPage() {
 
   const d = wl.data;
   const logsOk = !!d?.access.logs.allowed;
-  const pods = useApi(() => api.pods(ref), [cluster, ns, kind, name, logsOk, me.breakGlass?.id], { enabled: logsOk && kind !== 'CronJob' && tab !== 'cronjobs', poll: live ? 60000 : 10000 });
+  const pods = useApi(() => api.pods(ref), [cluster, ns, kind, name, logsOk, breakGlassKey(me)], { enabled: logsOk && kind !== 'CronJob' && tab !== 'cronjobs', poll: live ? 60000 : 10000 });
   const events = useApi(() => api.events(ref), [cluster, ns, kind, name, logsOk], { enabled: logsOk });
   const [sel, setSel] = useState<string | null>(null);
 

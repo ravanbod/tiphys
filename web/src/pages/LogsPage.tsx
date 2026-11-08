@@ -5,6 +5,7 @@ import type { LogOptions, ServerControl } from '../api';
 import { EnvBadge } from '../components/Badges';
 import { ErrorBanner } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { Select } from '../components/Select';
 import { Crumbs } from '../components/PageHeader';
 import { useAuth } from '../context/auth';
 import { useLive } from '../context/live';
@@ -17,6 +18,7 @@ import { LineSplitter, SINCE_OPTIONS, TAIL_OPTIONS, parseLogLine, shortTs, split
 import { workloadUrl } from '../lib/routes';
 import { explainDecision } from '../lib/decision';
 import { fmtCountdown, msUntil } from '../lib/time';
+import { breakGlassKey } from '../lib/breakGlass';
 
 const MAX_LINES = 20000;
 const MOCK = import.meta.env.VITE_MOCK === '1';
@@ -41,7 +43,7 @@ export function LogsPage() {
   const { me, usesGrants } = useAuth();
   const now = useNow(1000);
   const ref = useMemo(() => ({ cluster, namespace: ns, kind, name }), [cluster, ns, kind, name]);
-  const wl = useApi(() => api.workload(ref), [ref, me.breakGlass?.id]);
+  const wl = useApi(() => api.workload(ref), [ref, breakGlassKey(me)]);
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
   // New pods (a rollout, a job run) appear in the picker as they start.
   const live = useLive(ref, (changes) => {
@@ -219,29 +221,20 @@ export function LogsPage() {
 
         <div className="row wrap" style={{ gap: 10 }}>
           <label className="row" style={{ gap: 6 }}><span className="muted">Pod</span>
-            <select className="sel mono" aria-label="Pod" style={{ minWidth: 230, maxWidth: '100%' }} value={pod} onChange={(e) => setParam('pod', e.target.value)}>
-              {pods.length === 0 && <option value="">{podsQ.loading ? 'Loading…' : 'No pods'}</option>}
-              {pods.map((p) => <option key={p.name} value={p.name}>{p.name}</option>)}
-            </select>
+            <Select label="Pod" mono style={{ minWidth: 230 }} value={pod} onChange={(v) => setParam('pod', v)}
+              options={pods.length === 0 ? [{ value: '', label: podsQ.loading ? 'Loading…' : 'No pods', disabled: true }] : pods.map((p) => ({ value: p.name, label: p.name }))} />
           </label>
           <label className="row" style={{ gap: 6 }}><span className="muted">Container</span>
-            <select className="sel mono" aria-label="Container" value={container} onChange={(e) => setParam('container', e.target.value)}>
-              {containers.map((c) => <option key={c.name}>{c.name}</option>)}
-            </select>
+            <Select label="Container" mono value={container} onChange={(v) => setParam('container', v)} options={containers.map((c) => ({ value: c.name, label: c.name }))} />
           </label>
           <label className="chk"><input type="checkbox" checked={previous} onChange={(e) => setPrevious(e.target.checked)} /> Previous container</label>
           <span style={{ width: 1, height: 20, background: 'var(--ln)' }} className="hide-sm" />
           <label className="chk"><input className="sw" type="checkbox" checked={follow && !previous} disabled={previous} onChange={(e) => setFollow(e.target.checked)} /> Live tail</label>
           <label className="row" style={{ gap: 6 }}><span className="muted">Lines</span>
-            <select className="sel" aria-label="Lines to load" value={tail} onChange={(e) => setTail(Number(e.target.value))}>
-              {TAIL_OPTIONS.map((n) => <option key={n} value={n}>{n.toLocaleString('en-US')}</option>)}
-            </select>
+            <Select label="Lines to load" value={tail} onChange={setTail} options={TAIL_OPTIONS.map((n) => ({ value: n, label: n.toLocaleString('en-US') }))} />
           </label>
           <label className="row" style={{ gap: 6 }}><span className="muted">Since</span>
-            <select className="sel" aria-label="Since" value={since} onChange={(e) => setSince(Number(e.target.value))}>
-              <option value={0}>Any time</option>
-              {SINCE_OPTIONS.map((o) => <option key={o.seconds} value={o.seconds}>{o.label}</option>)}
-            </select>
+            <Select label="Since" value={since} onChange={setSince} options={[{ value: 0, label: 'Any time' }, ...SINCE_OPTIONS.map((o) => ({ value: o.seconds, label: o.label }))]} />
           </label>
           <label className="chk"><input type="checkbox" checked={wrap} onChange={(e) => setWrap(e.target.checked)} /> Wrap lines</label>
           <label className="chk"><input type="checkbox" checked={timestamps} onChange={(e) => setTimestamps(e.target.checked)} /> Timestamps</label>

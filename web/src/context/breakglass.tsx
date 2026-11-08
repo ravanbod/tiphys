@@ -2,8 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { ApiError, api, errorText } from '../api';
 import type { Action, BreakGlassRequest } from '../api';
 import { EnvBadge } from '../components/Badges';
+import { FieldError } from '../components/AdminBits';
 import { Dialog } from '../components/Dialog';
-import { breakGlassDurations, breakGlassNeedsApproval } from '../lib/breakGlass';
+import { Select } from '../components/Select';
+import { MAX_SCHEDULE_DAYS, breakGlassDurations, breakGlassNeedsApproval, breakGlassScheduled, nextFullHour, parseStart, toLocalInput } from '../lib/breakGlass';
 import { fmtDateTime } from '../lib/time';
 import { useAuth } from './auth';
 import { useToast } from './toast';
@@ -36,9 +38,10 @@ export function BreakGlassProvider({ children }: { children: React.ReactNode }) 
   }, []);
   const end = useCallback(async () => {
     if (!me.breakGlass) return;
+    const scheduled = breakGlassScheduled(me.breakGlass, Date.now());
     try {
       await api.endBreakGlass(me.breakGlass.id);
-      toast('Break-glass ended');
+      toast(scheduled ? 'Scheduled break-glass cancelled' : 'Break-glass ended');
       await reload();
     } catch (e) {
       toast(errorText(e), 'err');
@@ -61,6 +64,7 @@ export function BreakGlassProvider({ children }: { children: React.ReactNode }) 
     prevPending.current = pending;
     if (!was || pending === was || cancelled.current === was) return;
     if (me.breakGlass?.active) toast(`Break-glass approved: active until ${fmtDateTime(me.breakGlass.expiresAt)}.`);
+    else if (breakGlassScheduled(me.breakGlass, Date.now())) toast(`Break-glass approved: from ${fmtDateTime(me.breakGlass?.startedAt)} until ${fmtDateTime(me.breakGlass?.expiresAt)}.`);
     else toast('Your break-glass request was rejected or expired.', 'err');
   }, [pending, me.breakGlass, toast]);
 
@@ -102,7 +106,7 @@ function PendingDialog({ req, onCancelled, onClose }: { req: BreakGlassRequest; 
       onClose={onClose}
       width={440}
       title="Break-glass requested"
-      subtitle={<span>Waiting for an admin to approve it. It starts as soon as it is approved.</span>}
+      subtitle={<span>Waiting for an admin to approve it. {req.startsAt ? `It starts at ${fmtDateTime(req.startsAt)}, or when approved if that is later.` : 'It starts as soon as it is approved.'}</span>}
       footer={
         <>
           <button type="button" className={`btn${busy ? ' dis' : ''}`} aria-disabled={busy} onClick={() => void cancel()}>Cancel request</button>
@@ -112,7 +116,7 @@ function PendingDialog({ req, onCancelled, onClose }: { req: BreakGlassRequest; 
     >
       <dl className="kv" style={{ gridTemplateColumns: '120px 1fr' }}>
         <dt>Reason</dt><dd>{req.reason}</dd>
-        <dt>Duration</dt><dd>{req.durationMinutes} minutes, from approval</dd>
+        <dt>Duration</dt><dd>{req.durationMinutes} minutes, from {req.startsAt ? fmtDateTime(req.startsAt) : 'approval'}</dd>
         <dt>Requested</dt><dd>{fmtDateTime(req.createdAt)}</dd>
         <dt>Expires</dt><dd>{fmtDateTime(req.expiresAt)} if nobody decides</dd>
       </dl>
@@ -128,30 +132,49 @@ function BreakGlassDialog({ target, onClose }: { target: BreakGlassTarget | null
   const { breakGlassDefaultMinutes: def, breakGlassMaxMinutes: max } = me.settings;
   const [reason, setReason] = useState('');
   const [minutes, setMinutes] = useState(Math.min(def, max));
+  const [when, setWhen] = useState<'now' | 'later'>('now');
+  const [startAt, setStartAt] = useState(() => toLocalInput(nextFullHour(Date.now())));
+  const [startErr, setStartErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const len = reason.trim().length;
   const valid = len >= MIN_REASON;
   const approval = breakGlassNeedsApproval(me);
+  const later = when === 'later';
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!valid || busy) return;
+    let startsAt: string | undefined;
+    if (later) {
+      const r = parseStart(startAt, Date.now());
+      if ('error' in r) {
+        setStartErr(r.error);
+        return;
+      }
+      startsAt = r.iso;
+    }
     setBusy(true);
     setErr(null);
     try {
+      const body = { reason: reason.trim(), durationMinutes: minutes, ...(startsAt ? { startsAt } : {}) };
       if (approval) {
-        await api.requestBreakGlass({ reason: reason.trim(), durationMinutes: minutes });
+        await api.requestBreakGlass(body);
         await reload();
-        toast('Break-glass requested. It starts as soon as an admin approves it.');
+        toast(startsAt
+          ? `Break-glass requested from ${fmtDateTime(startsAt)}. It starts then once an admin approves it.`
+          : 'Break-glass requested. It starts as soon as an admin approves it.');
       } else {
-        await api.startBreakGlass({ reason: reason.trim(), durationMinutes: minutes });
+        const bg = await api.startBreakGlass(body);
         await reload();
-        toast('Break-glass started. The platform team has been notified.');
+        toast(startsAt
+          ? `Break-glass scheduled from ${fmtDateTime(bg.startedAt)}. The platform team has been notified.`
+          : 'Break-glass started. The platform team has been notified.');
       }
       onClose();
     } catch (ex) {
-      setErr(ex instanceof ApiError && ex.fields.reason ? ex.fields.reason : errorText(ex));
+      if (ex instanceof ApiError && ex.fields.startsAt) setStartErr(ex.fields.startsAt);
+      else setErr(ex instanceof ApiError && ex.fields.reason ? ex.fields.reason : errorText(ex));
       setBusy(false);
     }
   }
@@ -178,7 +201,7 @@ function BreakGlassDialog({ target, onClose }: { target: BreakGlassTarget | null
         <>
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button type="submit" form="bg-form" className={`btn dng${valid && !busy ? '' : ' dis'}`} aria-disabled={!valid || busy}>
-            {approval ? 'Send request' : 'Start break-glass'}
+            {approval ? 'Send request' : later ? 'Schedule break-glass' : 'Start break-glass'}
           </button>
         </>
       }
@@ -196,21 +219,36 @@ function BreakGlassDialog({ target, onClose }: { target: BreakGlassTarget | null
         </label>
         <label className="f">
           Duration
-          <select className="sel" style={{ height: 30 }} value={minutes} onChange={(e) => setMinutes(Number(e.target.value))}>
-            {breakGlassDurations(max).map((m) => (
-              <option key={m} value={m}>{m} minutes{m === def ? ' (default)' : ''}</option>
-            ))}
-          </select>
-          <span className="hint">Maximum {max} minutes, set by admins.{approval ? ' Counted from approval; the admin may change it.' : ''}</span>
+          <Select label="Duration" style={{ height: 30 }} value={minutes} onChange={setMinutes}
+            options={breakGlassDurations(max).map((m) => ({ value: m, label: `${m} minutes${m === def ? ' (default)' : ''}` }))} />
+          <span className="hint">Maximum {max} minutes, set by admins.{approval ? ` Counted from ${later ? 'the start' : 'approval'}; the admin may change it.` : ''}</span>
         </label>
+        <div className="f">
+          Starts
+          <div className="row wrap" style={{ gap: 8 }}>
+            <Select label="Starts" style={{ height: 30 }} value={when} onChange={(v) => { setWhen(v); setStartErr(null); }}
+              options={[{ value: 'now', label: approval ? 'When approved' : 'Now' }, { value: 'later', label: 'At a later time' }]} />
+            {later && (
+              <input
+                className="input" type="datetime-local" style={{ width: 220, height: 30 }} aria-label="Start date and time"
+                aria-invalid={startErr ? true : undefined} aria-describedby="bg-start-hint"
+                min={toLocalInput(Date.now())} max={toLocalInput(Date.now() + MAX_SCHEDULE_DAYS * 86400_000)}
+                value={startAt} onChange={(e) => { setStartAt(e.target.value); setStartErr(null); }}
+              />
+            )}
+          </div>
+          {later && (startErr
+            ? <FieldError id="bg-start-hint" msg={startErr} />
+            : <span id="bg-start-hint" className="hint">Your local time, within {MAX_SCHEDULE_DAYS} days.{approval ? ' If approved later, it starts at approval.' : ''}</span>)}
+        </div>
         <div className="banner red" style={{ alignItems: 'flex-start' }}>
           {approval ? (
             <span>
-              <b>An admin must approve this.</b> Break-glass starts when it is approved; every action while it is active is marked in the audit log. It never grants access you do not already have.
+              <b>An admin must approve this.</b> Break-glass starts when it is approved{later ? ', at the chosen time at the earliest' : ''}; every action while it is active is marked in the audit log. It never grants access you do not already have.
             </span>
           ) : (
             <span>
-              <b>The platform team is notified immediately.</b> Break-glass starts as soon as you submit; every action while it is active is marked in the audit log. It never grants access you do not already have.
+              <b>The platform team is notified immediately.</b> Break-glass starts {later ? 'at the chosen time' : 'as soon as you submit'}; every action while it is active is marked in the audit log. It never grants access you do not already have.
             </span>
           )}
         </div>

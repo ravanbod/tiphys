@@ -7,6 +7,8 @@ import type {
 import { FieldError, ReadOnlyNote } from '../../components/AdminBits';
 import '../../components/adminPages.css';
 import { ActionChips, EnvBadge } from '../../components/Badges';
+import { ComboBox } from '../../components/ComboBox';
+import { Select } from '../../components/Select';
 import { Dialog } from '../../components/Dialog';
 import { Empty, ErrorBanner, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
@@ -22,14 +24,15 @@ import type { CheckStep } from '../../lib/accessCheckSteps';
 import { ADMIN_TZ, localInputToIso } from '../../lib/adminDatetime';
 import { fieldError, unmatchedFields } from '../../lib/adminFields';
 import {
-  ACTIONS, APP_SCOPE_HINT, actionOptionLabel, isAppAction, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, parseWlKey, validateGrantForm, wlKey,
+  ACTIONS, APP_SCOPE_HINT, MAX_GRANT_BATCH, formNamespaces, actionOptionLabel, isAppAction, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, parseWlKey, validateGrantForm, wlKey,
 } from '../../lib/grantForm';
 import type { GrantForm } from '../../lib/grantForm';
 import { fmtDateTime, fmtDay, fmtSpan } from '../../lib/time';
 import { ARGO_UI } from '../../lib/features';
+import { LIST_SEARCH_FROM, matchesQuery } from '../../lib/comboFilter';
 
 const SCOPE_KINDS: GrantForm['scopeKind'][] = [...(ARGO_UI ? ['argo_project' as const] : []), 'environment', 'cluster', 'namespace', 'workloads'];
-const FORM_FIELDS = ['holder', 'scope', 'argoProject', 'environment', 'cluster', 'namespace', 'workloads', 'actions', 'expiresAt', 'note'];
+const FORM_FIELDS = ['holder', 'scope', 'argoProject', 'environment', 'cluster', 'namespace', 'namespaces', 'workloads', 'actions', 'expiresAt', 'note'];
 const WHERE_HINT: Record<GrantForm['scopeKind'], string> = {
   argo_project: 'Argo project (all clusters)',
   environment: 'Environment (every namespace labeled with it, all clusters)',
@@ -110,6 +113,17 @@ function GrantEditor({
   );
 
   const nsOptions = uniq([...(namespaces.data ?? []), form.namespace]);
+  // A new namespace grant may go on several namespaces at once (one grant each).
+  const many = form.id === null && form.scopeKind === 'namespace';
+  const nsList = formNamespaces(form);
+  // The holder's grants on this cluster, to say where one already exists (a new one is created beside it).
+  const existing = useApi(
+    () => api.grants({ holderKind: form.holderKind, holderId: form.holderId!, scopeKind: 'namespace', cluster: form.cluster }),
+    [form.holderKind, form.holderId, form.cluster],
+    { enabled: many && form.holderId !== null && !!form.cluster },
+  );
+  const alreadyOn = nsList.filter((ns) => (existing.data ?? []).some((g) => !g.expired && g.scope.namespace === ns));
+  const [wq, setWq] = useState('');
   const wlOptions = useMemo(() => {
     const byKey = new Map<string, { kind: WorkloadKind; name: string }>();
     for (const w of workloads.data ?? []) byKey.set(wlKey(w), w);
@@ -138,6 +152,12 @@ function GrantEditor({
     setBusy(true);
     try {
       const input = grantInputFromForm(form);
+      if (many && nsList.length > 1) {
+        const saved = await api.createGrants({ ...input, namespaces: nsList });
+        toast(`${saved.length} grants created.`);
+        onSaved(saved[0]);
+        return;
+      }
       const saved = form.id === null ? await api.createGrant(input) : await api.updateGrant(form.id, input);
       toast(form.id === null ? 'Grant created.' : 'Grant saved.');
       onSaved(saved);
@@ -178,9 +198,11 @@ function GrantEditor({
       {form.scopeKind === 'cluster' && (
         <>every namespace on cluster <span className="mono">{form.cluster || '…'}</span>, including new ones</>
       )}
-      {form.scopeKind === 'namespace' && (
+      {form.scopeKind === 'namespace' && (nsList.length > 1 ? (
+        <>{nsList.length} namespaces (<span className="mono">{nsList.join(', ')}</span>) on cluster <span className="mono">{form.cluster || '…'}</span>, one grant each</>
+      ) : (
         <>namespace <span className="mono">{form.namespace || '…'}</span> on cluster <span className="mono">{form.cluster || '…'}</span></>
-      )}
+      ))}
       {form.scopeKind === 'workloads' && (
         <>
           {form.workloads.length} workload{form.workloads.length === 1 ? '' : 's'}
@@ -214,7 +236,7 @@ function GrantEditor({
           )}
           <button type="button" className="btn" onClick={onCancel} disabled={busy}>Cancel</button>
           <button type="submit" form={formDomId} className="btn pri" disabled={busy}>
-            {busy ? 'Saving…' : form.id === null ? 'Create grant' : 'Save grant'}
+            {busy ? 'Saving…' : form.id !== null ? 'Save grant' : nsList.length > 1 && many ? `Create ${nsList.length} grants` : 'Create grant'}
           </button>
         </>
       }
@@ -235,23 +257,20 @@ function GrantEditor({
               onChange={(v) => set({ holderKind: v, holderId: null })}
               options={[{ value: 'team', label: 'Team' }, { value: 'user', label: 'User' }]}
             />
-            <select
-              className="sel"
-              style={{ height: 30, flex: 1 }}
-              aria-label={form.holderKind === 'team' ? 'Team' : 'User'}
-              aria-invalid={fields.holder ? true : undefined}
-              value={form.holderId ?? ''}
-              onChange={(e) => set({ holderId: e.target.value ? Number(e.target.value) : null })}
-            >
-              <option value="">Choose a {form.holderKind}…</option>
-              {holderList.map((h) =>
-                'members' in h ? (
-                  <option key={h.id} value={h.id}>{h.name} ({h.members.length} members)</option>
-                ) : (
-                  <option key={h.id} value={h.id}>{h.displayName} ({h.username}){h.disabled ? ' · disabled' : ''}</option>
-                ),
+            <ComboBox
+              key={form.holderKind}
+              style={{ flex: 1 }}
+              label={form.holderKind === 'team' ? 'Team' : 'User'}
+              invalid={!!fields.holder}
+              value={form.holderId === null ? '' : String(form.holderId)}
+              onChange={(v) => set({ holderId: v ? Number(v) : null })}
+              placeholder={`Choose a ${form.holderKind}…`}
+              options={holderList.map((h) =>
+                'members' in h
+                  ? { value: String(h.id), label: h.name, hint: `${h.members.length} members` }
+                  : { value: String(h.id), label: h.displayName, hint: `${h.username}${h.disabled ? ' · disabled' : ''}` },
               )}
-            </select>
+            />
           </div>
           <FieldError msg={fieldError(fields, 'holder')} />
         </div>
@@ -272,53 +291,38 @@ function GrantEditor({
           <span>3 · Where <span className="hint">{WHERE_HINT[form.scopeKind]}</span></span>
           {form.scopeKind === 'argo_project' ? (
             <>
-              <select
-                className="sel"
-                style={{ height: 30 }}
-                aria-label="Argo project"
-                aria-invalid={fields.argoProject ? true : undefined}
+              <ComboBox
+                label="Argo project"
+                invalid={!!fields.argoProject}
                 value={form.argoProject}
-                onChange={(e) => set({ argoProject: e.target.value })}
-              >
-                <option value="">Choose an Argo project…</option>
-                {uniq([...pickers.argoProjects, form.argoProject]).map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
+                onChange={(v) => set({ argoProject: v })}
+                placeholder="Choose an Argo project…"
+                options={uniq([...pickers.argoProjects, form.argoProject]).map((p) => ({ value: p }))}
+              />
               <FieldError msg={fieldError(fields, 'argoProject', 'scope.argoProject')} />
             </>
           ) : form.scopeKind === 'environment' ? (
             <>
-              <select
-                className="sel"
-                style={{ height: 30 }}
-                aria-label="Environment"
-                aria-invalid={fields.environment ? true : undefined}
+              <Select
+                label="Environment"
+                style={{ height: 30, width: '100%' }}
+                invalid={!!fields.environment}
                 value={form.environment}
-                onChange={(e) => set({ environment: e.target.value })}
-              >
-                <option value="">Choose an environment…</option>
-                {uniq([...pickers.environments, form.environment]).map((v) => (
-                  <option key={v} value={v}>{v}</option>
-                ))}
-              </select>
+                onChange={(v) => set({ environment: v })}
+                options={[{ value: '', label: 'Choose an environment…', disabled: true }, ...uniq([...pickers.environments, form.environment]).map((v) => ({ value: v, label: v }))]}
+              />
               <FieldError msg={fieldError(fields, 'environment', 'scope.environment')} />
             </>
           ) : form.scopeKind === 'cluster' ? (
             <>
-              <select
-                className="sel"
-                style={{ height: 30 }}
-                aria-label="Cluster"
-                aria-invalid={fields.cluster ? true : undefined}
+              <Select
+                label="Cluster"
+                style={{ height: 30, width: '100%' }}
+                invalid={!!fields.cluster}
                 value={form.cluster}
-                onChange={(e) => set({ cluster: e.target.value, namespace: '', workloads: [] })}
-              >
-                <option value="">Choose a cluster…</option>
-                {uniq([...pickers.clusters.map((c) => c.name), form.cluster]).map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
-              </select>
+                onChange={(v) => set({ cluster: v, namespace: '', extraNamespaces: [], workloads: [] })}
+                options={[{ value: '', label: 'Choose a cluster…', disabled: true }, ...uniq([...pickers.clusters.map((c) => c.name), form.cluster]).map((c) => ({ value: c, label: c }))]}
+              />
               {clusterEnv && (
                 <span className="row" style={{ gap: 6, fontWeight: 400 }}>
                   Environment <EnvBadge env={clusterEnv} />
@@ -329,51 +333,83 @@ function GrantEditor({
           ) : (
             <>
               <div className="row" style={{ gap: 8 }}>
-                <select
-                  className="sel"
+                <Select
+                  label="Cluster"
                   style={{ height: 30, flex: 1 }}
-                  aria-label="Cluster"
-                  aria-invalid={fields.cluster ? true : undefined}
+                  invalid={!!fields.cluster}
                   value={form.cluster}
-                  onChange={(e) => set({ cluster: e.target.value, namespace: '', workloads: [] })}
-                >
-                  <option value="">Cluster…</option>
-                  {uniq([...pickers.clusters.map((c) => c.name), form.cluster]).map((c) => (
-                    <option key={c} value={c}>{c}</option>
-                  ))}
-                </select>
+                  onChange={(v) => set({ cluster: v, namespace: '', extraNamespaces: [], workloads: [] })}
+                  options={[{ value: '', label: 'Cluster…', disabled: true }, ...uniq([...pickers.clusters.map((c) => c.name), form.cluster]).map((c) => ({ value: c, label: c }))]}
+                />
                 <Icon name="chev" className="muted" />
-                <select
-                  className="sel"
-                  style={{ height: 30, flex: 1 }}
-                  aria-label="Namespace"
-                  aria-invalid={fields.namespace ? true : undefined}
+                <ComboBox
+                  style={{ flex: 1 }}
+                  label="Namespace"
+                  invalid={!!fields.namespace}
                   disabled={!form.cluster}
                   value={form.namespace}
-                  onChange={(e) => set({ namespace: e.target.value, workloads: [] })}
-                >
-                  <option value="">{namespaces.loading ? 'Loading…' : 'Namespace…'}</option>
-                  {nsOptions.map((n) => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
-                </select>
+                  onChange={(v) => { set({ namespace: v, workloads: [] }); setWq(''); }}
+                  placeholder={namespaces.loading ? 'Loading…' : 'Namespace…'}
+                  options={nsOptions.map((n) => ({ value: n }))}
+                />
               </div>
               {clusterEnv && (
                 <span className="row" style={{ gap: 6, fontWeight: 400 }}>
                   Environment <EnvBadge env={clusterEnv} />
                 </span>
               )}
+              {many && form.namespace && (
+                <div className="f" role="group" aria-label="More namespaces">
+                  <span>More namespaces <span className="hint">Optional: the same grant on each, created together (up to {MAX_GRANT_BATCH})</span></span>
+                  {form.extraNamespaces.length > 0 && (
+                    <div className="pill-row">
+                      {form.extraNamespaces.map((ns) => (
+                        <span key={ns} className="chip ns-chip">
+                          <span className="mono">{ns}</span>
+                          <button type="button" className="linklike" aria-label={`Remove ${ns}`} onClick={() => set({ extraNamespaces: form.extraNamespaces.filter((x) => x !== ns) })}>
+                            <Icon name="x" size={12} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <ComboBox
+                    label="Add a namespace"
+                    value=""
+                    disabled={nsList.length >= MAX_GRANT_BATCH}
+                    invalid={!!fields.namespaces}
+                    onChange={(v) => set({ extraNamespaces: [...form.extraNamespaces, v] })}
+                    placeholder="Add another namespace…"
+                    options={nsOptions.filter((n) => !nsList.includes(n)).map((n) => ({ value: n }))}
+                  />
+                </div>
+              )}
+              {many && alreadyOn.length > 0 && (
+                <span className="hint" role="note">
+                  {holderName ?? 'This holder'} already has a grant on {alreadyOn.join(', ')}; a new grant is created beside it.
+                </span>
+              )}
               <FieldError msg={fieldError(fields, 'cluster', 'scope.cluster')} />
               <FieldError msg={fieldError(fields, 'namespace', 'scope.namespace')} />
+              <FieldError msg={fieldError(fields, 'namespaces')} />
               {namespaces.error ? <ErrorBanner error={namespaces.error} onRetry={namespaces.reload} /> : null}
               {form.scopeKind === 'workloads' && form.namespace && (
                 <>
+                  {wlOptions.length > LIST_SEARCH_FROM && (
+                    <label className="search" style={{ width: '100%', height: 28, background: 'var(--sf)' }}>
+                      <Icon name="search" />
+                      <input value={wq} onChange={(e) => setWq(e.target.value)} placeholder="Filter workloads" aria-label="Filter workloads" />
+                    </label>
+                  )}
                   <div className="pickbox" role="group" aria-label="Workloads">
                     {workloads.loading && wlOptions.length === 0 && <div style={{ padding: 8 }}><Skeleton rows={2} /></div>}
                     {!workloads.loading && wlOptions.length === 0 && !workloads.error && (
                       <div className="muted" style={{ padding: '8px 10px' }}>No workloads in this namespace.</div>
                     )}
-                    {wlOptions.map((w) => (
+                    {wlOptions.length > 0 && !wlOptions.some((w) => matchesQuery(`${w.kind} ${w.name}`, wq)) && (
+                      <div className="muted" style={{ padding: '8px 10px' }}>No workload matches.</div>
+                    )}
+                    {wlOptions.filter((w) => matchesQuery(`${w.kind} ${w.name}`, wq)).map((w) => (
                       <label key={wlKey(w)} className="chk">
                         <input type="checkbox" checked={form.workloads.includes(wlKey(w))} onChange={() => toggleWl(wlKey(w))} />
                         <span className="tag">{w.kind}</span>
@@ -599,58 +635,58 @@ function AccessChecker({
         <div className="row wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
           <label className="f" style={{ flex: '1 1 150px' }}>
             User
-            <select className="sel" style={{ height: 30 }} value={userId} onChange={(e) => setUserId(e.target.value)}>
-              <option value="">Choose a user…</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>{u.displayName} ({u.username})</option>
-              ))}
-            </select>
+            <ComboBox
+              label="User"
+              value={userId}
+              onChange={setUserId}
+              placeholder="Choose a user…"
+              options={users.map((u) => ({ value: String(u.id), label: u.displayName, hint: u.username }))}
+            />
             <FieldError msg={fieldError(fields, 'userId')} />
           </label>
           <label className="f" style={{ width: 110 }}>
             Action
-            <select className="sel" style={{ height: 30 }} value={action} onChange={(e) => setAction(e.target.value as Action)}>
-              {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
+            <Select label="Action" style={{ height: 30, width: '100%' }} value={action} onChange={setAction} options={ACTIONS.map((a) => ({ value: a, label: a }))} />
             <FieldError msg={fieldError(fields, 'action')} />
           </label>
         </div>
         <div className="row wrap" style={{ gap: 8, alignItems: 'flex-end' }}>
           <label className="f" style={{ flex: '1 1 110px' }}>
             Cluster
-            <select
-              className="sel"
-              style={{ height: 30 }}
+            <Select
+              label="Cluster"
+              style={{ height: 30, width: '100%' }}
               value={cluster}
-              onChange={(e) => { setCluster(e.target.value); setNamespace(''); setWorkload(''); }}
-            >
-              <option value="">Cluster…</option>
-              {clusters.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-            </select>
+              onChange={(v) => { setCluster(v); setNamespace(''); setWorkload(''); }}
+              options={[{ value: '', label: 'Cluster…', disabled: true }, ...clusters.map((c) => ({ value: c.name, label: c.name }))]}
+            />
             <FieldError msg={fieldError(fields, 'cluster')} />
           </label>
           <label className="f" style={{ flex: '1 1 130px' }}>
             Namespace
-            <select
-              className="sel"
-              style={{ height: 30 }}
+            <ComboBox
+              label="Namespace"
               value={namespace}
               disabled={!cluster}
-              onChange={(e) => { setNamespace(e.target.value); setWorkload(''); }}
-            >
-              <option value="">{namespaces.loading ? 'Loading…' : 'Namespace…'}</option>
-              {(namespaces.data ?? []).map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
+              onChange={(v) => { setNamespace(v); setWorkload(''); }}
+              placeholder={namespaces.loading ? 'Loading…' : 'Namespace…'}
+              options={(namespaces.data ?? []).map((n) => ({ value: n }))}
+            />
             <FieldError msg={fieldError(fields, 'namespace')} />
           </label>
           <label className="f" style={{ flex: '1.3 1 150px' }}>
             Workload
-            <select className="sel mono" style={{ height: 30 }} value={workload} disabled={!namespace} onChange={(e) => setWorkload(e.target.value)}>
-              <option value="">{workloads.loading ? 'Loading…' : '(whole namespace)'}</option>
-              {(workloads.data ?? []).map((w) => (
-                <option key={`${w.kind}/${w.name}`} value={`${w.kind}/${w.name}`}>{w.name} · {w.kind}</option>
-              ))}
-            </select>
+            <ComboBox
+              label="Workload"
+              value={workload}
+              disabled={!namespace}
+              onChange={setWorkload}
+              placeholder={workloads.loading ? 'Loading…' : '(whole namespace)'}
+              options={[
+                { value: '', label: '(whole namespace)' },
+                ...(workloads.data ?? []).map((w) => ({ value: `${w.kind}/${w.name}`, label: w.name, hint: w.kind })),
+              ]}
+            />
             <FieldError msg={fieldError(fields, 'workload')} />
           </label>
         </div>
@@ -679,10 +715,19 @@ function AccessChecker({
 
 /* --------------------------------------------------------------------- page */
 
+/** What the Grants search looks in: holder, scope names, cluster, environment, note, author. */
+function grantSearchText(g: GrantView): string {
+  const s = g.scope;
+  return [
+    g.holder.name, s.argoProject, s.cluster, s.namespace, s.environment, ...(s.workloads ?? []).map((w) => w.name),
+    g.environment, g.note, g.createdBy,
+  ].filter(Boolean).join(' ');
+}
+
 export function Grants() {
   const { isAdmin } = useAuth();
-  const [{ holder: fHolder, kind: fKind, cluster: fCluster, project: fProject, action: fAction, expiring: fExpiring, expired: fExpired }, setF] =
-    useUrlState({ holder: '', kind: '', cluster: '', project: '', action: '', expiring: false, expired: false });
+  const [{ q, holder: fHolder, kind: fKind, cluster: fCluster, project: fProject, action: fAction, expiring: fExpiring, expired: fExpired }, setF] =
+    useUrlState({ q: '', holder: '', kind: '', cluster: '', project: '', action: '', expiring: false, expired: false });
   // null: the editor dialog is closed.
   const [form, setForm] = useState<GrantForm | null>(null);
   const [checking, setChecking] = useState(false);
@@ -738,7 +783,9 @@ export function Grants() {
     setForm(formFromGrant(g));
   };
 
-  const list = grants.data ?? [];
+  const all = grants.data ?? [];
+  // The API filters by holder, scope kind, cluster, project and action; names are searched here.
+  const list = q.trim() ? all.filter((g) => matchesQuery(grantSearchText(g), q)) : all;
 
   return (
     <>
@@ -760,33 +807,29 @@ export function Grants() {
       </PageHeader>
 
       <div className="row wrap">
-        <select className="sel" aria-label="Holder" value={fHolder} onChange={(e) => setF({ holder: e.target.value })}>
-          <option value="">Any holder</option>
-          <optgroup label="Teams">
-            {(teams.data ?? []).map((t) => <option key={t.id} value={`team:${t.id}`}>{t.name}</option>)}
-          </optgroup>
-          <optgroup label="Users">
-            {(users.data ?? []).map((u) => <option key={u.id} value={`user:${u.id}`}>{u.displayName}</option>)}
-          </optgroup>
-        </select>
-        <select className="sel" aria-label="Scope kind" value={fKind} onChange={(e) => setF({ kind: e.target.value })}>
-          <option value="">Any scope</option>
-          {SCOPE_KINDS.map((k) => <option key={k} value={k}>{SCOPE_KIND_LABEL[k]}</option>)}
-        </select>
-        <select className="sel" aria-label="Cluster" value={fCluster} onChange={(e) => setF({ cluster: e.target.value })}>
-          <option value="">All clusters</option>
-          {clusterOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-        </select>
+        <label className="search" style={{ width: 240, height: 28, background: 'var(--sf)' }}>
+          <Icon name="search" />
+          <input value={q} onChange={(e) => setF({ q: e.target.value })} placeholder="Search names, namespaces, notes" aria-label="Search grants" />
+        </label>
+        <ComboBox
+          small
+          style={{ width: 200 }}
+          label="Holder"
+          value={fHolder}
+          onChange={(v) => setF({ holder: v })}
+          placeholder="Any holder"
+          options={[
+            { value: '', label: 'Any holder' },
+            ...(teams.data ?? []).map((t) => ({ value: `team:${t.id}`, label: t.name, hint: 'Team' })),
+            ...(users.data ?? []).map((u) => ({ value: `user:${u.id}`, label: u.displayName, hint: u.username })),
+          ]}
+        />
+        <Select label="Scope kind" value={fKind} onChange={(v) => setF({ kind: v })} options={[{ value: '', label: 'Any scope' }, ...SCOPE_KINDS.map((k) => ({ value: k, label: SCOPE_KIND_LABEL[k] }))]} />
+        <Select label="Cluster" value={fCluster} onChange={(v) => setF({ cluster: v })} options={[{ value: '', label: 'All clusters' }, ...clusterOptions.map((c) => ({ value: c, label: c }))]} />
         {ARGO_UI && (
-          <select className="sel" aria-label="Argo project" value={fProject} onChange={(e) => setF({ project: e.target.value })}>
-            <option value="">All Argo projects</option>
-            {projectOptions.map((p) => <option key={p} value={p}>{p}</option>)}
-          </select>
+          <Select label="Argo project" value={fProject} onChange={(v) => setF({ project: v })} options={[{ value: '', label: 'All Argo projects' }, ...projectOptions.map((p) => ({ value: p, label: p }))]} />
         )}
-        <select className="sel" aria-label="Action" value={fAction} onChange={(e) => setF({ action: e.target.value })}>
-          <option value="">Any action</option>
-          {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
+        <Select label="Action" value={fAction} onChange={(v) => setF({ action: v })} options={[{ value: '', label: 'Any action' }, ...ACTIONS.map((a) => ({ value: a, label: a }))]} />
         <label className="chk"><input type="checkbox" checked={fExpiring} onChange={(e) => setF({ expiring: e.target.checked })} /> Expiring soon</label>
         <label className="chk"><input type="checkbox" checked={fExpired} onChange={(e) => setF({ expired: e.target.checked })} /> Expired</label>
       </div>
@@ -798,7 +841,9 @@ export function Grants() {
           {grants.loading && !grants.data ? (
             <Skeleton rows={4} />
           ) : list.length === 0 ? (
-            <Empty>No grants match these filters.</Empty>
+            <Empty>
+              {all.length > 0 ? `No grants match “${q.trim()}”.` : 'No grants match these filters.'}
+            </Empty>
           ) : (
             <div className="tbl-wrap">
             <table className="tbl">

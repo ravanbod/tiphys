@@ -4,12 +4,13 @@ import type {
   ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, DecisionInfo, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
 } from '../api/types';
 import { kindFromSegment } from '../api/query';
-import { CSRF, DAY, HOUR, MIN, currentUser, getDb, nextId, personaRole } from './db';
+import { CSRF, DAY, HOUR, MIN, bgAt, currentUser, getDb, nextId, personaRole } from './db';
 import type { AppDef, MockUser, NsDef, WlDef } from './db';
 import { WORKLOAD_ACTIONS, accessMap, covers, decide, envOf, nsActions, userGrants } from './decide';
 import { buildCast, commandList } from './scripts';
 import { mergeTarget } from '../lib/requestMerge';
 import { ACTIONS } from '../lib/grantForm';
+import { groupRequests } from '../lib/requestBatches';
 import { checkSyncClusterKind, syncClusterKindsError } from '../lib/syncClusterKinds';
 import { terminateSocket } from './sockets';
 
@@ -233,10 +234,10 @@ function cronSummary(u: MockUser, n: NsDef, w: WlDef): CronJobSummary {
 // ---- auth + me
 on('GET', '/me', (c) => {
   const d = getDb();
-  const bg = d.breakGlasses.find((b) => b.userId === c.user.id && b.active && Date.parse(b.expiresAt) > Date.now()) ?? null;
+  const bg = d.breakGlasses.map((b) => bgAt(b)).find((b) => b.userId === c.user.id && (b.active || b.scheduled)) ?? null;
   const me: Me = {
     id: c.user.id, username: c.user.username, displayName: c.user.displayName, role: c.user.role,
-    teams: c.user.teams, csrfToken: CSRF, breakGlass: bg,
+    teams: c.user.teams, managedTeams: managedTeams(c.user).map((t) => ({ id: t.id, name: t.name })), csrfToken: CSRF, breakGlass: bg,
     breakGlassRequest: d.settings.breakGlassMode === 'off' ? null : pendingBgRequest(c.user.id) ?? null,
     settings: { breakGlassDefaultMinutes: d.settings.breakGlassDefaultMinutes, breakGlassMaxMinutes: d.settings.breakGlassMaxMinutes, execIdleTimeoutMinutes: d.settings.execIdleTimeoutMinutes, execMaxSessionMinutes: d.settings.execMaxSessionMinutes, clusterRegistration: true, debugEnabled: true, argoUrl: 'https://argocd.example.com', breakGlassMode: d.settings.breakGlassMode, localUsers: true },
     argo: { fetchedAt: iso(d.argo.fetchedAt), ageSeconds: Math.round((Date.now() - d.argo.fetchedAt) / 1000) + (d.argo.stale ? 1200 : 0), stale: d.argo.stale },
@@ -531,7 +532,7 @@ on('GET', '/my/access', (c) => {
     id: g.id, holder: { kind: g.holder.kind, name: g.holder.name }, scope: g.scope, actions: g.actions, expiresAt: g.expiresAt, note: g.note,
     expired: !!g.expiresAt && Date.parse(g.expiresAt) < Date.now(),
   }));
-  const bg = d.breakGlasses.find((b) => b.userId === c.user.id && b.active && Date.parse(b.expiresAt) > Date.now()) ?? null;
+  const bg = d.breakGlasses.map((b) => bgAt(b)).find((b) => b.userId === c.user.id && (b.active || b.scheduled)) ?? null;
   return { grants, teams: c.user.teams, breakGlass: bg, requests: d.requests.filter((r) => r.userId === c.user.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)) };
 });
 on('GET', '/access-requests', (c) => {
@@ -542,7 +543,9 @@ on('GET', '/access-requests', (c) => {
   return [...list].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 });
 on('POST', '/access-requests', (c) => {
-  const b = c.body as unknown as { scope: ScopeView; actions: Action[]; durationHours: number | null; reason: string };
+  const b = c.body as unknown as { scope: ScopeView; actions: Action[]; durationHours: number | null; reason: string; teamId?: number };
+  const team = b.teamId ? managedTeams(c.user).find((t) => t.id === b.teamId) : undefined;
+  if (b.teamId && !team) throw forbiddenRole();
   const fields: Record<string, string> = {};
   if (!b.reason || b.reason.trim().length < 10) fields.reason = 'Please explain why you need this (at least 10 characters).';
   if (!b.actions?.length) fields.actions = 'Pick at least one action.';
@@ -553,19 +556,18 @@ on('POST', '/access-requests', (c) => {
   const r: AccessRequest = {
     id: nextId('request'), userId: c.user.id, username: c.user.username, scope: b.scope, actions: b.actions, durationHours: b.durationHours, reason: b.reason,
     status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, resultingGrantId: null, createdAt: iso(Date.now()),
+    team: team ? { id: team.id, name: team.name } : null, batchId: null,
   };
   getDb().requests.push(r);
   logAudit(c.user, 'access_request.created', null, 'succeeded', { details: { requestId: r.id, scope: scopeText(b.scope) } });
   return { __status: 201, data: r };
 });
 function holderOfUser(u: MockUser): GrantView['holder'] { return { kind: 'user', id: u.id, name: u.displayName || u.username }; }
-on('POST', '/access-requests/:id/approve', (c) => {
-  needAdmin(c);
+type ApproveBody = { note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean };
+/** Approves a pending request like the server: merge into the holder's own same-scope grant that ends no later, else a new grant. */
+function approveMock(admin: MockUser, r: AccessRequest, b: ApproveBody) {
   const d = getDb();
-  const r = d.requests.find((x) => x.id === Number(c.params.id));
-  if (!r) throw notFound();
-  if (r.status !== 'pending') throw new MockError(409, 'conflict', 'This request was already decided.');
-  const b = c.body as { note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean };
+  if (r.status !== 'pending') throw new MockError(409, 'conflict', `Request #${r.id} was already decided.`);
   if (b.actions?.length) {
     if (r.scope.kind === 'workloads' && b.actions.includes('sync')) throw invalid({ actions: 'Sync needs a namespace, cluster, environment or Argo project scope.' });
     r.actions = b.actions;
@@ -573,33 +575,95 @@ on('POST', '/access-requests/:id/approve', (c) => {
   const hours = b.durationHours === undefined ? r.durationHours : b.durationHours;
   const u = d.users.find((x) => x.id === r.userId)!;
   const expiresAt = hours === null ? null : Date.now() + hours * HOUR;
-  // Like the server: add to the requester's own same-scope grant that ends no later.
-  const own = d.grants.filter((g) => g.holder.kind === 'user' && g.holder.id === u.id);
-  let g = b.separate ? null : mergeTarget(own, r.scope, expiresAt, Date.now());
+  const holder: GrantView['holder'] = r.team ? { kind: 'team', id: r.team.id, name: r.team.name } : holderOfUser(u);
+  const own = d.grants.filter((g) => g.holder.kind === holder.kind && g.holder.id === holder.id);
+  let g = b.separate ? null : mergeTarget(own, r.scope, expiresAt, Date.now(), holder.kind);
   if (g) {
     g.actions = ACTIONS.filter((a) => g!.actions.includes(a) || r.actions.includes(a));
     g.expiresAt = expiresAt === null ? null : iso(expiresAt);
   } else {
     g = {
-      id: nextId('grant'), holder: holderOfUser(u), scope: r.scope, actions: r.actions, expiresAt: expiresAt === null ? null : iso(expiresAt), note: `Request #${r.id}`,
-      expired: false, createdBy: c.user.username, createdAt: iso(Date.now()), environment: null,
+      id: nextId('grant'), holder, scope: r.scope, actions: r.actions, expiresAt: expiresAt === null ? null : iso(expiresAt), note: `Request #${r.id}`,
+      expired: false, createdBy: admin.username, createdAt: iso(Date.now()), environment: null,
     };
     d.grants.push(g);
   }
-  Object.assign(r, { status: 'approved', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: b.note || null, resultingGrantId: g.id, durationHours: hours });
-  logAudit(c.user, 'access_request.approved', null, 'succeeded', { details: { requestId: r.id, grantId: g.id } });
+  Object.assign(r, { status: 'approved', decidedBy: admin.username, decidedAt: iso(Date.now()), decisionNote: b.note || null, resultingGrantId: g.id, durationHours: hours });
+  logAudit(admin, 'access_request.approved', null, 'succeeded', { details: { requestId: r.id, grantId: g.id, batchId: r.batchId } });
+}
+function rejectMock(admin: MockUser, r: AccessRequest, note: string) {
+  if (r.status !== 'pending') throw new MockError(409, 'conflict', `Request #${r.id} was already decided.`);
+  Object.assign(r, { status: 'rejected', decidedBy: admin.username, decidedAt: iso(Date.now()), decisionNote: note || null });
+  logAudit(admin, 'access_request.rejected', null, 'succeeded', { details: { requestId: r.id, batchId: r.batchId } });
+}
+const inBatch = () => new MockError(409, 'conflict', 'This request is part of a batch; decide the whole batch.');
+on('POST', '/access-requests/:id/approve', (c) => {
+  needAdmin(c);
+  const r = getDb().requests.find((x) => x.id === Number(c.params.id));
+  if (!r) throw notFound();
+  if (r.batchId) throw inBatch();
+  approveMock(c.user, r, c.body as ApproveBody);
   return r;
 });
 on('POST', '/access-requests/:id/reject', (c) => {
   needAdmin(c);
   const r = getDb().requests.find((x) => x.id === Number(c.params.id));
   if (!r) throw notFound();
+  if (r.batchId) throw inBatch();
   if (r.status !== 'pending') throw new MockError(409, 'conflict', 'This request was already decided.');
   const note = String((c.body as { note?: string }).note ?? '').trim();
   if (!note) throw invalid({ note: 'A note is required when rejecting.' });
-  Object.assign(r, { status: 'rejected', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: note });
-  logAudit(c.user, 'access_request.rejected', null, 'succeeded', { details: { requestId: r.id } });
+  rejectMock(c.user, r, note);
   return r;
+});
+on('POST', '/access-requests/batch', (c) => {
+  const b = c.body as unknown as { cluster: string; namespaces: string[]; actions: Action[]; durationHours: number | null; reason: string; teamId?: number };
+  const team = b.teamId ? managedTeams(c.user).find((t) => t.id === b.teamId) : undefined;
+  if (b.teamId && !team) throw forbiddenRole();
+  const nss = [...new Set((b.namespaces ?? []).map((n) => n.trim()).filter(Boolean))];
+  const fields: Record<string, string> = {};
+  if (nss.length < 2) fields.namespaces = 'Pick at least two namespaces (one is an ordinary request).';
+  if (nss.length > 20) fields.namespaces = 'A batch has at most 20 namespaces.';
+  const prot = nss.find((n) => getDb().protectedNamespaces.includes(n));
+  if (prot) fields.namespaces = `${prot} is protected and cannot be requested`;
+  if (hiddenCluster(c.user, b.cluster)) fields.cluster = 'This cluster is protected and cannot be requested.';
+  if (!b.reason || b.reason.trim().length < 10) fields.reason = 'Please explain why you need this (at least 10 characters).';
+  if (!b.actions?.length) fields.actions = 'Pick at least one action.';
+  if (Object.keys(fields).length) throw invalid(fields);
+  const batchId = crypto.randomUUID();
+  const out = nss.map((ns): AccessRequest => ({
+    id: nextId('request'), userId: c.user.id, username: c.user.username, scope: { kind: 'namespace', cluster: b.cluster, namespace: ns },
+    actions: b.actions, durationHours: b.durationHours, reason: b.reason, status: 'pending', decidedBy: null, decidedAt: null,
+    decisionNote: null, resultingGrantId: null, createdAt: iso(Date.now()), team: team ? { id: team.id, name: team.name } : null, batchId,
+  }));
+  getDb().requests.push(...out);
+  for (const r of out) logAudit(c.user, 'access_request.created', null, 'succeeded', { details: { requestId: r.id, scope: scopeText(r.scope), batchId } });
+  return { __status: 201, data: out };
+});
+on('POST', '/access-requests/batch/:batchId/decide', (c) => {
+  needAdmin(c);
+  const d = getDb();
+  const reqs = d.requests.filter((r) => r.batchId === c.params.batchId);
+  if (!reqs.length) throw notFound();
+  const b = c.body as ApproveBody & { approve?: number[] };
+  const approve = b.approve ?? [];
+  const stray = approve.find((id) => !reqs.some((r) => r.id === id));
+  if (stray) throw invalid({ approve: `Request #${stray} is not part of this batch.` });
+  const done = reqs.find((r) => r.status !== 'pending');
+  if (done) throw new MockError(409, 'conflict', `Request #${done.id} (${done.scope.namespace}) is already ${done.status}.`);
+  // All or nothing, like the server's transaction.
+  const before = structuredClone({ requests: d.requests, grants: d.grants });
+  try {
+    for (const r of reqs) {
+      if (approve.includes(r.id)) approveMock(c.user, r, b);
+      else rejectMock(c.user, r, String(b.note ?? '').trim());
+    }
+  } catch (e) {
+    d.requests = before.requests;
+    d.grants = before.grants;
+    throw e;
+  }
+  return reqs;
 });
 /** Checks a break-glass reason and duration; returns the minutes. */
 function bgInput(b: { reason?: string; durationMinutes?: number }): number {
@@ -611,7 +675,18 @@ function bgInput(b: { reason?: string; durationMinutes?: number }): number {
   if (Object.keys(fields).length) throw invalid(fields);
   return mins;
 }
-const hasActiveBg = (userId: number) => getDb().breakGlasses.some((x) => x.userId === userId && x.active && Date.parse(x.expiresAt) > Date.now());
+/** Active or scheduled: a user has one at a time. */
+const hasCurrentBg = (userId: number) => getDb().breakGlasses.some((x) => x.userId === userId && (bgAt(x).active || bgAt(x).scheduled));
+/** A requested start as the server reads it: undefined for now, else ahead within seven days. */
+function bgStart(v: string | undefined): number | undefined {
+  if (!v) return undefined;
+  const t = Date.parse(v);
+  const now = Date.now();
+  if (Number.isNaN(t) || t < now - 5 * MIN) throw invalid({ startsAt: 'start time is in the past' });
+  if (t <= now + MIN) return undefined;
+  if (t > now + 7 * 24 * 60 * MIN) throw invalid({ startsAt: 'start time must be within 7 days' });
+  return t;
+}
 /** Marks pending requests past their expiry as expired, as the server does every 30 s. */
 function expireBgRequests() {
   for (const r of getDb().bgRequests) if (r.status === 'pending' && Date.parse(r.expiresAt) <= Date.now()) Object.assign(r, { status: 'expired', decidedBy: 'system', decidedAt: r.expiresAt });
@@ -620,8 +695,9 @@ function pendingBgRequest(userId: number): BreakGlassRequest | undefined {
   expireBgRequests();
   return getDb().bgRequests.find((r) => r.userId === userId && r.status === 'pending');
 }
-function startBg(userId: number, username: string, reason: string, mins: number): BreakGlass {
-  const bg: BreakGlass = { id: nextId('bg'), userId, username, reason, startedAt: iso(Date.now()), expiresAt: iso(Date.now() + mins * MIN), endedAt: null, endedBy: null, active: true };
+function startBg(userId: number, username: string, reason: string, mins: number, startsAt?: number): BreakGlass {
+  const begin = Math.max(Date.now(), startsAt ?? 0);
+  const bg: BreakGlass = bgAt({ id: nextId('bg'), userId, username, reason, startedAt: iso(begin), expiresAt: iso(begin + mins * MIN), endedAt: null, endedBy: null, active: false, scheduled: false });
   getDb().breakGlasses.unshift(bg);
   return bg;
 }
@@ -630,11 +706,12 @@ on('POST', '/break-glass', (c) => {
   const d = getDb();
   if (d.settings.breakGlassMode === 'off') throw new MockError(403, 'break_glass_disabled', 'Break-glass is turned off.');
   if (d.settings.breakGlassMode === 'approval') throw new MockError(409, 'break_glass_approval_required', "Break-glass needs an admin's approval: request it instead.");
-  const b = c.body as { reason?: string; durationMinutes?: number };
+  const b = c.body as { reason?: string; durationMinutes?: number; startsAt?: string };
   const mins = bgInput(b);
-  if (hasActiveBg(c.user.id)) throw new MockError(409, 'conflict', 'Break-glass is already active.');
-  const bg = startBg(c.user.id, c.user.username, b.reason!.trim(), mins);
-  logAudit(c.user, 'break_glass.start', null, 'succeeded', { breakGlassId: bg.id, details: { reason: bg.reason, minutes: mins } });
+  const startsAt = bgStart(b.startsAt);
+  if (hasCurrentBg(c.user.id)) throw new MockError(409, 'conflict', 'conflict: you already have an active or scheduled break-glass');
+  const bg = startBg(c.user.id, c.user.username, b.reason!.trim(), mins, startsAt);
+  logAudit(c.user, 'break_glass.start', null, 'succeeded', { breakGlassId: bg.id, details: { reason: bg.reason, minutes: mins, ...(startsAt ? { startsAt: bg.startedAt } : {}) } });
   return { __status: 201, data: bg };
 });
 on('POST', '/break-glass/requests', (c) => {
@@ -642,18 +719,19 @@ on('POST', '/break-glass/requests', (c) => {
   const d = getDb();
   if (d.settings.breakGlassMode === 'off') throw new MockError(403, 'break_glass_disabled', 'Break-glass is turned off.');
   if (d.settings.breakGlassMode === 'self') throw new MockError(409, 'conflict', 'conflict: break-glass starts without approval');
-  const b = c.body as { reason?: string; durationMinutes?: number };
+  const b = c.body as { reason?: string; durationMinutes?: number; startsAt?: string };
   const mins = bgInput(b);
-  if (hasActiveBg(c.user.id)) throw new MockError(409, 'conflict', 'Break-glass is already active.');
+  const startsAt = bgStart(b.startsAt);
+  if (hasCurrentBg(c.user.id)) throw new MockError(409, 'conflict', 'conflict: you already have an active or scheduled break-glass');
   if (pendingBgRequest(c.user.id)) throw new MockError(409, 'conflict', 'conflict: you already have a pending break-glass request');
   const now = Date.now();
   const r: BreakGlassRequest = {
-    id: nextId('bgRequest'), userId: c.user.id, username: c.user.username, reason: b.reason!.trim(), durationMinutes: mins, status: 'pending',
+    id: nextId('bgRequest'), userId: c.user.id, username: c.user.username, reason: b.reason!.trim(), durationMinutes: mins, startsAt: startsAt ? iso(startsAt) : null, status: 'pending',
     decidedBy: null, decidedAt: null, decisionNote: null, approvedMinutes: null, breakGlassId: null, createdAt: iso(now),
-    expiresAt: iso(now + d.settings.breakGlassRequestMaxAgeMinutes * MIN),
+    expiresAt: iso(Math.max(now, startsAt ?? 0) + d.settings.breakGlassRequestMaxAgeMinutes * MIN),
   };
   d.bgRequests.unshift(r);
-  logAudit(c.user, 'break_glass.request', null, 'succeeded', { reason: r.reason, details: { requestId: r.id, minutes: mins } });
+  logAudit(c.user, 'break_glass.request', null, 'succeeded', { reason: r.reason, details: { requestId: r.id, minutes: mins, ...(r.startsAt ? { startsAt: r.startsAt } : {}) } });
   return { __status: 201, data: r };
 });
 on('GET', '/break-glass/requests', (c) => {
@@ -677,8 +755,8 @@ on('POST', '/break-glass/requests/:id/approve', (c) => {
   const b = (c.body ?? {}) as { note?: string; durationMinutes?: number };
   const mins = b.durationMinutes || r.durationMinutes;
   if (mins < 1 || mins > d.settings.breakGlassMaxMinutes) throw invalid({ durationMinutes: `duration must be between 1 and ${d.settings.breakGlassMaxMinutes} minutes` });
-  if (hasActiveBg(r.userId)) throw new MockError(409, 'conflict', `conflict: ${r.username} already has an active break-glass`);
-  const bg = startBg(r.userId, r.username, r.reason, mins);
+  if (hasCurrentBg(r.userId)) throw new MockError(409, 'conflict', `conflict: ${r.username} already has an active or scheduled break-glass`);
+  const bg = startBg(r.userId, r.username, r.reason, mins, r.startsAt ? Date.parse(r.startsAt) : undefined);
   Object.assign(r, { status: 'approved', decidedBy: c.user.username, decidedAt: iso(Date.now()), decisionNote: b.note ?? null, approvedMinutes: mins, breakGlassId: bg.id });
   logAudit(c.user, 'break_glass.start', null, 'succeeded', { breakGlassId: bg.id, reason: r.reason, details: { owner: r.username, requestId: r.id, minutes: mins, requestedMinutes: r.durationMinutes } });
   return r;
@@ -704,11 +782,13 @@ on('POST', '/break-glass/:id/end', (c) => {
   const bg = getDb().breakGlasses.find((x) => x.id === Number(c.params.id));
   if (!bg) throw notFound();
   if (bg.userId !== c.user.id && !isAdmin(c.user)) throw forbiddenRole();
-  Object.assign(bg, { active: false, endedAt: iso(Date.now()), endedBy: c.user.username });
-  logAudit(c.user, 'break_glass.ended', null, 'succeeded', { breakGlassId: bg.id });
+  const view = bgAt(bg);
+  if (!view.active && !view.scheduled) throw new MockError(409, 'conflict', 'conflict: break-glass is not active');
+  Object.assign(bg, { active: false, scheduled: false, endedAt: iso(Date.now()), endedBy: c.user.username });
+  logAudit(c.user, 'break_glass.end', null, 'succeeded', { breakGlassId: bg.id, details: { owner: bg.username, ...(view.scheduled ? { beforeStart: true } : {}) } });
   return bg;
 });
-on('GET', '/break-glass', (c) => { needStaff(c.user); return getDb().breakGlasses; });
+on('GET', '/break-glass', (c) => { needStaff(c.user); return getDb().breakGlasses.map((b) => bgAt(b)); });
 
 function logAudit(u: MockUser, eventType: string, action: Action | null, result: AuditEvent['result'], extra: Partial<AuditEvent> = {}) {
   const d = getDb();
@@ -762,6 +842,9 @@ on('GET', '/audit', (c) => {
   let list = getDb().audit;
   const eq = (k: keyof AuditEvent, p: string) => { const v = q.get(p); if (v) list = list.filter((e) => String(e[k] ?? '') === v); };
   eq('username', 'user'); eq('action', 'action'); eq('result', 'result'); eq('cluster', 'cluster'); eq('namespace', 'namespace'); eq('environment', 'environment'); eq('breakGlassId', 'breakGlassId'); eq('sessionId', 'sessionId');
+  if (q.get('breakGlass') === 'true') list = list.filter((e) => e.breakGlassId !== null);
+  if (q.get('entity')) list = list.filter((e) => e.details?.entity === q.get('entity'));
+  if (q.get('entityId')) list = list.filter((e) => e.details?.id !== undefined && String(e.details.id) === q.get('entityId'));
   if (q.get('eventType')) list = list.filter((e) => e.eventType.startsWith(q.get('eventType')!));
   if (q.get('from')) list = list.filter((e) => e.at >= q.get('from')!);
   if (q.get('to')) list = list.filter((e) => e.at <= q.get('to')!);
@@ -776,7 +859,10 @@ on('GET', '/audit', (c) => {
 // ---- admin
 const R = (path: string, h: Handler, method = 'GET') => on(method, path, (c) => { if (method === 'GET') adminRead(c); else needAdmin(c); return h(c); });
 const userView = (u: MockUser) => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role, disabled: u.disabled, keycloakBound: u.keycloakBound, local: u.local, lastLoginAt: u.lastLoginAt, teams: u.teams, activeSessions: getDb().sessions.filter((s) => s.active && s.userId === u.id).length });
-const teamView = (t: ReturnType<typeof getDb>['teams'][number]) => ({ id: t.id, name: t.name, description: t.description, members: t.memberIds.map((id) => getDb().users.find((u) => u.id === id)!).filter(Boolean).map((u) => ({ id: u.id, username: u.username, displayName: u.displayName })) });
+const people = (ids: number[]) => ids.map((id) => getDb().users.find((u) => u.id === id)!).filter(Boolean)
+  .map((u) => ({ id: u.id, username: u.username, displayName: u.displayName }))
+  .sort((a, b) => a.username.localeCompare(b.username));
+const teamView = (t: ReturnType<typeof getDb>['teams'][number]) => ({ id: t.id, name: t.name, description: t.description, members: people(t.memberIds), managers: people(t.managerIds) });
 function syncTeams() {
   const d = getDb();
   for (const u of d.users) {
@@ -823,7 +909,7 @@ R('/admin/teams', () => getDb().teams.map(teamView));
 R('/admin/teams', (c) => {
   const b = c.body as { name?: string; description?: string };
   if (!b.name?.trim()) throw invalid({ name: 'Name is required.' });
-  const t = { id: nextId('team'), name: b.name.trim(), description: b.description ?? '', memberIds: [] as number[] };
+  const t = { id: nextId('team'), name: b.name.trim(), description: b.description ?? '', memberIds: [] as number[], managerIds: [] as number[] };
   getDb().teams.push(t);
   return { __status: 201, data: teamView(t) };
 }, 'POST');
@@ -851,6 +937,60 @@ R('/admin/teams/:id/members', (c) => {
   logAudit(c.user, 'admin.team.members_changed', null, 'succeeded', { details: { team: t.name, members: t.memberIds } });
   return teamView(t);
 }, 'PUT');
+R('/admin/teams/:id/managers', (c) => {
+  const d = getDb();
+  const t = d.teams.find((x) => x.id === Number(c.params.id));
+  if (!t) throw notFound();
+  const ids = (c.body as { userIds?: number[] }).userIds ?? [];
+  const local = d.users.find((u) => ids.includes(u.id) && u.local);
+  if (local) throw invalid({ userIds: `${local.username} is a local user; only Keycloak users can manage a team` });
+  logAudit(c.user, 'admin.change', null, 'succeeded', { details: { entity: 'team', operation: 'set_managers', id: t.id, before: t.managerIds, after: ids } });
+  t.managerIds = ids.slice();
+  return undefined;
+}, 'PUT');
+
+// ---- my teams (team managers)
+const managedTeams = (u: { id: number; local: boolean }) => (u.local ? [] : getDb().teams.filter((t) => t.managerIds.includes(u.id)));
+function managedTeam(c: { user: { id: number; local: boolean }; params: Record<string, string> }) {
+  const t = managedTeams(c.user).find((x) => x.id === Number(c.params.id));
+  if (!t) throw forbiddenRole();
+  return t;
+}
+on('GET', '/my/teams', (c) => managedTeams(c.user).map((t) => ({
+  id: t.id, name: t.name, description: t.description, members: people(t.memberIds),
+  requests: getDb().requests.filter((r) => r.team?.id === t.id).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+  grants: getDb().grants.filter((g) => g.holder.kind === 'team' && g.holder.id === t.id).map((g) => ({
+    id: g.id, scope: g.scope, actions: g.actions, expiresAt: g.expiresAt, expired: !!g.expiresAt && Date.parse(g.expiresAt) < Date.now(),
+  })),
+})));
+on('GET', '/my/teams/candidates', (c) => {
+  if (managedTeams(c.user).length === 0) throw forbiddenRole();
+  return people(getDb().users.filter((u) => !u.disabled && !u.local).map((u) => u.id));
+});
+on('POST', '/my/teams/:id/members', (c) => {
+  const t = managedTeam(c);
+  const u = getDb().users.find((x) => x.id === (c.body as { userId?: number }).userId);
+  if (!u) throw invalid({ userId: 'unknown user' });
+  if (u.disabled) throw invalid({ userId: `${u.username} is disabled` });
+  if (u.local) throw invalid({ userId: `${u.username} is a local user; only an admin can add them` });
+  if (!t.memberIds.includes(u.id)) {
+    t.memberIds.push(u.id);
+    syncTeams();
+    logAudit(c.user, 'admin.change', null, 'succeeded', { details: { entity: 'team', operation: 'add_member', id: t.id, after: { userId: u.id, username: u.username } } });
+  }
+  return undefined;
+});
+on('DELETE', '/my/teams/:id/members/:userId', (c) => {
+  const t = managedTeam(c);
+  const id = Number(c.params.userId);
+  if (t.memberIds.includes(id)) {
+    t.memberIds = t.memberIds.filter((x) => x !== id);
+    syncTeams();
+    const u = getDb().users.find((x) => x.id === id);
+    logAudit(c.user, 'admin.change', null, 'succeeded', { details: { entity: 'team', operation: 'remove_member', id: t.id, before: { userId: id, username: u?.username } } });
+  }
+  return undefined;
+});
 
 function grantFromInput(b: GrantInput, id: number, createdBy: string): GrantView {
   const d = getDb();
@@ -900,6 +1040,24 @@ R('/admin/grants', (c) => {
   getDb().grants.push(g);
   logAudit(c.user, 'admin.grant.created', null, 'succeeded', { details: { grantId: g.id, after: { holder: g.holder.name, scope: g.scope, actions: g.actions } } });
   return { __status: 201, data: g };
+}, 'POST');
+R('/admin/grants/batch', (c) => {
+  needAdmin(c);
+  const b = c.body as unknown as GrantInput & { namespaces?: string[] };
+  const nss = [...new Set((b.namespaces ?? []).map((n) => n.trim()).filter(Boolean))];
+  if (b.scope.kind !== 'namespace') throw invalid({ scope: 'Several namespaces need a namespace scope.' });
+  if (nss.length < 2) throw invalid({ namespaces: 'Pick at least two namespaces (one is an ordinary grant).' });
+  if (nss.length > 50) throw invalid({ namespaces: 'At most 50 namespaces at once.' });
+  const prot = nss.find((n) => getDb().protectedNamespaces.includes(n));
+  if (prot) throw invalid({ namespaces: `${prot}: this namespace is protected and cannot be granted` });
+  // All or nothing: build every grant before storing any.
+  const gs = nss.map((ns) => grantFromInput({ ...b, scope: { kind: 'namespace', cluster: b.scope.cluster, namespace: ns } }, nextId('grant'), c.user.username));
+  const batchId = crypto.randomUUID();
+  for (const g of gs) {
+    getDb().grants.push(g);
+    logAudit(c.user, 'admin.grant.created', null, 'succeeded', { details: { grantId: g.id, batchId, after: { holder: g.holder.name, scope: g.scope, actions: g.actions } } });
+  }
+  return { __status: 201, data: gs };
 }, 'POST');
 R('/admin/grants/:id', (c) => {
   const d = getDb();
@@ -1078,9 +1236,10 @@ R('/admin/overview', () => {
   const d = getDb();
   return {
     activeExecSessions: d.sessions.filter((s) => s.active).length, openLogStreams: 3,
-    pendingRequests: d.requests.filter((r) => r.status === 'pending').length,
+    // A batch counts once, like the server.
+    pendingRequests: groupRequests(d.requests.filter((r) => r.status === 'pending')).length,
     pendingBreakGlassRequests: (expireBgRequests(), d.bgRequests.filter((r) => r.status === 'pending').length),
-    activeBreakGlasses: d.breakGlasses.filter((b) => b.active && Date.parse(b.expiresAt) > Date.now()).length,
+    activeBreakGlasses: d.breakGlasses.filter((b) => bgAt(b).active).length,
     clustersUnreachable: d.clusters.filter((x) => !x.reachable).length,
   };
 });

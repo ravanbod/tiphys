@@ -100,7 +100,8 @@ func (h *Handler) auditFilter(c *gin.Context) application.AuditFilter {
 		From: parseTime(c.Query("from")), To: parseTime(c.Query("to")), Username: c.Query("user"),
 		EventType: c.Query("eventType"), Action: c.Query("action"), Result: domain.AuditResult(c.Query("result")),
 		Cluster: c.Query("cluster"), Namespace: c.Query("namespace"), Environment: c.Query("environment"),
-		BreakGlassID: queryInt64(c, "breakGlassId"), SessionID: c.Query("sessionId"), Text: c.Query("q"),
+		BreakGlassID: queryInt64(c, "breakGlassId"), BreakGlass: queryBool(c, "breakGlass"), SessionID: c.Query("sessionId"),
+		Entity: c.Query("entity"), EntityID: c.Query("entityId"), Text: c.Query("q"),
 	}
 }
 
@@ -262,14 +263,20 @@ func (h *Handler) AdminSetPassword(c *gin.Context) {
 
 func (h *Handler) teamView(t domain.Team) teamDTO {
 	snap := h.svc.Policy.Current()
-	members := []memberDTO{}
-	for _, id := range t.MemberIDs {
+	return teamDTO{ID: t.ID, Name: t.Name, Description: t.Description,
+		Members: memberViews(snap, t.MemberIDs), Managers: memberViews(snap, t.ManagerIDs)}
+}
+
+// memberViews resolves user ids to members, sorted by username.
+func memberViews(snap *application.PolicySnapshot, ids []int64) []memberDTO {
+	out := []memberDTO{}
+	for _, id := range ids {
 		if u, ok := snap.Users[id]; ok {
-			members = append(members, memberDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName})
+			out = append(out, memberDTO{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName})
 		}
 	}
-	sort.Slice(members, func(i, j int) bool { return members[i].Username < members[j].Username })
-	return teamDTO{ID: t.ID, Name: t.Name, Description: t.Description, Members: members}
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+	return out
 }
 
 func (h *Handler) AdminTeams(c *gin.Context) {
@@ -342,6 +349,24 @@ func (h *Handler) AdminSetMembers(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Admin.SetTeamMembers(c.Request.Context(), principal(c), id, in.UserIDs); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) AdminSetManagers(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	var in struct {
+		UserIDs []int64 `json:"userIds"`
+	}
+	if !bindJSON(h, c, &in) {
+		return
+	}
+	if err := h.svc.Admin.SetTeamManagers(c.Request.Context(), principal(c), id, in.UserIDs); err != nil {
 		h.writeError(c, err)
 		return
 	}
@@ -457,6 +482,33 @@ func (h *Handler) AdminCreateGrant(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, h.grantNamer().toGrant(g))
+}
+
+// AdminCreateGrants creates the grant on each of several namespaces of the
+// scope's cluster (scope.kind namespace, scope.namespace ignored).
+func (h *Handler) AdminCreateGrants(c *gin.Context) {
+	var in struct {
+		grantInput
+		Namespaces []string `json:"namespaces"`
+	}
+	if !bindJSON(h, c, &in) {
+		return
+	}
+	g, err := in.toDomain()
+	var gs []domain.Grant
+	if err == nil {
+		gs, err = h.svc.Admin.CreateGrants(c.Request.Context(), principal(c), g, in.Namespaces)
+	}
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	n := h.grantNamer()
+	out := make([]grantDTO, len(gs))
+	for i, g := range gs {
+		out[i] = n.toGrant(g)
+	}
+	c.JSON(http.StatusCreated, out)
 }
 
 func (h *Handler) AdminUpdateGrant(c *gin.Context) {

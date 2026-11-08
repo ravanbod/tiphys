@@ -4,23 +4,30 @@ import { ApiError, api } from '../../api';
 import type {
   AccessRequest, Action, ClusterView, EnvironmentOverride, GrantView, ScopeView, UserView,
 } from '../../api';
-import { ActionChips, Avatar, EnvBadge } from '../../components/Badges';
+import { ActionChips, Avatar, EnvBadge, isProd } from '../../components/Badges';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
 import { PageHeader } from '../../components/PageHeader';
 import { SCOPE_KIND_LABEL, ScopeCell, scopeCluster, scopeName } from '../../components/Scope';
 import { Seg } from '../../components/Seg';
+import { Select } from '../../components/Select';
 import { FieldError, ReadOnlyNote } from '../../components/AdminBits';
 import '../../components/adminPages.css';
 import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
 import { useApi } from '../../hooks/useApi';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useMedia } from '../../hooks/useMedia';
 import { useNow } from '../../hooks/useNow';
 import { scopeEnvironment } from '../../lib/adminEnv';
 import { BreakGlassRequests } from './BreakGlassRequests';
 import { ACTIONS, APP_SCOPE_HINT, actionOptionLabel, isAppAction } from '../../lib/grantForm';
 import { mergeTarget, sameScope } from '../../lib/requestMerge';
+import {
+  NO_REQUEST_FILTERS, activeRequestFilters, cleanRequestFilters, matchesRequest, requestFiltersKey,
+} from '../../lib/requestFilters';
+import type { RequestFilters } from '../../lib/requestFilters';
+import { groupKey, groupPending, groupRequests, groupStatus, statusSummary } from '../../lib/requestBatches';
 import { fmtDateTime, fmtHours, fmtWhen } from '../../lib/time';
 
 const DURATION_CHOICES = [1, 2, 4, 8, 24, 72, 168, 720];
@@ -70,25 +77,38 @@ function ScopeLine({ scope, env }: { scope: ScopeView; env: string | null }) {
   );
 }
 
+/** The environments of a group's scopes, each once. */
+function groupEnvs(g: AccessRequest[], ctx: Ctx): string[] {
+  return [...new Set(g.map((r) => scopeEnvironment(r.scope, ctx.clusters, ctx.overrides)).filter((e): e is string => !!e))];
+}
+
 function RequestItem({
-  req, ctx, on, now, onPick,
-}: { req: AccessRequest; ctx: Ctx; on: boolean; now: number; onPick: () => void }) {
-  const env = scopeEnvironment(req.scope, ctx.clusters, ctx.overrides);
+  g, ctx, on, now, onPick,
+}: { g: AccessRequest[]; ctx: Ctx; on: boolean; now: number; onPick: () => void }) {
+  const req = g[0];
+  const envs = groupEnvs(g, ctx);
   const name = displayName(req, ctx.users);
-  const when = fmtWhen(req.status === 'pending' ? req.createdAt : (req.decidedAt ?? req.createdAt), now);
+  const pending = groupPending(g);
+  const when = fmtWhen(pending ? req.createdAt : (req.decidedAt ?? req.createdAt), now);
   return (
     <button type="button" className={`rq-item${on ? ' on' : ''}`} onClick={onPick} aria-current={on ? 'true' : undefined}>
       <span className="row">
         <Avatar name={name} size={24} />
         <b>{name}</b>
+        {req.team && <span className="chip info">for team {req.team.name}</span>}
         <span className="grow" />
-        {req.status !== 'pending' && <StatusChip status={req.status} />}
+        {!pending && <StatusChip status={groupStatus(g)} label={g.length > 1 ? statusSummary(g) : undefined} />}
         <span className="muted">{when}</span>
       </span>
       <span className="row wrap" style={{ marginTop: 6, gap: 6 }}>
         <ActionChips actions={req.actions} />
-        <span className="mono">{scopeName(req.scope)}</span>
-        {env && <EnvBadge env={env} />}
+        {g.length > 1 ? (
+          <>
+            <span className="chip">{g.length} namespaces</span>
+            <span className="mono">{g.slice(0, 2).map((r) => r.scope.namespace).join(', ')}{g.length > 2 ? ', …' : ''}</span>
+          </>
+        ) : <span className="mono">{scopeName(req.scope)}</span>}
+        {envs.map((e) => <EnvBadge key={e} env={e} />)}
       </span>
       <div className="quote">
         {fmtHours(req.durationHours)} · “{req.reason}”
@@ -97,28 +117,32 @@ function RequestItem({
   );
 }
 
-function StatusChip({ status }: { status: AccessRequest['status'] }) {
+function StatusChip({ status, label }: { status: AccessRequest['status']; label?: string }) {
   const tone = status === 'approved' ? 'ok' : status === 'rejected' ? 'err' : status === 'pending' ? 'warn' : '';
-  const label = status.charAt(0).toUpperCase() + status.slice(1);
-  return <span className={`chip ${tone}`}>{label}</span>;
+  return <span className={`chip ${tone}`}>{label ?? status.charAt(0).toUpperCase() + status.slice(1)}</span>;
 }
 
-/** The requester's existing grants: direct ones and those through their teams (expired ones are left out). */
+/**
+ * The requester's existing grants: direct ones and those through their teams
+ * (expired ones are left out); for a team's request, the team's grants.
+ */
 function CurrentAccess({ req, user, ready }: { req: AccessRequest; user: UserView | undefined; ready: boolean }) {
   const teamKey = (user?.teams ?? []).map((t) => t.id).join(',');
   const { data, error, loading, reload } = useApi<GrantView[]>(
     async () => {
-      const lists = await Promise.all([
-        api.grants({ holderKind: 'user', holderId: req.userId }),
-        ...(user?.teams ?? []).map((t) => api.grants({ holderKind: 'team', holderId: t.id })),
-      ]);
+      const lists = await Promise.all(req.team
+        ? [api.grants({ holderKind: 'team', holderId: req.team.id })]
+        : [
+          api.grants({ holderKind: 'user', holderId: req.userId }),
+          ...(user?.teams ?? []).map((t) => api.grants({ holderKind: 'team', holderId: t.id })),
+        ]);
       return lists.flat().filter((g) => !g.expired);
     },
-    [req.userId, teamKey],
+    [req.userId, req.team?.id, teamKey],
     { enabled: ready },
   );
   const first = req.username.split(/[\s._-]+/)[0];
-  const who = first ? `${first.charAt(0).toUpperCase()}${first.slice(1)}` : 'User';
+  const who = req.team ? `Team ${req.team.name}` : first ? `${first.charAt(0).toUpperCase()}${first.slice(1)}` : 'User';
   return (
     <div className="col" style={{ gap: 6 }}>
       <span className="lbl">{who}’s current access</span>
@@ -150,7 +174,8 @@ function CurrentAccess({ req, user, ready }: { req: AccessRequest; user: UserVie
   );
 }
 
-function RequestSummary({ req, ctx, now }: { req: AccessRequest; ctx: Ctx; now: number }) {
+function RequestSummary({ g, ctx, now }: { g: AccessRequest[]; ctx: Ctx; now: number }) {
+  const req = g[0];
   const user = ctx.users?.find((u) => u.id === req.userId);
   const name = displayName(req, ctx.users);
   const env = scopeEnvironment(req.scope, ctx.clusters, ctx.overrides);
@@ -166,12 +191,29 @@ function RequestSummary({ req, ctx, now }: { req: AccessRequest; ctx: Ctx; now: 
           </small>
         </div>
         <span className="grow" />
-        <StatusChip status={req.status} />
+        <StatusChip status={groupStatus(g)} label={g.length > 1 ? statusSummary(g) : undefined} />
       </div>
       <div className="bd col" style={{ gap: 14 }}>
         <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
+          {req.team && (
+            <>
+              <dt>For</dt>
+              <dd>
+                <Link to={`/teams`}>Team {req.team.name}</Link>
+                <span className="muted"> · asked by its manager; approval grants the team, so every member gets it</span>
+              </dd>
+            </>
+          )}
           <dt>Scope</dt>
-          <dd><ScopeLine scope={req.scope} env={env} /></dd>
+          <dd>
+            {g.length > 1 ? (
+              <>
+                <span className="tag">{g.length} namespaces</span>
+                <span className="muted">on {req.scope.cluster}, filed together and decided together</span>
+                {groupEnvs(g, ctx).map((e) => <EnvBadge key={e} env={e} />)}
+              </>
+            ) : <ScopeLine scope={req.scope} env={env} />}
+          </dd>
           <dt>Actions</dt>
           <dd><ActionChips actions={req.actions} /></dd>
           <dt>Duration</dt>
@@ -185,25 +227,39 @@ function RequestSummary({ req, ctx, now }: { req: AccessRequest; ctx: Ctx; now: 
   );
 }
 
-function DecidedCard({ req }: { req: AccessRequest }) {
+function DecidedCard({ g }: { g: AccessRequest[] }) {
+  const req = g[0];
+  const grantsLink = `/grants?holder=${req.team ? `team:${req.team.id}` : `user:${req.userId}`}`;
   return (
     <div className="card">
       <div className="hd">Decision</div>
-      <div className="bd">
+      <div className="bd col" style={{ gap: 12 }}>
         <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
           <dt>Outcome</dt>
-          <dd><StatusChip status={req.status} /></dd>
+          <dd><StatusChip status={groupStatus(g)} label={g.length > 1 ? statusSummary(g) : undefined} /></dd>
           {req.decidedBy && (<><dt>By</dt><dd>{req.decidedBy}</dd></>)}
           {req.decidedAt && (<><dt>When</dt><dd>{fmtDateTime(req.decidedAt)}</dd></>)}
           {req.status === 'expired' && (<><dt>Note</dt><dd>Not decided within 7 days.</dd></>)}
           {req.decisionNote && (<><dt>Note</dt><dd style={{ display: 'block', whiteSpace: 'pre-wrap' }}>{req.decisionNote}</dd></>)}
-          {req.resultingGrantId !== null && (
+          {g.length === 1 && req.resultingGrantId !== null && (
             <>
               <dt>Grant</dt>
-              <dd><Link to={`/grants?holder=user:${req.userId}`}>Grant #{req.resultingGrantId}</Link></dd>
+              <dd><Link to={grantsLink}>Grant #{req.resultingGrantId}</Link></dd>
             </>
           )}
         </dl>
+        {g.length > 1 && (
+          <div className="pickbox" role="list" aria-label="Namespaces">
+            {g.map((r) => (
+              <div key={r.id} role="listitem" className="row" style={{ padding: '6px 10px', gap: 8 }}>
+                <span className="mono">{r.scope.namespace}</span>
+                <span className="grow" />
+                {r.resultingGrantId !== null && <Link to={grantsLink}>Grant #{r.resultingGrantId}</Link>}
+                <StatusChip status={r.status} />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -218,10 +274,11 @@ const fmtExpiry = (iso: string | null) => (iso === null ? 'permanent' : `until $
  * the same scope when it ends no later than the approved access (that grant
  * then takes the new expiry), else create a new one.
  */
-function GrantOutcome({ grants, target, actions, newEnd, separate, onSeparate, scope }: {
+function GrantOutcome({ grants, target, actions, newEnd, separate, onSeparate, scope, team }: {
   grants: GrantView[]; target: GrantView | null; actions: Action[]; newEnd: number | null; separate: boolean; onSeparate: (v: boolean) => void; scope: ScopeView;
+  team: AccessRequest['team'];
 }) {
-  const longer = grants.find((g) => g.holder.kind === 'user' && !g.expired && sameScope(g.scope, scope));
+  const longer = grants.find((g) => g.holder.kind === (team ? 'team' : 'user') && !g.expired && sameScope(g.scope, scope));
   const added = actions.filter((a) => !target?.actions.includes(a));
   return (
     <div className="f" role="group" aria-label="Resulting grant">
@@ -235,7 +292,7 @@ function GrantOutcome({ grants, target, actions, newEnd, separate, onSeparate, s
         </div>
       ) : (
         <div className="muted">
-          Creates a new grant{!target && longer ? ` (grant #${longer.id} on this scope lasts longer than this access, so it stays as it is)` : ''}.
+          Creates a new grant{team ? ` for team ${team.name}` : ''}{!target && longer ? ` (grant #${longer.id} on this scope lasts longer than this access, so it stays as it is)` : ''}.
         </div>
       )}
       {target && (
@@ -248,9 +305,18 @@ function GrantOutcome({ grants, target, actions, newEnd, separate, onSeparate, s
   );
 }
 
+/**
+ * Approve or reject a request, or a batch: its namespaces are listed with
+ * what approving each does, and unticked ones are rejected in the same
+ * decision (all or nothing on the server).
+ */
 function DecisionCard({
-  req, mobile, onDone,
-}: { req: AccessRequest; mobile: boolean; onDone: () => void }) {
+  g, ctx, mobile, onDone,
+}: { g: AccessRequest[]; ctx: Ctx; mobile: boolean; onDone: () => void }) {
+  const req = g[0];
+  const batch = g.length > 1 && req.batchId !== null;
+  const [chosen, setChosen] = useState<Set<number>>(() => new Set(g.map((r) => r.id)));
+  const rejecting = g.length - chosen.size;
   const toast = useToast();
   const [actions, setActions] = useState<Action[]>(req.actions);
   const [dur, setDur] = useState(durKey(req.durationHours));
@@ -262,9 +328,23 @@ function DecisionCard({
   const [separate, setSeparate] = useState(false);
   const durations = useMemo(() => durationOptions(req.durationHours), [req.durationHours]);
   const now = useNow(60_000);
-  const own = useApi(() => api.grants({ holderKind: 'user', holderId: req.userId }), [req.userId]);
+  // The holder approval grants: the requester, or the team for a team's request.
+  const own = useApi(
+    () => (req.team ? api.grants({ holderKind: 'team', holderId: req.team.id }) : api.grants({ holderKind: 'user', holderId: req.userId })),
+    [req.userId, req.team?.id],
+  );
   const newEnd = dur === 'perm' ? null : now + Number(dur) * 3600_000;
-  const target = own.data ? mergeTarget(own.data, req.scope, newEnd, now) : null;
+  const targetOf = (scope: ScopeView) => (own.data ? mergeTarget(own.data, scope, newEnd, now, req.team ? 'team' : 'user') : null);
+  const target = batch ? null : targetOf(req.scope);
+  const anyTarget = batch && g.some((r) => targetOf(r.scope));
+  const prodChosen = g.filter((r) => chosen.has(r.id) && isProd(scopeEnvironment(r.scope, ctx.clusters, ctx.overrides))).length;
+  const toggleNs = (id: number) => setChosen((cur) => {
+    const n = new Set(cur);
+    if (n.has(id)) n.delete(id);
+    else n.add(id);
+    return n;
+  });
+  const whose = req.team ? `team ${req.team.name}’s request (by ${req.username})` : `${req.username}’s request`;
 
   const actionsChanged = actions.length !== req.actions.length || actions.some((a) => !req.actions.includes(a));
   const durChanged = dur !== durKey(req.durationHours);
@@ -280,6 +360,10 @@ function DecisionCard({
   };
 
   const approve = async () => {
+    if (batch && rejecting > 0 && !note.trim()) {
+      setNoteErr('A note is required when rejecting.');
+      return;
+    }
     setBusy('approve');
     setError(null);
     setNoteErr(undefined);
@@ -287,15 +371,21 @@ function DecisionCard({
     if (note.trim()) body.note = note.trim();
     if (durChanged) body.durationHours = dur === 'perm' ? null : Number(dur);
     if (actionsChanged) body.actions = actions;
-    if (target && separate) body.separate = true;
+    if ((target || anyTarget) && separate) body.separate = true;
     try {
+      if (batch) {
+        await api.decideRequestBatch(req.batchId!, { approve: [...chosen], ...body });
+        toast(rejecting ? `Approved ${chosen.size} and rejected ${rejecting} of ${whose}.` : `Approved all ${g.length} of ${whose}.`);
+        onDone();
+        return;
+      }
       const res = await api.approveRequest(req.id, body);
       if (actionsChanged && (res.actions.length !== actions.length || res.actions.some((a) => !actions.includes(a)))) {
         toast('Approved, but the server granted other actions than you selected. Review the grant under Grants.', 'err');
       } else if (target && res.resultingGrantId === target.id) {
-        toast(`Approved ${req.username}’s request: added to grant #${target.id}.`);
+        toast(`Approved ${whose}: added to grant #${target.id}.`);
       } else {
-        toast(`Approved ${req.username}’s request${changed ? ' with changes' : ''}.`);
+        toast(`Approved ${whose}${changed ? ' with changes' : ''}.`);
       }
       onDone();
     } catch (e) {
@@ -314,8 +404,9 @@ function DecisionCard({
     setError(null);
     setNoteErr(undefined);
     try {
-      await api.rejectRequest(req.id, { note: note.trim() });
-      toast(`Rejected ${req.username}’s request.`);
+      if (batch) await api.decideRequestBatch(req.batchId!, { approve: [], note: note.trim() });
+      else await api.rejectRequest(req.id, { note: note.trim() });
+      toast(`Rejected ${whose}.`);
       onDone();
     } catch (e) {
       fail(e);
@@ -324,8 +415,34 @@ function DecisionCard({
     }
   };
 
-  const outcome = own.data && (
-    <GrantOutcome grants={own.data} target={target} actions={actions} newEnd={newEnd} separate={separate} onSeparate={setSeparate} scope={req.scope} />
+  const outcome = batch ? (
+    <div className="f" role="group" aria-label="Namespaces to approve">
+      <span>Namespaces <span className="hint">Untick to reject; the rest are approved</span></span>
+      <div className="pickbox">
+        {g.map((r) => {
+          const t = targetOf(r.scope);
+          const env = scopeEnvironment(r.scope, ctx.clusters, ctx.overrides);
+          const on = chosen.has(r.id);
+          return (
+            <label key={r.id} className="chk" style={{ minHeight: mobile ? 44 : undefined }}>
+              <input type="checkbox" checked={on} onChange={() => toggleNs(r.id)} />
+              <span className="mono">{r.scope.namespace}</span>
+              {env && <EnvBadge env={env} />}
+              <span className="grow" />
+              <span className="muted">{!on ? 'rejected' : !own.data ? '' : t && !separate ? `adds to grant #${t.id}` : 'new grant'}</span>
+            </label>
+          );
+        })}
+      </div>
+      {anyTarget && (
+        <label className="chk">
+          <input type="checkbox" checked={separate} onChange={(e) => setSeparate(e.target.checked)} />
+          Create separate grants instead of adding to existing ones
+        </label>
+      )}
+    </div>
+  ) : own.data && (
+    <GrantOutcome grants={own.data} target={target} actions={actions} newEnd={newEnd} separate={separate} onSeparate={setSeparate} scope={req.scope} team={req.team} />
   );
 
   const narrowFields = (
@@ -347,25 +464,23 @@ function DecisionCard({
       </div>
       <label className="f">
         Duration
-        <select className="sel" style={{ height: mobile ? 44 : 30 }} value={dur} onChange={(e) => setDur(e.target.value)}>
-          {durations.map((d) => (
-            <option key={d.value} value={d.value}>{d.label}</option>
-          ))}
-        </select>
+        <Select label="Duration" style={{ height: mobile ? 44 : 30 }} value={dur} onChange={setDur} options={durations} />
       </label>
     </div>
   );
 
-  const noMoreActions = actions.length === 0;
-  const approveLabel = changed ? 'Approve with changes' : 'Approve';
+  const noMoreActions = actions.length === 0 || (batch && chosen.size === 0);
+  const approveLabel = batch
+    ? (rejecting ? `Approve ${chosen.size}, reject ${rejecting}` : `Approve all ${g.length}`) + (changed ? ' with changes' : '')
+    : changed ? 'Approve with changes' : 'Approve';
   const buttons = (
     <>
       <button type="button" className="btn" disabled={busy !== null} onClick={reject}>
-        {busy === 'reject' ? 'Rejecting…' : 'Reject'}
+        {busy === 'reject' ? 'Rejecting…' : batch ? 'Reject all' : 'Reject'}
       </button>
       <button type="button" className="btn pri" disabled={busy !== null || noMoreActions} onClick={approve}>
         <Icon name="check" />
-        {busy === 'approve' ? 'Approving…' : mobile ? 'Approve' : approveLabel}
+        {busy === 'approve' ? 'Approving…' : mobile && !batch ? 'Approve' : approveLabel}
       </button>
     </>
   );
@@ -397,6 +512,7 @@ function DecisionCard({
             />
             <FieldError msg={noteErr} />
           </label>
+          {batch && prodChosen > 0 && <span className="muted">{prodChosen} of the approved {prodChosen === 1 ? 'is' : 'are'} in prod</span>}
           <div className="row" style={{ gap: 10 }}>{buttons}</div>
         </div>
       </>
@@ -410,7 +526,7 @@ function DecisionCard({
         {narrowFields}
         {outcome}
         <label className="f">
-          <span>Note to requester <span className="hint">Required when rejecting</span></span>
+          <span>Note to requester <span className="hint">{batch ? 'Required when rejecting any' : 'Required when rejecting'}</span></span>
           <textarea
             className="input"
             rows={2}
@@ -421,14 +537,52 @@ function DecisionCard({
           <FieldError msg={noteErr} />
         </label>
         {error !== null && <ErrorBanner error={error} />}
-        <div className="row" style={{ justifyContent: 'flex-end' }}>{buttons}</div>
+        <div className="row" style={{ justifyContent: 'flex-end' }}>
+          {batch && prodChosen > 0 && <span className="muted">{prodChosen} of the approved {prodChosen === 1 ? 'is' : 'are'} in prod</span>}
+          {buttons}
+        </div>
       </div>
     </div>
   );
 }
 
+const uniq = (xs: (string | null | undefined)[]) => [...new Set(xs.filter((x): x is string => !!x))].sort();
+
+/** Search and pickers above the request list; `shown`/`total` are for the open tab. */
+function RequestFilterBar({ f, set, clusters, envs, shown, total }: {
+  f: RequestFilters;
+  set: (patch: Partial<RequestFilters>) => void;
+  clusters: string[];
+  envs: string[];
+  shown: number;
+  total: number;
+}) {
+  return (
+    <div className="rq-filters">
+      <label className="search">
+        <Icon name="search" />
+        <input value={f.q} onChange={(e) => set({ q: e.target.value })} placeholder="Search people, teams, namespaces, reasons" aria-label="Search requests" />
+      </label>
+      <div className="rq-pickers">
+        <Select label="Cluster" value={f.cluster} onChange={(v) => set({ cluster: v })} options={[{ value: '', label: 'Any cluster' }, ...clusters.map((c) => ({ value: c, label: c }))]} />
+        <Select label="Environment" value={f.env} onChange={(v) => set({ env: v })} options={[{ value: '', label: 'Any env' }, ...envs.map((e) => ({ value: e, label: e }))]} />
+        <Select label="Action" value={f.action} onChange={(v) => set({ action: v })} options={[{ value: '', label: 'Any action' }, ...ACTIONS.map((a) => ({ value: a, label: a }))]} />
+        <Select<RequestFilters['for']> label="Requested for" value={f.for} onChange={(v) => set({ for: v })}
+          options={[{ value: '', label: 'Anyone' }, { value: 'user', label: 'People' }, { value: 'team', label: 'Teams' }]} />
+      </div>
+      {activeRequestFilters(f) > 0 && (
+        <div className="row muted" aria-live="polite">
+          Showing {shown} of {total}
+          <span className="grow" />
+          <button type="button" className="linklike" onClick={() => set(NO_REQUEST_FILTERS)}>Clear filters</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Requests() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, me } = useAuth();
   const mobile = useMedia('(max-width:640px)');
   const now = useNow(60_000);
   const reqs = useApi(() => api.accessRequests(), []);
@@ -436,30 +590,42 @@ export function Requests() {
   const clusters = useApi(() => api.clusters(), []);
   const overrides = useApi(() => api.environmentOverrides(), []);
   const [tab, setTab] = useState<'pending' | 'decided'>('pending');
-  const [selId, setSelId] = useState<number | null>(null);
+  const [selId, setSelId] = useState<string | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  // Remembered per admin across visits and tabs; the tab itself always opens on Pending.
+  const [stored, setStored] = useLocalStorage<unknown>(requestFiltersKey(me.id), null);
+  const filters = cleanRequestFilters(stored);
+  const setFilters = (patch: Partial<RequestFilters>) => {
+    setStored({ ...filters, ...patch });
+    setSelId(null);
+  };
 
   const ctx: Ctx = { users: users.data, clusters: clusters.data, overrides: overrides.data };
 
+  // A batch is one entry, decided as a whole.
   const { pending, decided } = useMemo(() => {
-    const all = reqs.data ?? [];
-    const t = (r: AccessRequest) => Date.parse(r.createdAt);
-    const d = (r: AccessRequest) => Date.parse(r.decidedAt ?? r.createdAt);
+    const all = groupRequests(reqs.data ?? []);
+    const t = (g: AccessRequest[]) => Date.parse(g[0].createdAt);
+    const d = (g: AccessRequest[]) => Date.parse(g[0].decidedAt ?? g[0].createdAt);
     return {
-      pending: all.filter((r) => r.status === 'pending').sort((a, b) => t(b) - t(a)),
-      decided: all.filter((r) => r.status !== 'pending').sort((a, b) => d(b) - d(a)),
+      pending: all.filter(groupPending).sort((a, b) => t(b) - t(a)),
+      decided: all.filter((g) => !groupPending(g)).sort((a, b) => d(b) - d(a)),
     };
   }, [reqs.data]);
 
-  const list = tab === 'pending' ? pending : decided;
-  const selected = list.find((r) => r.id === selId) ?? (mobile ? undefined : list[0]);
+  const envOf = (r: AccessRequest) => scopeEnvironment(r.scope, clusters.data, overrides.data);
+  const all = tab === 'pending' ? pending : decided;
+  const list = all.filter((g) => g.some((r) => matchesRequest(r, filters, envOf(r), displayName(r, users.data))));
+  const clusterOptions = uniq([...(clusters.data ?? []).map((c) => c.name), ...(reqs.data ?? []).map((r) => r.scope.cluster), filters.cluster]);
+  const envOptions = uniq([...(clusters.data ?? []).map((c) => c.environment), ...(overrides.data ?? []).map((o) => o.environment), ...(reqs.data ?? []).map(envOf), filters.env]);
+  const selected = list.find((g) => groupKey(g) === selId) ?? (mobile ? undefined : list[0]);
 
   // Leave the mobile detail view when its request disappears from the list (decided, or tab changed).
   useEffect(() => {
     if (detailOpen && !selected) setDetailOpen(false);
   }, [detailOpen, selected]);
 
-  const pick = (id: number) => {
+  const pick = (id: string) => {
     setSelId(id);
     setDetailOpen(true);
   };
@@ -493,13 +659,13 @@ export function Requests() {
           </button>
           <b style={{ fontSize: 15 }}>Access request</b>
           <span className="grow" />
-          <StatusChip status={selected.status} />
+          <StatusChip status={groupStatus(selected)} label={selected.length > 1 ? statusSummary(selected) : undefined} />
         </div>
-        <RequestSummary req={selected} ctx={ctx} now={now} />
-        {selected.status === 'pending' && isAdmin ? (
-          <DecisionCard key={selected.id} req={selected} mobile onDone={done} />
-        ) : selected.status !== 'pending' ? (
-          <DecidedCard req={selected} />
+        <RequestSummary g={selected} ctx={ctx} now={now} />
+        {groupPending(selected) && isAdmin ? (
+          <DecisionCard key={groupKey(selected)} g={selected} ctx={ctx} mobile onDone={done} />
+        ) : !groupPending(selected) ? (
+          <DecidedCard g={selected} />
         ) : null}
       </>
     );
@@ -523,13 +689,16 @@ export function Requests() {
                 ]}
               />
             </div>
+            <RequestFilterBar f={filters} set={setFilters} clusters={clusterOptions} envs={envOptions} shown={list.length} total={all.length} />
             {list.length === 0 ? (
-              <Empty>{tab === 'pending' ? 'No pending requests.' : 'No decided requests yet.'}</Empty>
+              <Empty>
+                {all.length > 0 ? 'No requests match these filters.' : tab === 'pending' ? 'No pending requests.' : 'No decided requests yet.'}
+              </Empty>
             ) : (
               <div role="list">
-                {list.map((r) => (
-                  <div key={r.id} role="listitem">
-                    <RequestItem req={r} ctx={ctx} now={now} on={!mobile && selected?.id === r.id} onPick={() => pick(r.id)} />
+                {list.map((g) => (
+                  <div key={groupKey(g)} role="listitem">
+                    <RequestItem g={g} ctx={ctx} now={now} on={!mobile && selected !== undefined && groupKey(selected) === groupKey(g)} onPick={() => pick(groupKey(g))} />
                   </div>
                 ))}
               </div>
@@ -540,11 +709,11 @@ export function Requests() {
           <div className="col" style={{ flex: 1, minWidth: 0, gap: 16 }}>
             {selected ? (
               <>
-                <RequestSummary req={selected} ctx={ctx} now={now} />
-                {selected.status === 'pending' ? (
-                  isAdmin && <DecisionCard key={selected.id} req={selected} mobile={false} onDone={done} />
+                <RequestSummary g={selected} ctx={ctx} now={now} />
+                {groupPending(selected) ? (
+                  isAdmin && <DecisionCard key={groupKey(selected)} g={selected} ctx={ctx} mobile={false} onDone={done} />
                 ) : (
-                  <DecidedCard req={selected} />
+                  <DecidedCard g={selected} />
                 )}
               </>
             ) : (

@@ -6,6 +6,8 @@ import { EnvBadge } from '../../components/Badges';
 import { Dialog } from '../../components/Dialog';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { ComboBox } from '../../components/ComboBox';
+import { Select } from '../../components/Select';
 import { PageHeader } from '../../components/PageHeader';
 import { Seg } from '../../components/Seg';
 import { useAuth } from '../../context/auth';
@@ -135,28 +137,20 @@ export function Clusters() {
                           <span className="muted" style={{ fontSize: 11.5 }}>From its Secret</span>
                         </span>
                       ) : isAdmin ? (
-                        <select
-                          className="sel"
-                          aria-label={`Environment for ${c.name}`}
+                        <Select
+                          label={`Environment for ${c.name}`}
                           value={c.environment ?? ''}
                           disabled={m.busy}
-                          onChange={(e) => {
-                            if (e.target.value === NEW_ENV) setDialog({ kind: 'env', cluster: c.name });
-                            else if (e.target.value) void setEnv(c.name, e.target.value);
+                          onChange={(v) => {
+                            if (v === NEW_ENV) setDialog({ kind: 'env', cluster: c.name });
+                            else if (v) void setEnv(c.name, v);
                           }}
-                        >
-                          {c.environment === null && (
-                            <option value="" disabled>
-                              unlabeled
-                            </option>
-                          )}
-                          {Array.from(new Set([...knownEnvs, ...(c.environment ? [c.environment] : [])])).map((e) => (
-                            <option key={e} value={e}>
-                              {e}
-                            </option>
-                          ))}
-                          <option value={NEW_ENV}>Other…</option>
-                        </select>
+                          options={[
+                            ...(c.environment === null ? [{ value: '', label: 'unlabeled', disabled: true }] : []),
+                            ...Array.from(new Set([...knownEnvs, ...(c.environment ? [c.environment] : [])])).map((e) => ({ value: e, label: e })),
+                            { value: NEW_ENV, label: 'Other…' },
+                          ]}
+                        />
                       ) : (
                         <EnvBadge env={c.environment ?? 'unlabeled'} />
                       )}
@@ -440,9 +434,8 @@ function OverridesCard({
 }
 
 function EnvInput({
-  id, value, onChange, knownEnvs, invalid, describedBy,
+  value, onChange, knownEnvs, invalid, describedBy,
 }: {
-  id: string;
   value: string;
   onChange: (v: string) => void;
   knownEnvs: string[];
@@ -450,22 +443,8 @@ function EnvInput({
   describedBy?: string;
 }) {
   return (
-    <>
-      <input
-        className="input mono"
-        list={`${id}-list`}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-invalid={invalid}
-        aria-describedby={describedBy}
-        autoComplete="off"
-      />
-      <datalist id={`${id}-list`}>
-        {knownEnvs.map((e) => (
-          <option key={e} value={e} />
-        ))}
-      </datalist>
-    </>
+    <ComboBox free label="Environment" value={value} onChange={onChange} invalid={invalid} describedBy={describedBy}
+      options={knownEnvs.map((e) => ({ value: e }))} />
   );
 }
 
@@ -504,23 +483,20 @@ function OverrideDialog({ knownEnvs, onClose, onDone }: { knownEnvs: string[]; o
   const clusterSel = (
     <label className="f">
       Cluster {kind === 'argo_project' && <span className="hint">(optional)</span>}
-      <select
-        className="sel"
-        style={{ height: 30 }}
+      <Select
+        label="Cluster"
+        style={{ height: 30, width: '100%' }}
         value={cluster}
-        onChange={(e) => {
-          setCluster(e.target.value);
+        onChange={(v) => {
+          setCluster(v);
           setNamespace('');
         }}
-        aria-invalid={!!fields.cluster}
-      >
-        <option value="">{kind === 'argo_project' ? 'All clusters' : 'Choose a cluster'}</option>
-        {clusters.data?.map((c) => (
-          <option key={c.name} value={c.name}>
-            {c.name} ({c.environment || 'unlabeled'})
-          </option>
-        ))}
-      </select>
+        invalid={!!fields.cluster}
+        options={[
+          { value: '', label: kind === 'argo_project' ? 'All clusters' : 'Choose a cluster', disabled: kind !== 'argo_project' },
+          ...(clusters.data ?? []).map((c) => ({ value: c.name, label: `${c.name} (${c.environment || 'unlabeled'})` })),
+        ]}
+      />
       <FieldError id={`${formId}-c`} text={fields.cluster} />
     </label>
   );
@@ -562,41 +538,29 @@ function OverrideDialog({ knownEnvs, onClose, onDone }: { knownEnvs: string[]; o
         {kind === 'namespace' ? (
           <label className="f">
             Namespace
-            <select
-              className="sel"
-              style={{ height: 30 }}
+            <ComboBox
+              label="Namespace"
               value={namespace}
               disabled={!cluster || namespaces.loading}
-              onChange={(e) => setNamespace(e.target.value)}
-              aria-invalid={!!fields.namespace}
-            >
-              <option value="">{!cluster ? 'Choose a cluster first' : namespaces.loading ? 'Loading…' : 'Choose a namespace'}</option>
-              {namespaces.data?.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+              onChange={setNamespace}
+              invalid={!!fields.namespace}
+              placeholder={!cluster ? 'Choose a cluster first' : namespaces.loading ? 'Loading…' : 'Choose a namespace'}
+              options={(namespaces.data ?? []).map((n) => ({ value: n }))}
+            />
             <FieldError id={`${formId}-n`} text={fields.namespace} />
             {!!namespaces.error && <span className="err-text">Could not list namespaces for {cluster}.</span>}
           </label>
         ) : (
           <label className="f">
             Argo project
-            <select className="sel" style={{ height: 30 }} value={project} onChange={(e) => setProject(e.target.value)} aria-invalid={!!fields.argoProject}>
-              <option value="">Choose a project</option>
-              {projects.data?.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
+            <ComboBox label="Argo project" value={project} onChange={setProject} invalid={!!fields.argoProject} placeholder="Choose a project"
+              options={(projects.data ?? []).map((p) => ({ value: p }))} />
             <FieldError id={`${formId}-p`} text={fields.argoProject} />
           </label>
         )}
         <label className="f">
           Environment
-          <EnvInput id={`${formId}-env`} value={env} onChange={setEnv} knownEnvs={knownEnvs} invalid={!!fields.environment} />
+          <EnvInput value={env} onChange={setEnv} knownEnvs={knownEnvs} invalid={!!fields.environment} />
           <FieldError id={`${formId}-e`} text={fields.environment} />
         </label>
         <AdminErrorBanner error={Object.keys(adminFieldErrors(m.error)).length ? null : m.error} />
@@ -704,7 +668,7 @@ function NewEnvDialog({
       <form id={formId} className="col" onSubmit={(e) => void submit(e)}>
         <label className="f">
           Environment
-          <EnvInput id={formId} value={env} onChange={setEnv} knownEnvs={knownEnvs} />
+          <EnvInput value={env} onChange={setEnv} knownEnvs={knownEnvs} />
         </label>
       </form>
     </Dialog>
@@ -791,7 +755,7 @@ function CredentialDialog({
             </label>
             <label className="f" style={{ flex: 1, minWidth: 160 }}>
               Environment <span className="hint">(optional)</span>
-              <EnvInput id={formId} value={env} onChange={setEnv} knownEnvs={knownEnvs} invalid={!!fields.environment} />
+              <EnvInput value={env} onChange={setEnv} knownEnvs={knownEnvs} invalid={!!fields.environment} />
               <FieldError id={`${formId}-e`} text={fields.environment} />
             </label>
           </div>

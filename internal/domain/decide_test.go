@@ -489,6 +489,43 @@ func TestDecide_BreakGlass(t *testing.T) {
 	}
 }
 
+func TestDecide_ScheduledBreakGlass(t *testing.T) {
+	f := fixture{
+		grants: []Grant{{ID: 1, HolderKind: HolderUser, UserID: 1, Scope: Scope{Kind: ScopeNamespace, Cluster: "c", Namespace: "a"}, Actions: []Action{ActionExec}}},
+		windows: []TimeWindow{{ID: 1, Name: "hours", ScopeKind: WindowGlobal, Actions: []Action{ActionExec},
+			Days:  []time.Weekday{time.Wednesday},
+			Start: 9 * 60, End: 18 * 60, Effect: AllowInside, Enabled: true}},
+	}
+	p := f.policy()
+	wed1800 := wed1801.Add(-time.Minute)
+	tgt := Target{Cluster: "c", Namespace: "a"}
+	// Scheduled from the window's close: access stays open without a gap.
+	sub := dev
+	sub.BreakGlass = &BreakGlass{ID: 8, UserID: 1, StartedAt: wed1800, ExpiresAt: wed1800.Add(time.Hour)}
+	d := Decide(p, sub, tgt, ActionExec, wed1000)
+	if !d.Allowed || d.BreakGlassID != nil || d.ClosesAt == nil || !d.ClosesAt.Equal(wed1800.Add(time.Hour)) {
+		t.Fatalf("before the start: %+v (closes %v)", d, d.ClosesAt)
+	}
+	if d := Decide(p, sub, tgt, ActionExec, wed1800.Add(10*time.Minute)); !d.Allowed || d.BreakGlassID == nil || *d.BreakGlassID != 8 {
+		t.Fatalf("after the start: %+v", d)
+	}
+	// Scheduled later: closed until it starts, which is when it reopens.
+	start := wed1800.Add(time.Hour)
+	sub.BreakGlass = &BreakGlass{ID: 9, UserID: 1, StartedAt: start, ExpiresAt: start.Add(time.Hour)}
+	d = Decide(p, sub, tgt, ActionExec, wed1801)
+	if d.Allowed || d.ReopensAt == nil || !d.ReopensAt.Equal(start) {
+		t.Fatalf("before a later start: %+v (reopens %v)", d, d.ReopensAt)
+	}
+	// Cancelled before its start: it never applies.
+	sub.BreakGlass.EndedAt = ptr(wed1801)
+	if d := Decide(p, sub, tgt, ActionExec, start.Add(time.Minute)); d.Allowed {
+		t.Fatalf("cancelled: %+v", d)
+	}
+	if d := Decide(p, sub, tgt, ActionExec, wed1801.Add(time.Minute)); d.ReopensAt != nil && d.ReopensAt.Equal(start) {
+		t.Fatalf("cancelled must not reopen at its start: %+v", d)
+	}
+}
+
 func TestDecide_GrantExpiryClosesAt(t *testing.T) {
 	now := wed1000
 	exp := now.Add(2 * time.Hour)

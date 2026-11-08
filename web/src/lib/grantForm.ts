@@ -11,6 +11,8 @@ export interface GrantForm {
   environment: string;
   cluster: string;
   namespace: string;
+  /** More namespaces for a new namespace grant: one grant each, created together. */
+  extraNamespaces: string[];
   /** `Kind/name` keys. */
   workloads: string[];
   actions: Action[];
@@ -38,7 +40,7 @@ export function actionOptionLabel(a: Action): string {
 export function emptyGrantForm(): GrantForm {
   return {
     id: null, holderKind: 'user', holderId: null, scopeKind: ARGO_UI ? 'argo_project' : 'namespace', argoProject: '', environment: '', cluster: '', namespace: '',
-    workloads: [], actions: ['logs'], expiryMode: 'none', expiry: '', note: '',
+    extraNamespaces: [], workloads: [], actions: ['logs'], expiryMode: 'none', expiry: '', note: '',
   };
 }
 
@@ -58,12 +60,22 @@ export function formFromGrant(g: GrantView): GrantForm {
     environment: g.scope.environment ?? '',
     cluster: g.scope.cluster ?? '',
     namespace: g.scope.namespace ?? '',
+    extraNamespaces: [],
     workloads: (g.scope.workloads ?? []).map(wlKey),
     actions: g.actions,
     expiryMode: g.expiresAt ? 'date' : 'none',
     expiry: isoToLocalInput(g.expiresAt, ADMIN_TZ),
     note: g.note,
   };
+}
+
+/** The server's cap on namespaces created at once (application.MaxGrantBatch). */
+export const MAX_GRANT_BATCH = 50;
+
+/** The namespaces a new namespace grant is created on: the chosen one first, then the extra ones. */
+export function formNamespaces(f: GrantForm): string[] {
+  if (f.scopeKind !== 'namespace' || f.id !== null) return f.namespace ? [f.namespace] : [];
+  return [...new Set([f.namespace, ...f.extraNamespaces].filter(Boolean))];
 }
 
 /** Local validation; keys mirror the server's `details.fields` names. */
@@ -79,6 +91,7 @@ export function validateGrantForm(f: GrantForm, now: number): Record<string, str
   } else {
     if (!f.cluster) e.cluster = 'Choose a cluster.';
     if (!f.namespace) e.namespace = 'Choose a namespace.';
+    if (formNamespaces(f).length > MAX_GRANT_BATCH) e.namespaces = `At most ${MAX_GRANT_BATCH} namespaces at once.`;
     if (f.scopeKind === 'workloads' && f.workloads.length === 0) e.workloads = 'Select at least one workload.';
   }
   if (f.actions.length === 0) e.actions = 'Select at least one action.';

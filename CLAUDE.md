@@ -94,7 +94,8 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   label/override changes and ignores Argo staleness. `unlabeled` cannot be
   granted; protected namespaces are never covered (migration 5).
 - **Approving adds to the same-scope grant**: `AccessRequestService.Approve`
-  adds the actions to the requester's own (never a team's) unexpired grant on
+  adds the actions to the requester's own (never a team's; for a team's request,
+  the team's own) unexpired grant on
   exactly the same scope (`Scope.Same`, workloads as a set) that ends no later
   than the approved access, which then takes the new expiry (`mergeTarget`;
   the longest such grant). A grant that outlasts it is left alone and a new
@@ -116,7 +117,16 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   as `break_glass.start` by the admin with `owner`; or rejects it; the requester
   may cancel. Pending requests expire after `BreakGlassRequestMaxAgeMin`
   (default 60, `BreakGlassService.Run` every 30 s; reads already show them
-  expired). The old `break_glass.enabled` key is still written (`mode != off`)
+  expired).
+  **Scheduled break-glass**: `startsAt` on `Start`/`Request` (≤ 7 days ahead,
+  `MaxBreakGlassLead`; ≤ 1 min ahead counts as now) makes it an ordinary
+  `break_glass` row starting later; an approval starts it at `max(now,
+  startsAt)` and a scheduled request expires counting from `startsAt`
+  (migration 12). The policy snapshot holds the active **or next scheduled**
+  one per user (`ListCurrent`), so `Decide`/`closes_at` already see the start;
+  one active or scheduled per user (`checkNoCurrent`); `End` before the start
+  cancels it (`beforeStart`). The previous release ignores rows that have not
+  started. The old `break_glass.enabled` key is still written (`mode != off`)
   for the previous release, which therefore lets users self-start during a
   rollout overlap.
 - **Logs are never limited by time windows or holidays** (`Policy.timeClosed` and
@@ -160,6 +170,35 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
   the same way at every login (audited as `promote_by_username`), also for users
   who already logged in; a user demoted on the Users page while still listed is
   promoted again at the next login. Both go through `AuthService.promoteAdmin`.
+- **Request batches**: a user (or a team manager for the team) may ask for the
+  same actions on 2–20 namespaces of one cluster at once
+  (`POST /access-requests/batch`, `AccessRequestService.CreateBatch`): one
+  ordinary request per namespace sharing `batch_id` (migration 11), created in
+  one transaction (a protected namespace or cluster refuses the whole batch)
+  with one notification. An admin decides a batch only as a whole
+  (`DecideBatch`): the chosen requests are approved (each merging by the usual
+  rule), the rest rejected, in one transaction, so a request no longer pending
+  fails everything with 409; single `/approve` and `/reject` refuse batch
+  requests. Admins cannot add namespaces. The pending count counts a batch once.
+  Admins create the same grant on 2–50 namespaces at once
+  (`POST /admin/grants/batch`, `AdminService.CreateGrants`): ordinary grants,
+  one transaction through `mutateMany` (one `admin.change` per grant with a
+  shared `batchId`, one notification), no merging.
+- **Team managers**: an admin picks a team's managers (`PUT /admin/teams/{id}/managers`,
+  table `team_managers`, Teams page; Keycloak users only, need not be members).
+  A manager adds and removes members on My teams (`/my/teams`,
+  `AdminService.AddTeamMember`/`RemoveTeamMember`, checked in the transaction by
+  `requireTeamManager`), so the people they add receive the team's grants; only
+  admins change the team's name, grants and managers. Managers add only enabled
+  Keycloak users (local users skip Keycloak's MFA) and a local user never manages.
+  Audited as `admin.change` (`add_member`/`remove_member`) by the manager, admins
+  notified; a no-op change audits nothing. A manager may also file an access
+  request for the team (`teamId`, `AccessRequest.TeamID`, checked by
+  `requireTeamManager` in the transaction; My teams lists the team's requests
+  via `AccessRequestService.ForTeam`): approval grants the team, merging into the
+  team's own same-scope grant by the same rule. `approved_for_team` (migration
+  10) makes an approval by the previous release fail instead of granting the
+  manager.
 - **Local users**: with `LOCAL_USERS_ENABLED=true` (default
   off) an admin can create a user with a password (`users.password_hash`,
   bcrypt cost 12) who logs in on the login page through `POST /auth/local-login`

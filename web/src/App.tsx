@@ -15,6 +15,7 @@ import { WorkloadDetailPage } from './pages/WorkloadDetailPage';
 import { CronJobsPage } from './pages/CronJobsPage';
 import { LogsPage } from './pages/LogsPage';
 import { MyAccess } from './pages/MyAccess';
+import { MyTeams } from './pages/MyTeams';
 import { Requests } from './pages/admin/Requests';
 import { Grants } from './pages/admin/Grants';
 import { TimeWindows } from './pages/admin/TimeWindows';
@@ -76,6 +77,7 @@ export function App() {
                   <Route path="c/:cluster/n/:ns/w/:kind/:name" element={<Only roles={WORK}><WorkloadDetailPage /></Only>} />
                   <Route path="c/:cluster/n/:ns/cronjobs" element={<Only roles={WORK}><CronJobsPage /></Only>} />
                   <Route path="access" element={<Only roles={['user', 'auditor']}><MyAccess /></Only>} />
+                  <Route path="my-teams" element={<Only roles={['user', 'auditor']}><MyTeams /></Only>} />
                   <Route path="requests" element={<Only roles={ADMIN}><Requests /></Only>} />
                   <Route path="grants" element={<Only roles={READ_CONFIG}><Grants /></Only>} />
                   <Route path="time-windows" element={<Only roles={READ_CONFIG}><TimeWindows /></Only>} />

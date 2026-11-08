@@ -24,16 +24,20 @@ const end = (iso: string | null) => (iso === null ? Infinity : Date.parse(iso));
 
 /**
  * The grant approving access on scope until expiresAt (ms, null: permanent)
- * adds to, as application.mergeTarget decides it: the requester's own
- * unexpired grant on exactly that scope that ends no later than the new
- * access, the longest-lasting of them; null when a new grant is created.
- * Pass only the requester's grants.
+ * adds to, as application.mergeTarget decides it: the holder's own unexpired
+ * grant on exactly that scope that ends no later than the new access, the
+ * longest-lasting of them; null when a new grant is created. The holder is
+ * the requester (`user`) or, for a team's request, the team (`team`); pass
+ * only that holder's grants (a user's may include their teams', which are
+ * skipped).
  */
-export function mergeTarget<G extends MergeableGrant>(grants: G[], scope: ScopeView, expiresAt: number | null, now: number): G | null {
+export function mergeTarget<G extends MergeableGrant>(
+  grants: G[], scope: ScopeView, expiresAt: number | null, now: number, holder: 'user' | 'team' = 'user',
+): G | null {
   const until = expiresAt ?? Infinity;
   let best: G | null = null;
   for (const g of grants) {
-    if (g.holder.kind !== 'user' || g.expired || end(g.expiresAt) <= now || !sameScope(g.scope, scope)) continue;
+    if (g.holder.kind !== holder || g.expired || end(g.expiresAt) <= now || !sameScope(g.scope, scope)) continue;
     if (end(g.expiresAt) > until) continue; // it outlasts the new access
     if (!best || end(g.expiresAt) > end(best.expiresAt)) best = g;
   }

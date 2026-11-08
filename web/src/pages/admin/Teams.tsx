@@ -1,19 +1,20 @@
 import { useId, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../../api';
-import type { AuditEvent, GrantView, TeamView, UserView } from '../../api';
+import type { AuditEvent, GrantView, TeamMember, TeamView, UserView } from '../../api';
 import {
   AdminErrorBanner, ConfirmAdminDialog, FieldError, MiniGrantRow, ReadOnlyNote, UsersTeamsTabs,
 } from '../../components/AdminPieces';
-import { Avatar } from '../../components/Badges';
 import { Dialog } from '../../components/Dialog';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
 import { PageHeader } from '../../components/PageHeader';
+import { TeamPeopleCard } from '../../components/TeamPeople';
 import { useAuth } from '../../context/auth';
 import { useApi } from '../../hooks/useApi';
 import { useNow } from '../../hooks/useNow';
 import { adminFieldErrors } from '../../lib/adminErrorText';
+import { eventTitle } from '../../lib/auditLabels';
 import { fmtWhen } from '../../lib/time';
 import { useAdminMutation } from '../../lib/useAdminMutation';
 
@@ -143,45 +144,18 @@ function TeamDetail({
   const now = useNow(60_000);
   const m = useAdminMutation();
   const grants = useApi<GrantView[]>(() => api.grants({ holderKind: 'team', holderId: team.id }), [team.id]);
-  const [pick, setPick] = useState('');
-  const pickId = useId();
-  const listId = useId();
 
-  const memberIds = useMemo(() => new Set(team.members.map((x) => x.id)), [team.members]);
-  const candidates = useMemo(
-    () => (users ?? []).filter((u) => !memberIds.has(u.id) && !u.disabled),
-    [users, memberIds],
-  );
+  // Anyone enabled may be a member; managers must log in through Keycloak.
+  const members = useMemo(() => (users ?? []).filter((u) => !u.disabled), [users]);
+  const managers = useMemo(() => members.filter((u) => !u.local), [members]);
 
-  const setMembers = async (ids: number[], msg: string) => {
-    const r = await m.run(() => api.setTeamMembers(team.id, ids), msg);
+  const change = async (fn: () => Promise<unknown>, msg: string) => {
+    const r = await m.run(fn, msg);
     if (r.ok) onChanged();
     return r.ok;
   };
-
-  const addByText = async () => {
-    const q = pick.trim().toLowerCase();
-    if (!q) return;
-    // Datalist options read "Display name (username)"; also accept a bare username or name.
-    const match =
-      candidates.find((u) => `${u.displayName || u.username} (${u.username})`.toLowerCase() === q) ??
-      candidates.find((u) => u.username.toLowerCase() === q || u.displayName.toLowerCase() === q);
-    if (!match) return;
-    const ok = await setMembers([...team.members.map((x) => x.id), match.id], `${match.username} added to ${team.name}`);
-    if (ok) setPick('');
-  };
-
-  const remove = async (id: number, name: string) => {
-    await setMembers(
-      team.members.filter((x) => x.id !== id).map((x) => x.id),
-      `${name} removed from ${team.name}`,
-    );
-  };
-
-  const noMatch = pick.trim() !== '' && !candidates.some((u) => {
-    const q = pick.trim().toLowerCase();
-    return `${u.displayName || u.username} (${u.username})`.toLowerCase() === q || u.username.toLowerCase() === q || u.displayName.toLowerCase() === q;
-  });
+  const ids = (xs: TeamMember[]) => xs.map((x) => x.id);
+  const name = (u: TeamMember) => u.displayName || u.username;
 
   return (
     <div className="col grow" style={{ flex: 1, minWidth: 0, gap: 16 }}>
@@ -207,81 +181,47 @@ function TeamDetail({
       <AdminErrorBanner error={m.error} />
 
       <div className="two" style={{ gap: 16 }}>
-        <div className="card grow" style={{ flex: 1, minWidth: 0 }}>
-          <div className="hd">
-            Members
-            <span className="grow" />
-            {isAdmin && (
-              <form
-                className="row"
-                style={{ gap: 6 }}
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void addByText();
-                }}
-              >
-                <label className="search" style={{ width: 200, height: 26, background: 'var(--sf)' }}>
-                  <Icon name="plus" />
-                  <input
-                    id={pickId}
-                    list={listId}
-                    placeholder="Add by name"
-                    aria-label="Add member"
-                    value={pick}
-                    disabled={m.busy}
-                    onChange={(e) => setPick(e.target.value)}
-                  />
-                </label>
-                <datalist id={listId}>
-                  {candidates.map((u) => (
-                    <option key={u.id} value={`${u.displayName || u.username} (${u.username})`} />
-                  ))}
-                </datalist>
-                <button type="submit" className="btn sm" disabled={m.busy || !pick.trim() || noMatch}>
-                  Add
-                </button>
-              </form>
-            )}
-          </div>
-          {isAdmin && noMatch && (
-            <div style={{ padding: '6px 16px' }}>
-              <FieldError id={`${pickId}-e`} text="No enabled user matches. Pick a name from the list." />
+        <div className="col" style={{ flex: 1, minWidth: 0, gap: 16 }}>
+          <TeamPeopleCard
+            title="Members"
+            people={team.members}
+            candidates={members}
+            editable={isAdmin}
+            busy={m.busy}
+            noMatchText="No enabled user matches. Pick a name from the list."
+            candidatesError={!users && !!usersError}
+            emptyText="No members yet."
+            onAdd={(u) => change(() => api.setTeamMembers(team.id, [...ids(team.members), u.id]), `${u.username} added to ${team.name}`)}
+            onRemove={(u) =>
+              void change(
+                () => api.setTeamMembers(team.id, ids(team.members).filter((id) => id !== u.id)),
+                `${name(u)} removed from ${team.name}`,
+              )
+            }
+          />
+          <div className="col" style={{ gap: 8 }}>
+            <TeamPeopleCard
+              title="Managers"
+              people={team.managers}
+              candidates={managers}
+              editable={isAdmin}
+              busy={m.busy}
+              noMatchText="No enabled Keycloak user matches. Local users cannot manage a team."
+              candidatesError={!users && !!usersError}
+              emptyText="No managers. Only admins change the members."
+              onAdd={(u) => change(() => api.setTeamManagers(team.id, [...ids(team.managers), u.id]), `${u.username} now manages ${team.name}`)}
+              onRemove={(u) =>
+                void change(
+                  () => api.setTeamManagers(team.id, ids(team.managers).filter((id) => id !== u.id)),
+                  `${name(u)} no longer manages ${team.name}`,
+                )
+              }
+            />
+            <div className="muted" style={{ fontSize: 12 }}>
+              Managers add and remove members themselves on My teams, so the people they add receive this team&apos;s grants.
+              Every change is audited and admins are notified.
             </div>
-          )}
-          {isAdmin && !users && !!usersError && (
-            <div style={{ padding: '6px 16px' }} className="muted">Could not load users for the picker.</div>
-          )}
-          <div className="tbl-wrap">
-            <table className="tbl" style={{ minWidth: 0 }}>
-              <tbody>
-                {team.members.map((u) => (
-                  <tr key={u.id}>
-                    <td>
-                      <span className="row">
-                        <Avatar name={u.displayName || u.username} size={24} />
-                        {u.displayName || u.username}
-                      </span>
-                    </td>
-                    <td className="mono muted">{u.username}</td>
-                    <td style={{ textAlign: 'right' }}>
-                      {isAdmin && (
-                        <button
-                          type="button"
-                          className="btn ghost sm"
-                          aria-label={`Remove ${u.displayName || u.username}`}
-                          disabled={m.busy}
-                          onClick={() => void remove(u.id, u.displayName || u.username)}
-                        >
-                          <Icon name="x" />
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
-          {team.members.length === 0 && <Empty>No members yet.</Empty>}
         </div>
 
         <div className="card grow" style={{ flex: 1, minWidth: 0 }}>
@@ -306,13 +246,13 @@ function TeamDetail({
   );
 }
 
-/** docs/api.md has no per-team history endpoint, so this searches the audit log by team name. */
+/** The team's last admin changes (audit details.entity = team, details.id = its id). */
 function ChangeHistory({ team, now }: { team: TeamView; now: number }) {
-  const hist = useApi<AuditEvent[]>(async () => {
-    const page = await api.audit({ q: team.name, limit: 10 });
-    return page.items.filter((e) => e.eventType.startsWith('admin') || e.eventType.includes('team'));
-    // member count changes after add/remove, which refreshes the list
-  }, [team.id, team.name, team.members.length]);
+  const hist = useApi<AuditEvent[]>(
+    async () => (await api.audit({ eventType: 'admin.change', entity: 'team', entityId: String(team.id), limit: 10 })).items,
+    // renames and member/manager changes refresh the list
+    [team.id, team.name, team.members.length, team.managers.length],
+  );
 
   return (
     <div className="card">
@@ -330,7 +270,7 @@ function ChangeHistory({ team, now }: { team: TeamView; now: number }) {
                     {fmtWhen(e.at, now)}
                   </td>
                   <td>
-                    <b>{e.username}</b> <span className="mono">{e.eventType}</span>
+                    <b>{e.username}</b> {eventTitle(e)}
                     {e.reason ? <span className="muted"> · {e.reason}</span> : null}
                   </td>
                 </tr>

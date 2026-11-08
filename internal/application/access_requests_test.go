@@ -43,13 +43,28 @@ func TestMergeTarget(t *testing.T) {
 		{"workloads as a set", wl("b", "a"), at(24), 6},
 		{"not a different set of workloads", wl("a"), at(24), 0},
 	} {
-		got, ok := mergeTarget(grants, 7, c.scope, c.expires, now)
+		got, ok := mergeTarget(grants, domain.Grant{HolderKind: domain.HolderUser, UserID: 7}, c.scope, c.expires, now)
 		if (c.want == 0) == ok || (ok && got.ID != c.want) {
 			t.Errorf("%s: got %d %v, want %d", c.name, got.ID, ok, c.want)
 		}
 	}
+	// A team's request merges into the team's grant only, never a user's.
+	team := domain.Grant{HolderKind: domain.HolderTeam, TeamID: 1}
+	if got, ok := mergeTarget(grants, team, ns, nil, now); !ok || got.ID != 5 {
+		t.Errorf("team grant: got %d %v, want 5", got.ID, ok)
+	}
+	if _, ok := mergeTarget(grants, domain.Grant{HolderKind: domain.HolderTeam, TeamID: 2}, ns, nil, now); ok {
+		t.Error("another team's request merged")
+	}
 	if got := unionActions([]domain.Action{domain.ActionRestart, domain.ActionLogs}, []domain.Action{domain.ActionExec, domain.ActionLogs}); len(got) != 3 ||
 		got[0] != domain.ActionLogs || got[1] != domain.ActionExec || got[2] != domain.ActionRestart {
 		t.Errorf("union: %v", got)
+	}
+}
+
+func TestCountRequests(t *testing.T) {
+	reqs := []domain.AccessRequest{{ID: 1}, {ID: 2, BatchID: "b1"}, {ID: 3, BatchID: "b1"}, {ID: 4, BatchID: "b2"}, {ID: 5}}
+	if n := countRequests(reqs); n != 4 {
+		t.Fatalf("count: %d, want 4 (a batch once)", n)
 	}
 }

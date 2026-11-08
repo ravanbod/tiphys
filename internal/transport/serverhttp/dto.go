@@ -42,12 +42,15 @@ type breakGlassDTO struct {
 	EndedAt   *string `json:"endedAt"`
 	EndedBy   *string `json:"endedBy"`
 	Active    bool    `json:"active"`
+	// Scheduled is true while it has not started yet (and is not cancelled).
+	Scheduled bool `json:"scheduled"`
 }
 
 func toBreakGlass(b domain.BreakGlass, now time.Time) breakGlassDTO {
 	return breakGlassDTO{
 		ID: b.ID, UserID: b.UserID, Username: b.Username, Reason: b.Reason, StartedAt: tstr(b.StartedAt),
 		ExpiresAt: tstr(b.ExpiresAt), EndedAt: timeStr(b.EndedAt), EndedBy: strPtr(b.EndedBy), Active: b.ActiveAt(now),
+		Scheduled: b.Current(now) && now.Before(b.StartedAt),
 	}
 }
 
@@ -57,6 +60,7 @@ type breakGlassRequestDTO struct {
 	Username        string  `json:"username"`
 	Reason          string  `json:"reason"`
 	DurationMinutes int     `json:"durationMinutes"`
+	StartsAt        *string `json:"startsAt"` // requested start; null: when approved
 	Status          string  `json:"status"`
 	DecidedBy       *string `json:"decidedBy"`
 	DecidedAt       *string `json:"decidedAt"`
@@ -69,20 +73,22 @@ type breakGlassRequestDTO struct {
 }
 
 func toBreakGlassRequest(r domain.BreakGlassRequest, maxAgeMin int) breakGlassRequestDTO {
-	return breakGlassRequestDTO{ID: r.ID, UserID: r.UserID, Username: r.Username, Reason: r.Reason, DurationMinutes: r.Minutes,
+	return breakGlassRequestDTO{ID: r.ID, UserID: r.UserID, Username: r.Username, Reason: r.Reason, DurationMinutes: r.Minutes, StartsAt: timeStr(r.StartsAt),
 		Status: string(r.Status), DecidedBy: strPtr(r.DecidedBy), DecidedAt: timeStr(r.DecidedAt), DecisionNote: strPtr(r.DecisionNote),
 		ApprovedMinutes: r.ApprovedMinutes, BreakGlassID: r.BreakGlassID, CreatedAt: tstr(r.CreatedAt),
-		ExpiresAt: tstr(r.CreatedAt.Add(time.Duration(maxAgeMin) * time.Minute))}
+		ExpiresAt: tstr(r.ExpiresAt(time.Duration(maxAgeMin) * time.Minute))}
 }
 
 type meDTO struct {
-	ID          int64          `json:"id"`
-	Username    string         `json:"username"`
-	DisplayName string         `json:"displayName"`
-	Role        domain.Role    `json:"role"`
-	Teams       []idName       `json:"teams"`
-	CSRFToken   string         `json:"csrfToken"`
-	BreakGlass  *breakGlassDTO `json:"breakGlass"`
+	ID          int64       `json:"id"`
+	Username    string      `json:"username"`
+	DisplayName string      `json:"displayName"`
+	Role        domain.Role `json:"role"`
+	Teams       []idName    `json:"teams"`
+	// ManagedTeams are the teams whose members the user may change (My teams).
+	ManagedTeams []idName       `json:"managedTeams"`
+	CSRFToken    string         `json:"csrfToken"`
+	BreakGlass   *breakGlassDTO `json:"breakGlass"`
 	// BreakGlassRequest is the user's pending break-glass request.
 	BreakGlassRequest *breakGlassRequestDTO `json:"breakGlassRequest"`
 	Settings          meSettingsDTO         `json:"settings"`
@@ -467,12 +473,29 @@ type accessRequestDTO struct {
 	DecisionNote     *string  `json:"decisionNote"`
 	ResultingGrantID *int64   `json:"resultingGrantId"`
 	CreatedAt        string   `json:"createdAt"`
+	// Team is set when a manager asked for their team; approval grants the team.
+	Team *idName `json:"team"`
+	// BatchID groups the requests filed together; an admin decides a batch as a whole.
+	BatchID *string `json:"batchId"`
 }
 
 func toRequest(r domain.AccessRequest) accessRequestDTO {
-	return accessRequestDTO{ID: r.ID, UserID: r.UserID, Username: r.Username, Scope: toScope(r.Scope), Actions: actionStrings(r.Actions),
+	d := accessRequestDTO{ID: r.ID, UserID: r.UserID, Username: r.Username, Scope: toScope(r.Scope), Actions: actionStrings(r.Actions),
 		DurationHours: r.DurationHours, Reason: r.Reason, Status: string(r.Status), DecidedBy: strPtr(r.DecidedBy),
-		DecidedAt: timeStr(r.DecidedAt), DecisionNote: strPtr(r.DecisionNote), ResultingGrantID: r.ResultingGrantID, CreatedAt: tstr(r.CreatedAt)}
+		DecidedAt: timeStr(r.DecidedAt), DecisionNote: strPtr(r.DecisionNote), ResultingGrantID: r.ResultingGrantID, CreatedAt: tstr(r.CreatedAt),
+		BatchID: strPtr(r.BatchID)}
+	if r.TeamID != 0 {
+		d.Team = &idName{ID: r.TeamID, Name: r.TeamName}
+	}
+	return d
+}
+
+func toRequests(rs []domain.AccessRequest) []accessRequestDTO {
+	out := make([]accessRequestDTO, len(rs))
+	for i, r := range rs {
+		out[i] = toRequest(r)
+	}
+	return out
 }
 
 type holderDTO struct {
@@ -618,6 +641,8 @@ type teamDTO struct {
 	Name        string      `json:"name"`
 	Description string      `json:"description"`
 	Members     []memberDTO `json:"members"`
+	// Managers may add and remove members themselves (they need not be members).
+	Managers []memberDTO `json:"managers"`
 }
 
 type windowDTO struct {

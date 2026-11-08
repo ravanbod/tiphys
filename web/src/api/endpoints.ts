@@ -2,10 +2,10 @@ import { del, get, patch, post, put, request, requestText } from './client';
 import { kindSegment, qs, seg } from './query';
 import type {
   AccessCheckInput, AccessGrant, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
-  CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CronJobSummary, DecisionExplain,
+  CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CreateAccessRequestBatch, CronJobSummary, DecisionExplain,
   EnvironmentOverride, EnvironmentOverrideInput, ExecSessionDetail, ExecSessionView, GrantFilters, GrantInput,
-  GrantView, HolidayInput, HolidayView, K8sEvent, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
-  SettingsView, TeamView, TimeWindowInput, TimeWindowView, UserView, WorkloadDetail, WorkloadKind, WorkloadSummary,
+  GrantView, HolidayInput, HolidayView, K8sEvent, ManagedTeamView, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
+  SettingsView, TeamMember, TeamView, TimeWindowInput, TimeWindowView, UserView, WorkloadDetail, WorkloadKind, WorkloadSummary,
   Role,
 } from './types';
 
@@ -91,15 +91,23 @@ export const api = {
 
   // ---- access, requests, break-glass
   myAccess: () => get<MyAccess>('/my/access'),
+  myTeams: () => get<ManagedTeamView[]>('/my/teams'),
+  myTeamCandidates: () => get<TeamMember[]>('/my/teams/candidates'),
+  addMyTeamMember: (id: number, userId: number) => post<void>(`/my/teams/${id}/members`, { userId }),
+  removeMyTeamMember: (id: number, userId: number) => del<void>(`/my/teams/${id}/members/${userId}`),
   accessRequests: (status?: string) => get<AccessRequest[]>(`/access-requests${qs({ status })}`),
   createAccessRequest: (b: CreateAccessRequest) => post<AccessRequest>('/access-requests', b),
   approveRequest: (id: number, b: { note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean }) =>
     post<AccessRequest>(`/access-requests/${id}/approve`, b),
   rejectRequest: (id: number, b: { note?: string }) => post<AccessRequest>(`/access-requests/${id}/reject`, b),
-  startBreakGlass: (b: { reason: string; durationMinutes?: number }) => post<BreakGlass>('/break-glass', b),
+  createAccessRequestBatch: (b: CreateAccessRequestBatch) => post<AccessRequest[]>('/access-requests/batch', b),
+  /** Approves the requests in `approve`, rejects the rest of the batch, in one transaction. */
+  decideRequestBatch: (batchId: string, b: { approve: number[]; note?: string; durationHours?: number | null; actions?: Action[]; separate?: boolean }) =>
+    post<AccessRequest[]>(`/access-requests/batch/${encodeURIComponent(batchId)}/decide`, b),
+  startBreakGlass: (b: { reason: string; durationMinutes?: number; startsAt?: string }) => post<BreakGlass>('/break-glass', b),
   endBreakGlass: (id: number) => post<BreakGlass>(`/break-glass/${id}/end`),
   breakGlasses: () => get<BreakGlass[]>('/break-glass'),
-  requestBreakGlass: (b: { reason: string; durationMinutes?: number }) => post<BreakGlassRequest>('/break-glass/requests', b),
+  requestBreakGlass: (b: { reason: string; durationMinutes?: number; startsAt?: string }) => post<BreakGlassRequest>('/break-glass/requests', b),
   breakGlassRequests: (status?: string) => get<BreakGlassRequest[]>(`/break-glass/requests${qs({ status })}`),
   approveBreakGlassRequest: (id: number, b: { note?: string; durationMinutes?: number }) =>
     post<BreakGlassRequest>(`/break-glass/requests/${id}/approve`, b),
@@ -125,10 +133,13 @@ export const api = {
   patchTeam: (id: number, b: { name?: string; description?: string }) => patch<TeamView>(`/admin/teams/${id}`, b),
   deleteTeam: (id: number) => del<void>(`/admin/teams/${id}`),
   setTeamMembers: (id: number, userIds: number[]) => put<TeamView>(`/admin/teams/${id}/members`, { userIds }),
+  setTeamManagers: (id: number, userIds: number[]) => put<void>(`/admin/teams/${id}/managers`, { userIds }),
   grants: (f: GrantFilters = {}) => get<GrantView[]>(`/admin/grants${qs(f)}`),
   grantsCovering: (t: { cluster: string; namespace: string; kind?: WorkloadKind; name?: string }) =>
     get<GrantView[]>(`/admin/grants/covering${qs(t)}`),
   createGrant: (b: GrantInput) => post<GrantView>('/admin/grants', b),
+  /** The grant on each namespace (scope.kind namespace), created together. */
+  createGrants: (b: GrantInput & { namespaces: string[] }) => post<GrantView[]>('/admin/grants/batch', b),
   updateGrant: (id: number, b: GrantInput) => put<GrantView>(`/admin/grants/${id}`, b),
   deleteGrant: (id: number) => del<void>(`/admin/grants/${id}`),
   accessCheck: (b: AccessCheckInput) => post<DecisionExplain>('/admin/access-check', b),

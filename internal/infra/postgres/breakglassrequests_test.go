@@ -51,14 +51,36 @@ func TestBreakGlassRequests(t *testing.T) {
 		t.Fatalf("expired: %+v", got)
 	}
 
+	// A scheduled request expires counting from its start.
+	starts := t0.Add(5 * time.Hour)
+	r4, err := f.r.BGRequests.Create(f.ctx, domain.BreakGlassRequest{UserID: u2.ID, Reason: "fourth reason that is long enough", Minutes: 15, StartsAt: &starts, CreatedAt: t0.Add(2 * time.Hour)})
+	must(t, err)
+	if r4.StartsAt == nil || !r4.StartsAt.Equal(starts) {
+		t.Fatalf("starts_at: %+v", r4)
+	}
+	if n, err := f.r.BGRequests.ExpirePendingBefore(f.ctx, t0.Add(4*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("expire before the start: %d %v", n, err)
+	}
+	if got, _ := f.r.BGRequests.Get(f.ctx, r4.ID); got.Status != domain.RequestPending {
+		t.Fatalf("scheduled request expired before its start: %+v", got)
+	}
+	if got, _ := f.r.BGRequests.Get(f.ctx, r3.ID); got.Status != domain.RequestExpired {
+		t.Fatalf("unscheduled request not expired: %+v", got)
+	}
+	if n, err := f.r.BGRequests.ExpirePendingBefore(f.ctx, t0.Add(6*time.Hour)); err != nil || n != 1 {
+		t.Fatalf("expire after the start: %d %v", n, err)
+	}
+	r5, err := f.r.BGRequests.Create(f.ctx, domain.BreakGlassRequest{UserID: u1.ID, Reason: "fifth reason that is long enough", Minutes: 15, CreatedAt: t0.Add(7 * time.Hour)})
+	must(t, err)
+
 	pending, err := f.r.BGRequests.List(f.ctx, 0, domain.RequestPending, 10)
 	must(t, err)
-	if len(pending) != 1 || pending[0].ID != r3.ID {
+	if len(pending) != 1 || pending[0].ID != r5.ID {
 		t.Fatalf("pending: %+v", pending)
 	}
 	own, err := f.r.BGRequests.List(f.ctx, u1.ID, "", 10)
 	must(t, err)
-	if len(own) != 2 || own[0].ID != r3.ID || own[1].ID != r1.ID {
+	if len(own) != 3 || own[0].ID != r5.ID || own[1].ID != r3.ID || own[2].ID != r1.ID {
 		t.Fatalf("own, newest first: %+v", own)
 	}
 }

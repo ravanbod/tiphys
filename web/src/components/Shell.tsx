@@ -10,12 +10,12 @@ import { useTheme } from '../context/theme';
 import { useApi } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { useStars } from '../hooks/useStars';
-import { fmtCountdown, msUntil } from '../lib/time';
+import { fmtCountdown, fmtDateTime, fmtReopens, msUntil } from '../lib/time';
 import { Avatar, isProd } from './Badges';
 import { Icon } from './Icon';
 import type { IconName } from './Icon';
 import { ARGO_UI } from '../lib/features';
-import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
+import { breakGlassOn, breakGlassLabel, breakGlassScheduled } from '../lib/breakGlass';
 
 const ROLE_LABEL: Record<Role, string> = { user: 'Developer', admin: 'Admin', auditor: 'Auditor' };
 
@@ -33,6 +33,26 @@ function BreakGlassPill() {
   useEffect(() => {
     if (expired) void reload();
   }, [expired, reload]);
+  // A scheduled one begins: refetch /me until the server shows it active, so
+  // pages keyed on breakGlassKey refetch what it now opens.
+  const scheduled = breakGlassScheduled(bg, now);
+  const begun = !!bg && !bg.active && !scheduled && !expired;
+  useEffect(() => {
+    if (!begun) return;
+    void reload().catch(() => {});
+    const id = window.setInterval(() => void reload().catch(() => {}), 5000);
+    return () => window.clearInterval(id);
+  }, [begun, reload]);
+  if (bg && scheduled) {
+    return (
+      <span className="bgp" role="status" aria-label="Break-glass scheduled">
+        <Icon name="clock" size={14} />
+        <span className="bgp-t">Break-glass scheduled</span>
+        <span title={`${fmtDateTime(bg.startedAt)} – ${fmtDateTime(bg.expiresAt)}`}>{fmtReopens(bg.startedAt, now)}</span>
+        <button type="button" onClick={() => void end()}>Cancel</button>
+      </span>
+    );
+  }
   if (!bg || !bg.active || left === null) return <BreakGlassRequestPill />;
   return (
     <span className="bgp" role="status" aria-label="Break-glass is active">
@@ -181,12 +201,14 @@ interface NavItem { to: string; label: string; icon: IconName; end?: boolean; ba
 interface NavGroup { title?: string; items: NavItem[] }
 
 function useNavGroups(): NavGroup[] {
-  const { role } = useAuth();
+  const { role, me } = useAuth();
+  const myTeams: NavItem[] = me.managedTeams.length ? [{ to: '/my-teams', label: 'My teams', icon: 'users' }] : [];
   const overview = useApi(() => api.overview(), [role], { enabled: role === 'admin', poll: 30000 });
   if (role === 'user') {
     return [{ items: [
       { to: '/', label: 'Workloads', icon: 'box', end: true },
       { to: '/access', label: 'My access', icon: 'key' },
+      ...myTeams,
     ] }];
   }
   if (role === 'admin') {
@@ -212,6 +234,7 @@ function useNavGroups(): NavGroup[] {
     { items: [
       { to: '/', label: 'Workloads', icon: 'box', end: true },
       { to: '/access', label: 'My access', icon: 'key' },
+      ...myTeams,
     ] },
     { title: 'Audit', items: [
       { to: '/audit', label: 'Audit log', icon: 'list' },

@@ -68,25 +68,30 @@ func (r breakGlassRepo) End(ctx context.Context, id int64, endedBy string, at ti
 	return fmt.Errorf("end break-glass: already ended: %w", application.ErrConflict)
 }
 
-func (r breakGlassRepo) LatestForUser(ctx context.Context, userID int64) (domain.BreakGlass, error) {
+// CurrentForUser returns the user's break-glass active or scheduled at t
+// (the earliest-starting one), or ErrNotFound.
+func (r breakGlassRepo) CurrentForUser(ctx context.Context, userID int64, t time.Time) (domain.BreakGlass, error) {
 	rows, err := r.q.Query(ctx, breakGlassSelect+`
-		WHERE b.user_id = $1 ORDER BY b.started_at DESC, b.id DESC LIMIT 1`, userID)
+		WHERE b.user_id = $1 AND b.expires_at > $2 AND (b.ended_at IS NULL OR b.ended_at > $2)
+		ORDER BY b.started_at, b.id LIMIT 1`, userID, t)
 	if err != nil {
-		return domain.BreakGlass{}, mapErr(err, "latest break-glass")
+		return domain.BreakGlass{}, mapErr(err, "current break-glass")
 	}
 	b, err := pgx.CollectExactlyOneRow(rows, scanBreakGlass)
-	return b, mapErr(err, "latest break-glass")
+	return b, mapErr(err, "current break-glass")
 }
 
-func (r breakGlassRepo) ListActive(ctx context.Context, t time.Time) ([]domain.BreakGlass, error) {
+// ListCurrent returns break-glasses active or scheduled at t: not expired and
+// not ended, whatever their start.
+func (r breakGlassRepo) ListCurrent(ctx context.Context, t time.Time) ([]domain.BreakGlass, error) {
 	rows, err := r.q.Query(ctx, breakGlassSelect+`
-		WHERE b.started_at <= $1 AND b.expires_at > $1 AND (b.ended_at IS NULL OR b.ended_at > $1)
-		ORDER BY b.started_at DESC, b.id DESC`, t)
+		WHERE b.expires_at > $1 AND (b.ended_at IS NULL OR b.ended_at > $1)
+		ORDER BY b.started_at, b.id`, t)
 	if err != nil {
-		return nil, mapErr(err, "list active break-glass")
+		return nil, mapErr(err, "list current break-glass")
 	}
 	bs, err := pgx.CollectRows(rows, scanBreakGlass)
-	return bs, mapErr(err, "list active break-glass")
+	return bs, mapErr(err, "list current break-glass")
 }
 
 func (r breakGlassRepo) List(ctx context.Context, limit int) ([]domain.BreakGlass, error) {

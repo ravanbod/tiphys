@@ -108,8 +108,17 @@ func (r auditRepo) List(ctx context.Context, f application.AuditFilter) ([]domai
 	if f.BreakGlassID != 0 {
 		w.add("break_glass_id = ?", f.BreakGlassID)
 	}
+	if f.BreakGlass {
+		w.add("break_glass_id IS NOT NULL")
+	}
 	if f.SessionID != "" {
 		w.add("session_id = ?", f.SessionID)
+	}
+	if f.Entity != "" {
+		w.add("details->>'entity' = ?", f.Entity)
+	}
+	if f.EntityID != "" {
+		w.add("details->>'id' = ?", f.EntityID)
 	}
 	if f.Text != "" {
 		// strpos on lowercased values: a case-insensitive substring match

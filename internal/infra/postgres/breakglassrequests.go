@@ -16,7 +16,7 @@ type breakGlassRequestRepo struct{ q dbtx }
 var _ application.BreakGlassRequestRepository = breakGlassRequestRepo{}
 
 const breakGlassRequestSelect = `
-	SELECT r.id, r.user_id, u.username, r.reason, r.minutes, r.status, COALESCE(r.decided_by, ''),
+	SELECT r.id, r.user_id, u.username, r.reason, r.minutes, r.starts_at, r.status, COALESCE(r.decided_by, ''),
 		r.decided_at, COALESCE(r.decision_note, ''), r.approved_minutes, r.break_glass_id, r.created_at
 	FROM break_glass_requests r JOIN users u ON u.id = r.user_id`
 
@@ -25,7 +25,7 @@ func scanBreakGlassRequest(row pgx.CollectableRow) (domain.BreakGlassRequest, er
 	var status string
 	var minutes int32
 	var approved *int32
-	err := row.Scan(&b.ID, &b.UserID, &b.Username, &b.Reason, &minutes, &status, &b.DecidedBy,
+	err := row.Scan(&b.ID, &b.UserID, &b.Username, &b.Reason, &minutes, &b.StartsAt, &status, &b.DecidedBy,
 		&b.DecidedAt, &b.DecisionNote, &approved, &b.BreakGlassID, &b.CreatedAt)
 	if err != nil {
 		return b, err
@@ -56,9 +56,9 @@ func (r breakGlassRequestRepo) Create(ctx context.Context, b domain.BreakGlassRe
 	}
 	var id int64
 	err := r.q.QueryRow(ctx, `
-		INSERT INTO break_glass_requests (user_id, reason, minutes, created_at)
-		VALUES ($1, $2, $3, COALESCE($4, now())) RETURNING id`,
-		b.UserID, b.Reason, int32(b.Minutes), created).Scan(&id)
+		INSERT INTO break_glass_requests (user_id, reason, minutes, starts_at, created_at)
+		VALUES ($1, $2, $3, $4, COALESCE($5, now())) RETURNING id`,
+		b.UserID, b.Reason, int32(b.Minutes), b.StartsAt, created).Scan(&id)
 	if err != nil {
 		return domain.BreakGlassRequest{}, mapErr(err, "create break-glass request")
 	}
@@ -105,9 +105,11 @@ func (r breakGlassRequestRepo) Decide(ctx context.Context, id int64, status doma
 	return fmt.Errorf("decide break-glass request: request is not pending: %w", application.ErrConflict)
 }
 
+// ExpirePendingBefore expires pending requests whose created_at, or later
+// starts_at, is before t.
 func (r breakGlassRequestRepo) ExpirePendingBefore(ctx context.Context, t time.Time) (int64, error) {
 	tag, err := r.q.Exec(ctx, `
 		UPDATE break_glass_requests SET status = 'expired', decided_by = 'system', decided_at = now()
-		WHERE status = 'pending' AND created_at < $1`, t)
+		WHERE status = 'pending' AND GREATEST(created_at, starts_at) < $1`, t)
 	return tag.RowsAffected(), mapErr(err, "expire break-glass requests")
 }

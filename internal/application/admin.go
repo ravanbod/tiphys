@@ -2,11 +2,14 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"tiphys/internal/domain"
@@ -45,32 +48,52 @@ type change struct {
 	// notifyAdmin sends the "admin changes to roles or grants" notification.
 	notifyAdmin bool
 	summary     string
+	// extra goes into the audit details too (e.g. a batch id).
+	extra map[string]any
 }
 
 // mutate runs fn and the audit write in one transaction, then publishes the
 // event, reloads policy and notifies.
 func (s *AdminService) mutate(ctx context.Context, p Principal, c *change, fn func(Repositories) error) error {
-	var ev domain.AuditEvent
+	return s.mutateMany(ctx, p, []*change{c}, c, fn)
+}
+
+// mutateMany is mutate for several changes made together: fn (which may fill
+// in the changes) and one audit event per change share one transaction;
+// note, when it has notifyAdmin, is the one notification sent for them all.
+func (s *AdminService) mutateMany(ctx context.Context, p Principal, cs []*change, note *change, fn func(Repositories) error) error {
+	var evs []domain.AuditEvent
 	err := s.store.InTx(ctx, func(r Repositories) error {
+		evs = nil
 		if err := fn(r); err != nil {
 			return err
 		}
-		e := s.audit.Event(p, domain.EventAdminChange)
-		e.Result = domain.ResultSucceeded
-		e.Details = map[string]any{"entity": c.entity, "operation": c.operation, "id": c.id, "before": c.before, "after": c.after}
-		var err error
-		ev, err = s.audit.RecordIn(ctx, r, e)
-		return err
+		for _, c := range cs {
+			e := s.audit.Event(p, domain.EventAdminChange)
+			e.Result = domain.ResultSucceeded
+			e.Details = map[string]any{"entity": c.entity, "operation": c.operation, "id": c.id, "before": c.before, "after": c.after}
+			for k, v := range c.extra {
+				e.Details[k] = v
+			}
+			ev, err := s.audit.RecordIn(ctx, r, e)
+			if err != nil {
+				return err
+			}
+			evs = append(evs, ev)
+		}
+		return nil
 	})
 	if err != nil {
 		return err
 	}
-	s.audit.Publish(ev)
+	for _, ev := range evs {
+		s.audit.Publish(ev)
+	}
 	s.policy.Changed(ctx)
-	if c.notifyAdmin {
+	if note != nil && note.notifyAdmin {
 		s.notify.Notify(NotificationMessage{
-			Event: domain.NotifyAdminChanges, Title: "Admin change: " + c.entity + " " + c.operation,
-			Fields: []NotificationField{{Name: "Who", Value: p.User.Username}, {Name: "What", Value: c.summary}},
+			Event: domain.NotifyAdminChanges, Title: "Admin change: " + note.entity + " " + note.operation,
+			Fields: []NotificationField{{Name: "Who", Value: p.User.Username}, {Name: "What", Value: note.summary}},
 			Link:   s.notify.Link("/audit?eventType=admin.change"),
 		})
 	}
@@ -291,12 +314,14 @@ func (s *AdminService) CreateTeam(ctx context.Context, p Principal, name, descri
 		return domain.Team{}, Invalid("name", "a name is required")
 	}
 	var t domain.Team
-	err := s.mutate(ctx, p, &change{entity: "team", operation: "create", id: name, after: map[string]any{"name": name, "description": description}},
-		func(r Repositories) error {
-			var err error
-			t, err = r.Teams.Create(ctx, domain.Team{Name: name, Description: description, UpdatedBy: p.User.Username})
-			return err
-		})
+	c := &change{entity: "team", operation: "create", after: map[string]any{"name": name, "description": description}}
+	err := s.mutate(ctx, p, c, func(r Repositories) error {
+		var err error
+		t, err = r.Teams.Create(ctx, domain.Team{Name: name, Description: description, UpdatedBy: p.User.Username})
+		// The id, like the team's other changes, so its history finds it.
+		c.id = t.ID
+		return err
+	})
 	return t, err
 }
 
@@ -339,7 +364,8 @@ func (s *AdminService) DeleteTeam(ctx context.Context, p Principal, id int64) er
 		if err != nil {
 			return err
 		}
-		c.before = map[string]any{"name": before.Name, "description": before.Description, "memberIds": before.MemberIDs}
+		c.before = map[string]any{"name": before.Name, "description": before.Description, "memberIds": before.MemberIDs,
+			"managerIds": before.ManagerIDs}
 		return r.Teams.Delete(ctx, id)
 	})
 }
@@ -359,6 +385,173 @@ func (s *AdminService) SetTeamMembers(ctx context.Context, p Principal, id int64
 		c.before = t.MemberIDs
 		return r.Teams.SetMembers(ctx, id, userIDs)
 	})
+}
+
+// SetTeamManagers replaces the managers of a team (admin only). Managers
+// must be Keycloak users: a local user's login skips Keycloak's MFA, so they
+// do not hand out a team's access.
+func (s *AdminService) SetTeamManagers(ctx context.Context, p Principal, id int64, userIDs []int64) error {
+	if err := s.requireAdmin(p); err != nil {
+		return err
+	}
+	c := &change{entity: "team", operation: "set_managers", id: id, after: userIDs, notifyAdmin: true,
+		summary: fmt.Sprintf("changed managers of team #%d", id)}
+	return s.mutate(ctx, p, c, func(r Repositories) error {
+		t, err := r.Teams.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, uid := range userIDs {
+			u, err := r.Users.Get(ctx, uid)
+			if errors.Is(err, ErrNotFound) {
+				return Invalid("userIds", fmt.Sprintf("unknown user #%d", uid))
+			}
+			if err != nil {
+				return err
+			}
+			if u.Local {
+				return Invalid("userIds", u.Username+" is a local user; only Keycloak users can manage a team")
+			}
+		}
+		c.before = t.ManagerIDs
+		return r.Teams.SetManagers(ctx, id, userIDs)
+	})
+}
+
+// ---- Teams managed by their managers ----
+
+// errUnchanged ends a mutation that would change nothing, so nothing is
+// audited.
+var errUnchanged = errors.New("unchanged")
+
+// ManagedTeam is a team as its manager sees it: with the grants a new member
+// receives.
+type ManagedTeam struct {
+	Team   domain.Team
+	Grants []domain.Grant
+}
+
+// ManagedTeams lists the teams the caller manages (empty for most users).
+func (s *AdminService) ManagedTeams(p Principal) []ManagedTeam {
+	out := []ManagedTeam{}
+	if p.User.Local {
+		return out
+	}
+	snap := s.policy.Current()
+	for _, t := range snap.Teams {
+		if t.ManagedBy(p.User.ID) {
+			out = append(out, ManagedTeam{Team: t, Grants: snap.Policy.TeamGrants(t.ID)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Team.Name < out[j].Team.Name })
+	return out
+}
+
+// TeamCandidates lists the users a team manager may add to their teams:
+// enabled Keycloak users. ErrForbiddenRole unless the caller manages a team.
+func (s *AdminService) TeamCandidates(p Principal) ([]domain.User, error) {
+	if len(s.ManagedTeams(p)) == 0 {
+		return nil, ErrForbiddenRole
+	}
+	snap := s.policy.Current()
+	out := []domain.User{}
+	for _, u := range snap.Users {
+		if !u.Disabled && !u.Local {
+			out = append(out, u)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Username) < strings.ToLower(out[j].Username) })
+	return out, nil
+}
+
+// requireTeamManager reads the team inside the transaction and fails with
+// ErrForbiddenRole unless the caller manages it (a local user never does).
+// Admins manage every team.
+func requireTeamManager(ctx context.Context, r Repositories, p Principal, teamID int64) (domain.Team, error) {
+	t, err := r.Teams.Get(ctx, teamID)
+	if p.User.Role == domain.RoleAdmin {
+		return t, err
+	}
+	if errors.Is(err, ErrNotFound) {
+		return domain.Team{}, ErrForbiddenRole
+	}
+	if err != nil {
+		return domain.Team{}, err
+	}
+	if p.User.Local || !t.ManagedBy(p.User.ID) {
+		return domain.Team{}, ErrForbiddenRole
+	}
+	return t, nil
+}
+
+// AddTeamMember adds one user to a team the caller manages. Only enabled
+// Keycloak users can be added this way; an admin adds local users on the
+// Teams page. Adding a member twice changes and audits nothing.
+func (s *AdminService) AddTeamMember(ctx context.Context, p Principal, teamID, userID int64) error {
+	c := &change{entity: "team", operation: "add_member", id: teamID, notifyAdmin: true}
+	err := s.mutate(ctx, p, c, func(r Repositories) error {
+		t, err := requireTeamManager(ctx, r, p, teamID)
+		if err != nil {
+			return err
+		}
+		u, err := r.Users.Get(ctx, userID)
+		if errors.Is(err, ErrNotFound) {
+			return Invalid("userId", "unknown user")
+		}
+		if err != nil {
+			return err
+		}
+		switch {
+		case u.Disabled:
+			return Invalid("userId", u.Username+" is disabled")
+		case u.Local:
+			return Invalid("userId", u.Username+" is a local user; only an admin can add them")
+		}
+		added, err := r.Teams.AddMember(ctx, teamID, userID)
+		if err != nil {
+			return err
+		}
+		if !added {
+			return errUnchanged
+		}
+		c.after = map[string]any{"userId": u.ID, "username": u.Username}
+		c.summary = fmt.Sprintf("added %s to team %s", u.Username, t.Name)
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
+}
+
+// RemoveTeamMember removes one member from a team the caller manages.
+// Removing a non-member changes and audits nothing.
+func (s *AdminService) RemoveTeamMember(ctx context.Context, p Principal, teamID, userID int64) error {
+	c := &change{entity: "team", operation: "remove_member", id: teamID, notifyAdmin: true}
+	err := s.mutate(ctx, p, c, func(r Repositories) error {
+		t, err := requireTeamManager(ctx, r, p, teamID)
+		if err != nil {
+			return err
+		}
+		removed, err := r.Teams.RemoveMember(ctx, teamID, userID)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			return errUnchanged
+		}
+		name := fmt.Sprintf("#%d", userID)
+		if u, err := r.Users.Get(ctx, userID); err == nil {
+			name = u.Username
+		}
+		c.before = map[string]any{"userId": userID, "username": name}
+		c.summary = fmt.Sprintf("removed %s from team %s", name, t.Name)
+		return nil
+	})
+	if errors.Is(err, errUnchanged) {
+		return nil
+	}
+	return err
 }
 
 // ---- Grants ----
@@ -439,6 +632,70 @@ func (s *AdminService) CreateGrant(ctx context.Context, p Principal, g domain.Gr
 		return err
 	})
 	return g, err
+}
+
+// MaxGrantBatch caps CreateGrants, against a mistake rather than misuse.
+const MaxGrantBatch = 50
+
+// CreateGrants creates the same grant (holder, actions, expiry, note) on
+// several namespaces of the template's cluster: one ordinary grant each, in
+// one transaction, each audited as a grant create carrying a shared batchId;
+// one notification. All or, when a namespace is invalid or protected (the
+// error names it), none. Existing grants are left alone, as with CreateGrant.
+func (s *AdminService) CreateGrants(ctx context.Context, p Principal, tmpl domain.Grant, namespaces []string) ([]domain.Grant, error) {
+	if err := s.requireAdmin(p); err != nil {
+		return nil, err
+	}
+	if tmpl.Scope.Kind != domain.ScopeNamespace {
+		return nil, Invalid("scope", "several namespaces need a namespace scope")
+	}
+	var nss []string
+	for _, n := range namespaces {
+		if n = strings.TrimSpace(n); n != "" && !slices.Contains(nss, n) {
+			nss = append(nss, n)
+		}
+	}
+	if len(nss) < 2 {
+		return nil, Invalid("namespaces", "pick at least two namespaces (one is an ordinary grant)")
+	}
+	if len(nss) > MaxGrantBatch {
+		return nil, Invalid("namespaces", fmt.Sprintf("at most %d namespaces at once", MaxGrantBatch))
+	}
+	tmpl.CreatedBy, tmpl.UpdatedBy = p.User.Username, p.User.Username
+	gs := make([]domain.Grant, len(nss))
+	for i, ns := range nss {
+		g := tmpl
+		g.Scope = domain.Scope{Kind: domain.ScopeNamespace, Cluster: tmpl.Scope.Cluster, Namespace: ns}
+		if err := s.validateGrant(g); err != nil {
+			var inv *InvalidError
+			if errors.As(err, &inv) {
+				return nil, Invalid("namespaces", ns+": "+inv.Message)
+			}
+			return nil, err
+		}
+		gs[i] = g
+	}
+	batch := uuid.NewString()
+	cs := make([]*change, len(gs))
+	for i, g := range gs {
+		cs[i] = &change{entity: "grant", operation: "create", after: grantSummary(g), extra: map[string]any{"batchId": batch, "batchSize": len(gs)}}
+	}
+	note := &change{entity: "grant", operation: "create", notifyAdmin: true,
+		summary: fmt.Sprintf("created %d grants: namespaces %s on %s", len(gs), strings.Join(nss, ", "), tmpl.Scope.Cluster)}
+	err := s.mutateMany(ctx, p, cs, note, func(r Repositories) error {
+		for i := range gs {
+			g, err := r.Grants.Create(ctx, gs[i])
+			if err != nil {
+				return inNamespace(gs[i].Scope.Namespace, err)
+			}
+			gs[i], cs[i].id = g, g.ID
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return gs, nil
 }
 
 func (s *AdminService) UpdateGrant(ctx context.Context, p Principal, g domain.Grant) (domain.Grant, error) {

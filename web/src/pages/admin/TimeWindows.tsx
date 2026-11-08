@@ -7,6 +7,8 @@ import { EnvBadge } from '../../components/Badges';
 import { Dialog } from '../../components/Dialog';
 import { Empty, ErrorBanner, Loading } from '../../components/Feedback';
 import { Icon } from '../../components/Icon';
+import { ComboBox } from '../../components/ComboBox';
+import { Select } from '../../components/Select';
 import { PageHeader } from '../../components/PageHeader';
 import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
@@ -170,7 +172,6 @@ function RuleDialog({
   };
 
   const leftover = unmatchedFields(fields, RULE_FIELDS);
-  const vId = 'tw-scope-values';
   return (
     <Dialog
       title={rule ? 'Edit rule' : 'New rule'}
@@ -196,36 +197,19 @@ function RuleDialog({
         <div className="row wrap" style={{ gap: 12, alignItems: 'flex-start' }}>
           <label className="f" style={{ flex: '0 0 150px' }}>
             Scope
-            <select className="sel" style={{ height: 30 }} value={f.scopeKind} onChange={(e) => set({ scopeKind: e.target.value as RuleForm['scopeKind'], scopeValue: '' })}>
-              {(Object.keys(SCOPE_LABEL) as TimeWindowView['scopeKind'][]).filter((k) => ARGO_UI || k !== 'argo_project').map((k) => (
-                <option key={k} value={k}>{SCOPE_LABEL[k]}</option>
-              ))}
-            </select>
+            <Select label="Scope" style={{ height: 30, width: '100%' }} value={f.scopeKind} onChange={(v) => set({ scopeKind: v, scopeValue: '' })}
+              options={(Object.keys(SCOPE_LABEL) as TimeWindowView['scopeKind'][]).filter((k) => ARGO_UI || k !== 'argo_project').map((k) => ({ value: k, label: SCOPE_LABEL[k] }))} />
             <FieldError msg={fieldError(fields, 'scopeKind')} />
           </label>
           {f.scopeKind !== 'global' && (
             <label className="f" style={{ flex: '1 1 200px' }}>
               {SCOPE_LABEL[f.scopeKind]}
               {f.scopeKind === 'cluster' || f.scopeKind === 'team' ? (
-                <select className="sel" style={{ height: 30 }} value={f.scopeValue} aria-invalid={fields.scopeValue ? true : undefined} onChange={(e) => set({ scopeValue: e.target.value })}>
-                  <option value="">Choose…</option>
-                  {uniq([...(f.scopeKind === 'cluster' ? clusters.map((c) => c.name) : teams.map((t) => t.name)), f.scopeValue]).map((v) => (
-                    <option key={v} value={v}>{v}</option>
-                  ))}
-                </select>
+                <ComboBox label={SCOPE_LABEL[f.scopeKind]} value={f.scopeValue} invalid={!!fields.scopeValue} onChange={(v) => set({ scopeValue: v })} placeholder="Choose…"
+                  options={uniq([...(f.scopeKind === 'cluster' ? clusters.map((c) => c.name) : teams.map((t) => t.name)), f.scopeValue]).map((v) => ({ value: v }))} />
               ) : (
-                <>
-                  <input
-                    className="input"
-                    list={vId}
-                    value={f.scopeValue}
-                    aria-invalid={fields.scopeValue ? true : undefined}
-                    onChange={(e) => set({ scopeValue: e.target.value })}
-                  />
-                  <datalist id={vId}>
-                    {(f.scopeKind === 'environment' ? envs : projects).map((v) => <option key={v} value={v} />)}
-                  </datalist>
-                </>
+                <ComboBox free label={SCOPE_LABEL[f.scopeKind]} value={f.scopeValue} invalid={!!fields.scopeValue} onChange={(v) => set({ scopeValue: v })}
+                  options={(f.scopeKind === 'environment' ? envs : projects).map((v) => ({ value: v }))} />
               )}
               <FieldError msg={fieldError(fields, 'scopeValue')} />
             </label>
@@ -284,8 +268,7 @@ function RuleDialog({
           </label>
           <label className="f" style={{ flex: '1 1 160px' }}>
             Timezone
-            <input className="input" list="tw-tz" value={f.timezone} aria-invalid={fields.timezone ? true : undefined} onChange={(e) => set({ timezone: e.target.value })} />
-            <datalist id="tw-tz">{COMMON_TZ.map((z) => <option key={z} value={z} />)}</datalist>
+            <ComboBox free label="Timezone" value={f.timezone} invalid={!!fields.timezone} onChange={(v) => set({ timezone: v })} options={COMMON_TZ.map((z) => ({ value: z }))} />
             <FieldError msg={fieldError(fields, 'timezone')} />
           </label>
         </div>
@@ -299,10 +282,8 @@ function RuleDialog({
         <div className="row wrap" style={{ gap: 16, alignItems: 'flex-end' }}>
           <label className="f" style={{ flex: '1 1 220px' }}>
             Effect
-            <select className="sel" style={{ height: 30 }} value={f.effect} onChange={(e) => set({ effect: e.target.value as RuleForm['effect'] })}>
-              <option value="allow_inside">Allow only inside this window</option>
-              <option value="deny_inside">Deny inside this window</option>
-            </select>
+            <Select<RuleForm['effect']> label="Effect" style={{ height: 30, width: '100%' }} value={f.effect} onChange={(v) => set({ effect: v })}
+              options={[{ value: 'allow_inside', label: 'Allow only inside this window' }, { value: 'deny_inside', label: 'Deny inside this window' }]} />
             <FieldError msg={fieldError(fields, 'effect')} />
           </label>
           <label className="chk" style={{ height: 30 }}>
@@ -582,13 +563,9 @@ function WeeklyPreviewCard({
       <div className="hd">
         Weekly preview <small>all rules combined</small>
         <span className="grow" />
-        <select className="sel" aria-label="Environment" value={effectiveEnv} onChange={(e) => setEnv(e.target.value)}>
-          {envs.length === 0 && <option value="">(any)</option>}
-          {envs.map((e) => <option key={e} value={e}>{e}</option>)}
-        </select>
-        <select className="sel" aria-label="Action" value={action} onChange={(e) => setAction(e.target.value as Action)}>
-          {ACTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-        </select>
+        <Select label="Environment" value={effectiveEnv} onChange={setEnv}
+          options={envs.length === 0 ? [{ value: '', label: '(any)' }] : envs.map((e) => ({ value: e, label: e }))} />
+        <Select label="Action" value={action} onChange={setAction} options={ACTIONS.map((a) => ({ value: a, label: a }))} />
       </div>
       <div className="bd col" style={{ gap: 12 }}>
         <div className="wk" role="group" aria-label={`Weekly preview for ${action} in ${effectiveEnv || 'any environment'}, times in ${DEFAULT_TZ}`}>

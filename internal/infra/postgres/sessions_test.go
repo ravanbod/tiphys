@@ -14,7 +14,7 @@ func TestBreakGlass(t *testing.T) {
 	f := newFixture(t)
 	u1, u2 := f.user("u1", domain.RoleUser), f.user("u2", domain.RoleUser)
 
-	if _, err := f.r.BreakGlass.LatestForUser(f.ctx, u1.ID); err == nil {
+	if _, err := f.r.BreakGlass.CurrentForUser(f.ctx, u1.ID, t0); err == nil {
 		t.Fatal("want ErrNotFound")
 	} else {
 		isErr(t, err, application.ErrNotFound)
@@ -39,32 +39,41 @@ func TestBreakGlass(t *testing.T) {
 	_, err = f.r.BreakGlass.Create(f.ctx, domain.BreakGlass{UserID: u1.ID, Reason: "x", StartedAt: t0, ExpiresAt: t0})
 	isCheckViolation(t, err)
 
-	latest, err := f.r.BreakGlass.LatestForUser(f.ctx, u1.ID)
-	must(t, err)
-	if latest.ID != cur.ID {
-		t.Fatalf("latest: %+v", latest)
+	// Current for u1: the earliest-starting one not yet over (old at t0, cur
+	// once old expired, also while cur has not started yet).
+	if got, err := f.r.BreakGlass.CurrentForUser(f.ctx, u1.ID, t0.Add(30*time.Minute)); err != nil || got.ID != old.ID {
+		t.Fatalf("current at t0+30m: %+v %v", got, err)
+	}
+	if got, err := f.r.BreakGlass.CurrentForUser(f.ctx, u1.ID, t0.Add(90*time.Minute)); err != nil || got.ID != cur.ID {
+		t.Fatalf("current (scheduled) at t0+90m: %+v %v", got, err)
 	}
 
-	// Active at t0+30m: old and other; not cur (starts later).
-	act, err := f.r.BreakGlass.ListActive(f.ctx, t0.Add(30*time.Minute))
+	// Current at t0+30m: old and other, and cur, which starts later.
+	act, err := f.r.BreakGlass.ListCurrent(f.ctx, t0.Add(30*time.Minute))
 	must(t, err)
-	if len(act) != 2 {
-		t.Fatalf("active: %+v", act)
+	if len(act) != 3 || act[2].ID != cur.ID {
+		t.Fatalf("current: %+v", act)
 	}
-	// Ending a break-glass removes it from the active list from that time on.
+	// Ending a break-glass removes it from the list from that time on.
 	must(t, f.r.BreakGlass.End(f.ctx, other.ID, "u2", t0.Add(40*time.Minute)))
-	act, _ = f.r.BreakGlass.ListActive(f.ctx, t0.Add(50*time.Minute))
-	if len(act) != 1 || act[0].ID != old.ID {
-		t.Fatalf("active after end: %+v", act)
+	act, _ = f.r.BreakGlass.ListCurrent(f.ctx, t0.Add(50*time.Minute))
+	if len(act) != 2 || act[0].ID != old.ID {
+		t.Fatalf("current after end: %+v", act)
 	}
 	got, _ := f.r.BreakGlass.Get(f.ctx, other.ID)
 	if got.EndedAt == nil || got.EndedBy != "u2" || !got.EndedAt.Equal(t0.Add(40*time.Minute)) {
 		t.Fatalf("ended: %+v", got)
 	}
-	// Expired ones are not active.
-	act, _ = f.r.BreakGlass.ListActive(f.ctx, t0.Add(90*time.Minute))
+	// Expired ones are not current.
+	act, _ = f.r.BreakGlass.ListCurrent(f.ctx, t0.Add(90*time.Minute))
+	if len(act) != 1 || act[0].ID != cur.ID {
+		t.Fatalf("expired still current: %+v", act)
+	}
+	// A scheduled one cancelled before its start is never current again.
+	must(t, f.r.BreakGlass.End(f.ctx, cur.ID, "u1", t0.Add(90*time.Minute)))
+	act, _ = f.r.BreakGlass.ListCurrent(f.ctx, t0.Add(91*time.Minute))
 	if len(act) != 0 {
-		t.Fatalf("expired still active: %+v", act)
+		t.Fatalf("cancelled still current: %+v", act)
 	}
 	isErr(t, f.r.BreakGlass.End(f.ctx, other.ID, "u2", t0), application.ErrConflict)
 	isErr(t, f.r.BreakGlass.End(f.ctx, 9999, "u2", t0), application.ErrNotFound)

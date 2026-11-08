@@ -40,6 +40,8 @@ export interface Me {
   displayName: string;
   role: Role;
   teams: { id: number; name: string }[];
+  /** Teams whose members the user may add and remove (My teams); an admin picks each team's managers. */
+  managedTeams: { id: number; name: string }[];
   csrfToken: string;
   breakGlass: BreakGlass | null;
   /** The caller's pending break-glass request (mode `approval`). */
@@ -72,6 +74,8 @@ export interface BreakGlassRequest {
   username: string;
   reason: string;
   durationMinutes: number;
+  /** Requested start (ISO); null: when approved. It starts at approval if that is later. */
+  startsAt: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'cancelled' | 'expired';
   decidedBy: string | null;
   decidedAt: string | null;
@@ -80,7 +84,7 @@ export interface BreakGlassRequest {
   approvedMinutes: number | null;
   breakGlassId: number | null;
   createdAt: string;
-  /** When a pending request expires undecided. */
+  /** When a pending request expires undecided (counted from startsAt when that is later than createdAt). */
   expiresAt: string;
 }
 
@@ -94,6 +98,8 @@ export interface BreakGlass {
   endedAt: string | null;
   endedBy: string | null;
   active: boolean;
+  /** Not started yet: startedAt lies ahead. */
+  scheduled: boolean;
 }
 
 // ---- catalog / workloads
@@ -442,6 +448,18 @@ export interface CreateAccessRequest {
   actions: Action[];
   durationHours: number | null;
   reason: string;
+  /** Ask for a team the caller manages (me.managedTeams); approval then grants the team. */
+  teamId?: number;
+}
+
+/** Several namespaces of one cluster at once (2–20): one request each, sharing a batchId. */
+export interface CreateAccessRequestBatch {
+  cluster: string;
+  namespaces: string[];
+  actions: Action[];
+  durationHours: number | null;
+  reason: string;
+  teamId?: number;
 }
 
 export interface AccessRequest {
@@ -458,6 +476,10 @@ export interface AccessRequest {
   decisionNote: string | null;
   resultingGrantId: number | null;
   createdAt: string;
+  /** Set when a manager asked for their team: approval grants the team, not the requester. */
+  team: { id: number; name: string } | null;
+  /** Requests filed together share it; an admin decides the batch as a whole. */
+  batchId: string | null;
 }
 
 // ---- sessions, audit
@@ -530,7 +552,12 @@ export interface AuditFilters {
   namespace?: string;
   environment?: string;
   breakGlassId?: string;
+  /** Only events that ran under some break-glass. */
+  breakGlass?: boolean;
   sessionId?: string;
+  /** Admin changes of one entity (`details.entity`, e.g. `team`) and its `details.id`. */
+  entity?: string;
+  entityId?: string;
   q?: string;
   limit?: number;
   cursor?: string;
@@ -563,11 +590,28 @@ export interface UserView {
   teams: { id: number; name: string }[];
   activeSessions: number;
 }
+export interface TeamMember {
+  id: number;
+  username: string;
+  displayName: string;
+}
 export interface TeamView {
   id: number;
   name: string;
   description: string;
-  members: { id: number; username: string; displayName: string }[];
+  members: TeamMember[];
+  /** May add and remove members on My teams; need not be members. */
+  managers: TeamMember[];
+}
+/** A team as its manager sees it on My teams: the grants are what a new member receives. */
+export interface ManagedTeamView {
+  id: number;
+  name: string;
+  description: string;
+  members: TeamMember[];
+  grants: { id: number; scope: ScopeView; actions: Action[]; expiresAt: string | null; expired: boolean }[];
+  /** The team's access requests, by any of its managers, newest first. */
+  requests: AccessRequest[];
 }
 export interface GrantView {
   id: number;

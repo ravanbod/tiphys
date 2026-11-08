@@ -61,7 +61,7 @@ export interface Operation {
 export interface Db {
   now0: number;
   users: MockUser[];
-  teams: { id: number; name: string; description: string; memberIds: number[] }[];
+  teams: { id: number; name: string; description: string; memberIds: number[]; managerIds: number[] }[];
   clusters: ClusterView[];
   apps: AppDef[];
   namespaces: NsDef[];
@@ -113,11 +113,11 @@ export function currentUser(): MockUser {
 function seed(): Db {
   const now = Date.now();
   const teams = [
-    { id: 1, name: 'Payments', description: 'Payments platform', memberIds: [1, 5, 6, 7] },
-    { id: 2, name: 'Search', description: 'Search and indexing', memberIds: [4, 9] },
-    { id: 3, name: 'Notifications', description: 'Notifications and digests', memberIds: [5] },
-    { id: 4, name: 'Platform', description: 'Platform / SRE', memberIds: [2] },
-    { id: 5, name: 'Security', description: 'Security and audit', memberIds: [3] },
+    { id: 1, name: 'Payments', description: 'Payments platform', memberIds: [1, 5, 6, 7], managerIds: [1] },
+    { id: 2, name: 'Search', description: 'Search and indexing', memberIds: [4, 9], managerIds: [] as number[] },
+    { id: 3, name: 'Notifications', description: 'Notifications and digests', memberIds: [5], managerIds: [1] },
+    { id: 4, name: 'Platform', description: 'Platform / SRE', memberIds: [2], managerIds: [] as number[] },
+    { id: 5, name: 'Security', description: 'Security and audit', memberIds: [3], managerIds: [] as number[] },
   ];
   const mkUser = (id: number, username: string, displayName: string, role: Role, extra: Partial<MockUser> = {}): MockUser => ({
     id, username, displayName, role, disabled: false, keycloakBound: true, local: false,
@@ -224,7 +224,7 @@ function seed(): Db {
   const req = (id: number, userId: number, scope: AccessRequest['scope'], actions: Action[], hours: number | null, reason: string, status: AccessRequest['status'], createdAgo: number, extra: Partial<AccessRequest> = {}): AccessRequest => ({
     id, userId, username: users.find((u) => u.id === userId)!.username, scope, actions, durationHours: hours, reason, status,
     decidedBy: status === 'pending' ? null : 'reza.ahmadi', decidedAt: status === 'pending' ? null : iso(now - createdAgo + 30 * MIN),
-    decisionNote: null, resultingGrantId: null, createdAt: iso(now - createdAgo), ...extra,
+    decisionNote: null, resultingGrantId: null, createdAt: iso(now - createdAgo), team: null, batchId: null, ...extra,
   });
   const requests: AccessRequest[] = [
     req(1, 4, { kind: 'workloads', cluster: 'prod-2', namespace: 'search-indexer', workloads: [{ kind: 'StatefulSet', name: 'search-indexer' }] }, ['logs', 'exec'], 24, 'Index rebuild is stuck on shard 4. I need a shell to inspect the lock files and the node\'s disk usage. Logs alone don\'t show it.', 'pending', 2 * HOUR),
@@ -236,6 +236,10 @@ function seed(): Db {
     req(5, 1, { kind: 'workloads', cluster: 'prod-1', namespace: 'payments-api', workloads: [{ kind: 'Deployment', name: 'payments-api' }] }, ['restart'], 1, 'Restart after config change.', 'rejected', 2 * DAY, { decisionNote: "Use the deploy pipeline for restarts. Ping me if it's an incident." }),
     req(6, 1, { kind: 'namespace', cluster: 'prod-1', namespace: 'notifications-api' }, ['logs'], 168, 'Investigating digest delays.', 'approved', 6 * DAY, { resultingGrantId: 9 }),
     req(7, 1, { kind: 'namespace', cluster: 'prod-1', namespace: 'payments-worker' }, ['exec'], 8, 'Debug ledger worker.', 'expired', 14 * DAY),
+    req(9, 1, { kind: 'namespace', cluster: 'staging-1', namespace: 'payments-api' }, ['logs', 'restart'], null, 'The on-call rotation of Payments needs logs and restarts in staging.', 'pending', 3 * HOUR, { team: { id: 1, name: 'Payments' } }),
+    // A batch: several namespaces filed at once, decided as a whole.
+    ...['payments-api', 'payments-worker', 'notifications-api'].map((ns, i) =>
+      req(20 + i, 5, { kind: 'namespace', cluster: 'prod-1', namespace: ns }, ['logs', 'exec'], 24, 'Tracing a payment that times out across the API, the worker and the notifier.', 'pending', 1 * HOUR, { batchId: '3b1f0c2a-7d4e-4f6a-9c1b-2e5d8a7f6c40' })),
   ];
 
   const settings: SettingsView = {
@@ -246,12 +250,12 @@ function seed(): Db {
     argoSyncClusterKinds: [],
   };
 
-  const bgNima: BreakGlass = { id: 1, userId: 4, username: 'nima.karimi', reason: 'Index rebuild is stuck on shard 4 and the time window closed at 13:00; need to inspect lock files.', startedAt: iso(now - 45 * MIN), expiresAt: iso(now - 15 * MIN), endedAt: iso(now - 15 * MIN), endedBy: 'nima.karimi', active: false };
+  const bgNima: BreakGlass = { id: 1, userId: 4, username: 'nima.karimi', reason: 'Index rebuild is stuck on shard 4 and the time window closed at 13:00; need to inspect lock files.', startedAt: iso(now - 45 * MIN), expiresAt: iso(now - 15 * MIN), endedAt: iso(now - 15 * MIN), endedBy: 'nima.karimi', active: false, scheduled: false };
 
   // A pending break-glass request (shown on the admin's Access requests page) and a decided one.
   const bgRequests: BreakGlassRequest[] = [
-    { id: 2, userId: 6, username: 'arash.rahimi', reason: 'Notifications worker is stuck on a poisoned message and prod exec is closed tonight.', durationMinutes: 30, status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, approvedMinutes: null, breakGlassId: null, createdAt: iso(now - 6 * MIN), expiresAt: iso(now + 54 * MIN) },
-    { id: 1, userId: 4, username: 'nima.karimi', reason: bgNima.reason, durationMinutes: 30, status: 'approved', decidedBy: 'reza.ahmadi', decidedAt: iso(now - 45 * MIN), decisionNote: null, approvedMinutes: 30, breakGlassId: 1, createdAt: iso(now - 50 * MIN), expiresAt: iso(now + 10 * MIN) },
+    { id: 2, userId: 6, username: 'arash.rahimi', reason: 'Notifications worker is stuck on a poisoned message and prod exec is closed tonight.', durationMinutes: 30, startsAt: iso(now + 120 * MIN), status: 'pending', decidedBy: null, decidedAt: null, decisionNote: null, approvedMinutes: null, breakGlassId: null, createdAt: iso(now - 6 * MIN), expiresAt: iso(now + 180 * MIN) },
+    { id: 1, userId: 4, username: 'nima.karimi', reason: bgNima.reason, durationMinutes: 30, startsAt: null, status: 'approved', decidedBy: 'reza.ahmadi', decidedAt: iso(now - 45 * MIN), decisionNote: null, approvedMinutes: 30, breakGlassId: 1, createdAt: iso(now - 50 * MIN), expiresAt: iso(now + 10 * MIN) },
   ];
 
   const sess = (id: string, userId: number, pod: string, cluster: string, ns: string, wl: string, container: string, env: string, startedAgoMin: number, durSec: number | null, endReason: ExecSessionView['endReason'], extra: Partial<ExecSessionView> = {}): ExecSessionView => {
@@ -334,4 +338,10 @@ function seed(): Db {
     argo: { fetchedAt: now - 42_000, stale: false, appCount: apps.length, projectCount: 3, lastError: null },
     jobs, ops: {}, nextId: { grant: 100, request: 100, user: 100, team: 100, window: 100, holiday: 100, bg: 100, bgRequest: 100, override: 100, audit: 9000 },
   };
+}
+
+/** The break-glass as the server shows it at now: active and scheduled follow the clock. */
+export function bgAt(b: BreakGlass, now = Date.now()): BreakGlass {
+  const current = !b.endedAt && Date.parse(b.expiresAt) > now;
+  return { ...b, active: current && Date.parse(b.startedAt) <= now, scheduled: current && Date.parse(b.startedAt) > now };
 }

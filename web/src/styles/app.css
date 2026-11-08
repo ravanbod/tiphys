@@ -180,3 +180,34 @@ button.btn[disabled]{opacity:.55;cursor:not-allowed}
 .xcp-term .termhost{flex:none;width:fit-content;max-width:100%;margin:0 auto;padding:8px}
 .xcp-bar{display:flex;align-items:center;gap:12px;padding:8px 12px;background:#121821;border-top:1px solid #243041;color:#D5DDE8;flex:none}
 .xcp-bar input[type=range]{flex:1;accent-color:#6FA8FF}
+
+/* searchable select (components/ComboBox.tsx) */
+.cbx{position:relative;min-width:0}
+.cbx .input{height:30px;padding-right:28px;text-overflow:ellipsis;font-size:12.5px}
+.cbx.free .input{padding-right:10px}
+.cbx .input:disabled{opacity:.6;cursor:not-allowed}
+.cbx-chev{position:absolute;right:8px;top:50%;width:14px;height:14px;transform:translateY(-50%);color:var(--tx3);pointer-events:none}
+/* the option list of ComboBox and Select, on the body at a fixed place (components/Popup.tsx); above dialogs, below toasts */
+.cbx-list{position:fixed;z-index:150;overflow:auto;margin:0;padding:4px;list-style:none;background:var(--sf);border:1px solid var(--ln);border-radius:8px;box-shadow:0 12px 32px rgba(10,14,20,.18);font:400 12.5px 'IBM Plex Sans',sans-serif;color:var(--tx);text-align:left}
+.cbx-group{padding:8px 8px 2px;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--tx3);font-weight:600}
+.cbx-opt.off{opacity:.45;cursor:default}
+.cbx-opt.mono,.sel-btn.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px}
+/* Select's button: looks like .sel (or the class it is given), sized like a native select */
+.sel-btn{position:relative;display:inline-flex;align-items:center;padding-right:26px;text-align:left;cursor:pointer;min-width:0;max-width:100%}
+.sel-btn:disabled{opacity:.6;cursor:not-allowed}
+.sel-btn[aria-invalid=true]{border-color:var(--red)}
+.sel-sizer{display:grid;flex:1;min-width:0}
+.sel-sizer>span{grid-area:1/1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sel-ghost{visibility:hidden}
+.sel-chev{position:absolute;right:8px;top:50%;width:14px;height:14px;transform:translateY(-50%);color:var(--tx3);pointer-events:none}
+.cbx-opt{display:flex;align-items:center;gap:8px;min-height:28px;padding:4px 8px;border-radius:5px;cursor:pointer;color:var(--tx)}
+.cbx-opt .cbx-l{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cbx-opt.act{background:var(--sf2)}
+.cbx-opt[aria-selected=true] .cbx-l{font-weight:600}
+.cbx-note{padding:6px 8px;font-size:12px}
+.cbx.sm .input{height:28px;font-size:12.5px}
+/* touch screens: options big enough to tap */
+@media (pointer:coarse){.cbx-opt{min-height:40px}}
+.ns-chip{display:inline-flex;align-items:center;gap:4px;padding-right:4px}
+.ns-chip .linklike{display:inline-flex;color:var(--tx3)}
+.ns-chip .linklike:hover{color:var(--tx)}

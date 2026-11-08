@@ -24,7 +24,7 @@ type PolicySnapshot struct {
 	UsersByName   map[string]domain.User // lower-case username
 	Teams         map[int64]domain.Team
 	TeamIDsByUser map[int64][]int64
-	BreakGlass    map[int64]*domain.BreakGlass // break-glass active at load time, per user
+	BreakGlass    map[int64]*domain.BreakGlass // break-glass active or scheduled at load time, per user
 	Clusters      map[string]domain.Cluster
 	Version       uint64
 	LoadedAt      time.Time
@@ -130,7 +130,7 @@ func (s *PolicyService) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	activeBG, err := repos.BreakGlass.ListActive(ctx, now)
+	activeBG, err := repos.BreakGlass.ListCurrent(ctx, now)
 	if err != nil {
 		return err
 	}
@@ -160,9 +160,14 @@ func (s *PolicyService) Reload(ctx context.Context) error {
 	if s.breakGlassEnabled != nil && !s.breakGlassEnabled() {
 		activeBG = nil
 	}
+	// One per user: the active one, else the next scheduled one. A user has
+	// more only through the previous release during a rollout.
 	for i := range activeBG {
 		b := activeBG[i]
-		if cur, ok := snap.BreakGlass[b.UserID]; !ok || b.StartedAt.After(cur.StartedAt) {
+		cur, ok := snap.BreakGlass[b.UserID]
+		switch {
+		case !ok, b.ActiveAt(now) && (!cur.ActiveAt(now) || b.StartedAt.After(cur.StartedAt)),
+			!b.ActiveAt(now) && !cur.ActiveAt(now) && b.StartedAt.Before(cur.StartedAt):
 			snap.BreakGlass[b.UserID] = &b
 		}
 	}

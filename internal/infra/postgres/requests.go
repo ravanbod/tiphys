@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"tiphys/internal/application"
@@ -20,10 +21,11 @@ const requestSelect = `
 	SELECT r.id, r.user_id, u.username, r.scope_kind, COALESCE(r.argo_project, ''), COALESCE(c.name, ''),
 		COALESCE(r.namespace, ''), r.workloads, r.actions, r.duration_hours, r.reason, r.status,
 		COALESCE(r.decided_by, ''), r.decided_at, COALESCE(r.decision_note, ''), r.resulting_grant_id,
-		r.created_at
+		r.created_at, COALESCE(r.team_id, 0), COALESCE(t.name, ''), COALESCE(r.batch_id::text, '')
 	FROM access_requests r
 	JOIN users u ON u.id = r.user_id
-	LEFT JOIN clusters c ON c.id = r.cluster_id`
+	LEFT JOIN clusters c ON c.id = r.cluster_id
+	LEFT JOIN teams t ON t.id = r.team_id`
 
 func scanRequest(row pgx.CollectableRow) (domain.AccessRequest, error) {
 	var a domain.AccessRequest
@@ -33,7 +35,7 @@ func scanRequest(row pgx.CollectableRow) (domain.AccessRequest, error) {
 	var duration *int32
 	err := row.Scan(&a.ID, &a.UserID, &a.Username, &scope, &a.Scope.ArgoProject, &a.Scope.Cluster,
 		&a.Scope.Namespace, &workloads, &actions, &duration, &a.Reason, &status,
-		&a.DecidedBy, &a.DecidedAt, &a.DecisionNote, &a.ResultingGrantID, &a.CreatedAt)
+		&a.DecidedBy, &a.DecidedAt, &a.DecisionNote, &a.ResultingGrantID, &a.CreatedAt, &a.TeamID, &a.TeamName, &a.BatchID)
 	if err != nil {
 		return a, err
 	}
@@ -73,7 +75,38 @@ func (r requestRepo) List(ctx context.Context, userID int64, status domain.Reque
 	return as, mapErr(err, "list access requests")
 }
 
+func (r requestRepo) ListByTeam(ctx context.Context, teamID int64) ([]domain.AccessRequest, error) {
+	rows, err := r.q.Query(ctx, requestSelect+` WHERE r.team_id = $1 ORDER BY r.id DESC`, teamID)
+	if err != nil {
+		return nil, mapErr(err, "list team access requests")
+	}
+	as, err := pgx.CollectRows(rows, scanRequest)
+	return as, mapErr(err, "list team access requests")
+}
+
+// ListBatch returns a batch's requests, oldest first (ErrNotFound for an
+// unknown or malformed batch id).
+func (r requestRepo) ListBatch(ctx context.Context, batchID string) ([]domain.AccessRequest, error) {
+	if _, err := uuid.Parse(batchID); err != nil {
+		return nil, fmt.Errorf("list request batch: %w", application.ErrNotFound)
+	}
+	rows, err := r.q.Query(ctx, requestSelect+` WHERE r.batch_id = $1 ORDER BY r.id`, batchID)
+	if err != nil {
+		return nil, mapErr(err, "list request batch")
+	}
+	as, err := pgx.CollectRows(rows, scanRequest)
+	if err == nil && len(as) == 0 {
+		return nil, fmt.Errorf("list request batch: %w", application.ErrNotFound)
+	}
+	return as, mapErr(err, "list request batch")
+}
+
 func (r requestRepo) Create(ctx context.Context, a domain.AccessRequest) (domain.AccessRequest, error) {
+	if a.BatchID != "" {
+		if _, err := uuid.Parse(a.BatchID); err != nil {
+			return domain.AccessRequest{}, fmt.Errorf("create access request: invalid batch id: %w", err)
+		}
+	}
 	ws := a.Scope.Workloads
 	if ws == nil {
 		ws = []domain.WorkloadRef{}
@@ -94,11 +127,11 @@ func (r requestRepo) Create(ctx context.Context, a domain.AccessRequest) (domain
 		}
 		err = tx.QueryRow(ctx, `
 			INSERT INTO access_requests (user_id, scope_kind, argo_project, cluster_id, namespace,
-				workloads, actions, duration_hours, reason)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				workloads, actions, duration_hours, reason, team_id, batch_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, '')::uuid)
 			RETURNING id`,
 			a.UserID, string(a.Scope.Kind), sc.argoProject, sc.clusterID, sc.namespace,
-			wj, actionStrings(a.Actions), dur, a.Reason).Scan(&id)
+			wj, actionStrings(a.Actions), dur, a.Reason, nullID(a.TeamID), a.BatchID).Scan(&id)
 		return mapErr(err, "create access request")
 	})
 	if err != nil {
@@ -108,7 +141,9 @@ func (r requestRepo) Create(ctx context.Context, a domain.AccessRequest) (domain
 }
 
 // Decide only succeeds on a pending request (the UPDATE is conditional), so
-// two admins deciding at once cannot both win.
+// two admins deciding at once cannot both win. Approving a team's request
+// sets approved_for_team, which the previous release never does (see
+// migration 10).
 func (r requestRepo) Decide(ctx context.Context, id int64, status domain.RequestStatus, decidedBy, note string, grantID *int64, at time.Time) error {
 	switch status {
 	case domain.RequestApproved, domain.RequestRejected, domain.RequestExpired:
@@ -120,7 +155,8 @@ func (r requestRepo) Decide(ctx context.Context, id int64, status domain.Request
 	}
 	tag, err := r.q.Exec(ctx, `
 		UPDATE access_requests SET status = $2, decided_by = $3, decision_note = $4,
-			resulting_grant_id = $5, decided_at = $6
+			resulting_grant_id = $5, decided_at = $6,
+			approved_for_team = ($2 = 'approved' AND team_id IS NOT NULL)
 		WHERE id = $1 AND status = 'pending'`,
 		id, string(status), decidedBy, note, grantID, at)
 	if err != nil {

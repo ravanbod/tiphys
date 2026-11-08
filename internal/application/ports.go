@@ -75,11 +75,16 @@ type UserRepository interface {
 
 type TeamRepository interface {
 	Get(ctx context.Context, id int64) (domain.Team, error)
-	List(ctx context.Context) ([]domain.Team, error) // MemberIDs filled
+	List(ctx context.Context) ([]domain.Team, error) // MemberIDs and ManagerIDs filled
 	Create(ctx context.Context, t domain.Team) (domain.Team, error)
 	Update(ctx context.Context, t domain.Team) error
 	Delete(ctx context.Context, id int64) error
 	SetMembers(ctx context.Context, teamID int64, userIDs []int64) error
+	SetManagers(ctx context.Context, teamID int64, userIDs []int64) error
+	// AddMember and RemoveMember change one membership and report whether
+	// it changed.
+	AddMember(ctx context.Context, teamID, userID int64) (bool, error)
+	RemoveMember(ctx context.Context, teamID, userID int64) (bool, error)
 	// TeamIDsOfUser returns the ids of the teams a user belongs to.
 	TeamIDsOfUser(ctx context.Context, userID int64) ([]int64, error)
 }
@@ -145,6 +150,11 @@ type AccessRequestRepository interface {
 	// List returns requests newest first. A zero userID means all users; an
 	// empty status means all statuses.
 	List(ctx context.Context, userID int64, status domain.RequestStatus) ([]domain.AccessRequest, error)
+	// ListByTeam returns a team's requests (TeamID set), newest first.
+	ListByTeam(ctx context.Context, teamID int64) ([]domain.AccessRequest, error)
+	// ListBatch returns the requests of a batch (BatchID), oldest first;
+	// ErrNotFound when there are none.
+	ListBatch(ctx context.Context, batchID string) ([]domain.AccessRequest, error)
 	Create(ctx context.Context, r domain.AccessRequest) (domain.AccessRequest, error)
 	// Decide sets the status, decision fields and resulting grant id. It
 	// fails with ErrConflict if the request is no longer pending.
@@ -157,11 +167,12 @@ type BreakGlassRepository interface {
 	Get(ctx context.Context, id int64) (domain.BreakGlass, error)
 	Create(ctx context.Context, b domain.BreakGlass) (domain.BreakGlass, error)
 	End(ctx context.Context, id int64, endedBy string, at time.Time) error
-	// LatestForUser returns the user's most recent break-glass (any state),
-	// or ErrNotFound.
-	LatestForUser(ctx context.Context, userID int64) (domain.BreakGlass, error)
-	// ListActive returns break-glasses that have not expired or ended at t.
-	ListActive(ctx context.Context, t time.Time) ([]domain.BreakGlass, error)
+	// CurrentForUser returns the user's break-glass active or scheduled at t
+	// (the earliest-starting one), or ErrNotFound.
+	CurrentForUser(ctx context.Context, userID int64, t time.Time) (domain.BreakGlass, error)
+	// ListCurrent returns break-glasses that have not expired or ended at t,
+	// also those that start later (scheduled).
+	ListCurrent(ctx context.Context, t time.Time) ([]domain.BreakGlass, error)
 	// List returns recent break-glasses, newest first.
 	List(ctx context.Context, limit int) ([]domain.BreakGlass, error)
 }
@@ -177,7 +188,8 @@ type BreakGlassRequestRepository interface {
 	// breakGlassID only when approving). It fails with ErrConflict if the
 	// request is no longer pending.
 	Decide(ctx context.Context, id int64, status domain.RequestStatus, decidedBy, note string, approvedMinutes *int, breakGlassID *int64, at time.Time) error
-	// ExpirePendingBefore marks pending requests created before t as expired.
+	// ExpirePendingBefore marks pending requests created (or, if later,
+	// requested to start) before t as expired.
 	ExpirePendingBefore(ctx context.Context, t time.Time) (int64, error)
 }
 
@@ -219,10 +231,16 @@ type AuditFilter struct {
 	Namespace    string
 	Environment  string
 	BreakGlassID int64
-	SessionID    string
-	Text         string // free-text match on username, pod, workload, reason
-	BeforeID     int64  // pagination: events with id < BeforeID
-	Limit        int
+	// BreakGlass keeps only events that ran under some break-glass.
+	BreakGlass bool
+	SessionID  string
+	// Entity and EntityID match an admin change's details.entity and
+	// details.id (e.g. "team" and "12").
+	Entity   string
+	EntityID string
+	Text     string // free-text match on username, pod, workload, reason
+	BeforeID int64  // pagination: events with id < BeforeID
+	Limit    int
 }
 
 // AuditRepository is append-only: the application's database role has only

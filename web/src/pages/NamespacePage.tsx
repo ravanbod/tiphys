@@ -9,6 +9,7 @@ import { ActionChips, EnvBadge, HealthChip, KindTag, SyncChip } from '../compone
 import { Bump } from '../components/Bump';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../components/Feedback';
 import { Icon } from '../components/Icon';
+import { Select } from '../components/Select';
 import { RunCronDialog, SyncAppDialog } from '../components/OperationDialogs';
 import { TrafficFlow } from '../components/TrafficFlow';
 import { Crumbs, PageHeader } from '../components/PageHeader';
@@ -26,6 +27,7 @@ import { appSyncTarget, grantedOrClosed } from '../lib/decision';
 import { cronJobsUrl, logsUrl, workloadUrl } from '../lib/routes';
 import { fmtDateTime, fmtRelative } from '../lib/time';
 import { inClusterNodes, trafficRules, withoutNodes } from '../lib/traffic';
+import { breakGlassKey } from '../lib/breakGlass';
 
 const NO_WORKLOADS: WorkloadSummary[] = [];
 
@@ -40,8 +42,8 @@ export function NamespacePage() {
   const [{ q, kind }, setFilters] = useUrlState({ q: '', kind: '' });
   const [run, setRun] = useState<WorkloadSummary | null>(null);
   const navigate = useNavigate();
-  const list = useApi(() => api.workloads(cluster, ns), [cluster, ns, me.breakGlass?.id]);
-  const nss = useApi(() => api.namespaces(), [me.breakGlass?.id]);
+  const list = useApi(() => api.workloads(cluster, ns), [cluster, ns, breakGlassKey(me)]);
+  const nss = useApi(() => api.namespaces(), [breakGlassKey(me)]);
   const info = nss.data?.find((n) => n.cluster === cluster && n.namespace === ns);
   const environment = info?.environment ?? list.data?.[0]?.environment;
   useSetShellCtx(environment ? cluster : undefined, environment);
@@ -54,8 +56,8 @@ export function NamespacePage() {
   const [opened, setOpened] = useState({ key, tabs: [tab] });
   if (opened.key !== key) setOpened({ key, tabs: [tab] });
   else if (!opened.tabs.includes(tab)) setOpened({ key, tabs: [...opened.tabs, tab] });
-  const events = useApi(() => api.namespaceEvents(cluster, ns), [cluster, ns, me.breakGlass?.id], { enabled: opened.tabs.includes('events') });
-  const traffic = useApi(() => api.namespaceTraffic(cluster, ns), [cluster, ns, me.breakGlass?.id], { enabled: opened.tabs.includes('traffic') });
+  const events = useApi(() => api.namespaceEvents(cluster, ns), [cluster, ns, breakGlassKey(me)], { enabled: opened.tabs.includes('events') });
+  const traffic = useApi(() => api.namespaceTraffic(cluster, ns), [cluster, ns, breakGlassKey(me)], { enabled: opened.tabs.includes('traffic') });
   useLive({ cluster, namespace: ns }, (changes) => {
     const all = changes.length === 0;
     if (all || changes.some((c) => c.type !== 'event')) list.reload();
@@ -96,9 +98,7 @@ export function NamespacePage() {
           <ArgoApps cluster={cluster} ns={ns} />
 
           <div className="row wrap">
-            <select className="sel" aria-label="Kind" value={kind} onChange={(e) => setFilters({ kind: e.target.value })}>
-              <option value="">All kinds</option>{kinds.map((k) => <option key={k}>{k}</option>)}
-            </select>
+            <Select label="Kind" value={kind} onChange={(v) => setFilters({ kind: v })} options={[{ value: '', label: 'All kinds' }, ...kinds.map((k) => ({ value: k, label: k }))]} />
             <label className="search" style={{ width: 280, height: 28, background: 'var(--sf)' }}>
               <Icon name="search" />
               <input value={q} onChange={(e) => setFilters({ q: e.target.value })} placeholder="Filter by name" aria-label="Filter by name" />
@@ -174,7 +174,7 @@ function TabLink({ id, tab, children }: { id: Tab; tab: Tab; children: React.Rea
 function ArgoApps({ cluster, ns }: { cluster: string; ns: string }) {
   const { me } = useAuth();
   const now = useNow(30_000);
-  const apps = useApi(() => api.namespaceApps(cluster, ns), [cluster, ns, me.breakGlass?.id]);
+  const apps = useApi(() => api.namespaceApps(cluster, ns), [cluster, ns, breakGlassKey(me)]);
   const [syncing, setSyncing] = useState<NamespaceApp | null>(null);
   const [shown, setShown] = useState<NamespaceApp | null>(null);
   if (!apps.data?.length) return null;

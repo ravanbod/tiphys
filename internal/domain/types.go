@@ -6,6 +6,7 @@ package domain
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 )
 
@@ -337,16 +338,21 @@ type User struct {
 	UpdatedBy   string
 }
 
-// Team groups users for grants and rules.
+// Team groups users for grants and rules. Its managers (chosen by an admin)
+// may add and remove members themselves; they need not be members.
 type Team struct {
 	ID          int64
 	Name        string
 	Description string
 	MemberIDs   []int64
+	ManagerIDs  []int64
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	UpdatedBy   string
 }
+
+// ManagedBy reports whether the user is one of the team's managers.
+func (t Team) ManagedBy(userID int64) bool { return slices.Contains(t.ManagerIDs, userID) }
 
 // AdmissionMode is how a cluster enforces the restart/job/protected rules.
 type AdmissionMode string
@@ -534,6 +540,12 @@ func (b *BreakGlass) ActiveAt(t time.Time) bool {
 	return b.EndedAt == nil || t.Before(*b.EndedAt)
 }
 
+// Current reports whether the break-glass is active or scheduled at t, that
+// is, it has neither ended nor expired.
+func (b *BreakGlass) Current(t time.Time) bool {
+	return b != nil && b.EffectiveEnd().After(t)
+}
+
 // EffectiveEnd is when the break-glass stops applying.
 func (b *BreakGlass) EffectiveEnd() time.Time {
 	if b.EndedAt != nil && b.EndedAt.Before(b.ExpiresAt) {
@@ -554,13 +566,14 @@ const (
 )
 
 // BreakGlassRequest asks an admin for a break-glass (BreakGlassApproval mode).
-// The break-glass starts when it is approved.
+// The break-glass starts when it is approved, or at StartsAt if that is later.
 type BreakGlassRequest struct {
 	ID              int64
 	UserID          int64
 	Username        string
 	Reason          string
-	Minutes         int // requested
+	Minutes         int        // requested
+	StartsAt        *time.Time // requested start; nil: when approved
 	Status          RequestStatus
 	DecidedBy       string
 	DecidedAt       *time.Time
@@ -570,11 +583,25 @@ type BreakGlassRequest struct {
 	CreatedAt       time.Time
 }
 
+// ExpiresAt is when the request expires if still pending: maxAge after it
+// was created or, for a later requested start, after that start.
+func (r BreakGlassRequest) ExpiresAt(maxAge time.Duration) time.Time {
+	from := r.CreatedAt
+	if r.StartsAt != nil && r.StartsAt.After(from) {
+		from = *r.StartsAt
+	}
+	return from.Add(maxAge)
+}
+
 // AccessRequest asks for a grant.
 type AccessRequest struct {
-	ID               int64
-	UserID           int64
-	Username         string
+	ID       int64
+	UserID   int64 // the requester
+	Username string
+	// TeamID is set when a team manager asked for their team: approving it
+	// grants the team, not the requester.
+	TeamID           int64
+	TeamName         string
 	Scope            Scope
 	Actions          []Action
 	DurationHours    *int // nil = permanent
@@ -585,6 +612,9 @@ type AccessRequest struct {
 	DecisionNote     string
 	ResultingGrantID *int64
 	CreatedAt        time.Time
+	// BatchID (a UUID) groups the namespace requests a user filed at once;
+	// an admin decides a batch as a whole. Empty for a single request.
+	BatchID string
 }
 
 // ExecSession is a recorded exec session.

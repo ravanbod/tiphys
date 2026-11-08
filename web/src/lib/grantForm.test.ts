@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GrantView } from '../api/types';
-import { APP_SCOPE_HINT, actionPhrase, emptyGrantForm, formFromGrant, grantInputFromForm, validateGrantForm } from './grantForm';
+import { APP_SCOPE_HINT, MAX_GRANT_BATCH, actionPhrase, emptyGrantForm, formFromGrant, formNamespaces, grantInputFromForm, validateGrantForm } from './grantForm';
 
 const NOW = Date.parse('2026-10-20T10:00:00Z');
 
@@ -50,5 +50,19 @@ describe('grant form', () => {
     expect(actionPhrase(['exec', 'logs'])).toBe('read logs and exec');
     expect(actionPhrase(['logs', 'exec', 'restart'])).toBe('read logs, exec and restart');
     expect(actionPhrase([])).toBe('…');
+  });
+});
+
+describe('several namespaces', () => {
+  const base = { ...emptyGrantForm(), holderId: 1, scopeKind: 'namespace' as const, cluster: 'prod-1', namespace: 'a' };
+  it('lists the chosen namespace first, once each, for a new namespace grant only', () => {
+    expect(formNamespaces({ ...base, extraNamespaces: ['b', 'a', 'c'] })).toEqual(['a', 'b', 'c']);
+    expect(formNamespaces({ ...base, id: 7, extraNamespaces: ['b'] })).toEqual(['a']);
+    expect(formNamespaces({ ...base, scopeKind: 'workloads', extraNamespaces: ['b'] })).toEqual(['a']);
+  });
+  it('caps them', () => {
+    const extra = Array.from({ length: MAX_GRANT_BATCH }, (_, i) => `ns-${i}`);
+    expect(validateGrantForm({ ...base, extraNamespaces: extra }, NOW).namespaces).toBeTruthy();
+    expect(validateGrantForm({ ...base, extraNamespaces: extra.slice(1) }, NOW).namespaces).toBeUndefined();
   });
 });

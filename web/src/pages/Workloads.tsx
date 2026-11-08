@@ -8,6 +8,7 @@ import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { PageHeader } from '../components/PageHeader';
 import { Seg } from '../components/Seg';
+import { Select } from '../components/Select';
 import { useAuth } from '../context/auth';
 import { useLive } from '../context/live';
 import { rowClass, useAnimatedList } from '../hooks/useAnimatedList';
@@ -19,10 +20,11 @@ import { logsUrl, namespaceUrl, workloadUrl } from '../lib/routes';
 import { ARGO_UI } from '../lib/features';
 import { filtersOf, loadFilters, restoredQuery, saveFilters } from '../lib/workloadFilters';
 import type { FilterKey } from '../lib/workloadFilters';
+import { breakGlassKey } from '../lib/breakGlass';
 
 function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace: string; cols: number }) {
   const { me } = useAuth();
-  const list = useApi(() => api.workloads(cluster, namespace), [cluster, namespace, me.breakGlass?.id]);
+  const list = useApi(() => api.workloads(cluster, namespace), [cluster, namespace, breakGlassKey(me)]);
   useLive({ cluster, namespace }, (changes) => {
     if (changes.length === 0 || changes.some((c) => c.type !== 'event')) list.reload();
   });
@@ -87,8 +89,8 @@ export function Workloads() {
   const [{ q, cluster, env, project }, setFilters] = useUrlState({ q: '', cluster: '', env: '', project: '' });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const { stars, toggle, isStarred } = useStars();
-  const apps = useApi(() => api.apps(), [me.breakGlass?.id], { enabled: group === 'app' });
-  const nss = useApi(() => api.namespaces(), [me.breakGlass?.id], { enabled: group === 'ns' });
+  const apps = useApi(() => api.apps(), [breakGlassKey(me)], { enabled: group === 'app' });
+  const nss = useApi(() => api.namespaces(), [breakGlassKey(me)], { enabled: group === 'ns' });
   const filterRef = useRef<HTMLInputElement>(null);
 
   const expand = sp.get('expand');
@@ -168,16 +170,10 @@ export function Workloads() {
       </PageHeader>
 
       <div className="row wrap">
-        <select className="sel" aria-label="Cluster" value={cluster} onChange={(e) => setFilter('cluster', e.target.value)}>
-          <option value="">All clusters</option>{clusters.map((c) => <option key={c}>{c}</option>)}
-        </select>
-        <select className="sel" aria-label="Environment" value={env} onChange={(e) => setFilter('env', e.target.value)}>
-          <option value="">All environments</option>{envs.map((c) => <option key={c}>{c}</option>)}
-        </select>
+        <Select label="Cluster" value={cluster} onChange={(v) => setFilter('cluster', v)} options={[{ value: '', label: 'All clusters' }, ...clusters.map((c) => ({ value: c, label: c }))]} />
+        <Select label="Environment" value={env} onChange={(v) => setFilter('env', v)} options={[{ value: '', label: 'All environments' }, ...envs.map((c) => ({ value: c, label: c }))]} />
         {ARGO_UI && (
-          <select className="sel" aria-label="Argo project" value={project} onChange={(e) => setFilter('project', e.target.value)}>
-            <option value="">All Argo projects</option>{projects.map((c) => <option key={c}>{c}</option>)}
-          </select>
+          <Select label="Argo project" value={project} onChange={(v) => setFilter('project', v)} options={[{ value: '', label: 'All Argo projects' }, ...projects.map((c) => ({ value: c, label: c }))]} />
         )}
         <label className="search" style={{ width: 280, height: 28, background: 'var(--sf)' }}>
           <Icon name="search" />

@@ -161,6 +161,45 @@ func TestTeams(t *testing.T) {
 	_, err = f.r.Teams.Get(f.ctx, 9999)
 	isErr(t, err, application.ErrNotFound)
 
+	// Managers are kept apart from members.
+	must(t, f.r.Teams.SetManagers(f.ctx, b.ID, []int64{u3.ID, u1.ID}))
+	got, _ = f.r.Teams.Get(f.ctx, b.ID)
+	if !slices.Equal(got.ManagerIDs, []int64{u1.ID, u3.ID}) || !slices.Equal(got.MemberIDs, []int64{u2.ID}) {
+		t.Fatalf("managers %v members %v", got.ManagerIDs, got.MemberIDs)
+	}
+	isErr(t, f.r.Teams.SetManagers(f.ctx, b.ID, []int64{9999}), application.ErrConflict)
+	got, _ = f.r.Teams.Get(f.ctx, a.ID)
+	if got.ManagerIDs == nil || len(got.ManagerIDs) != 0 {
+		t.Fatalf("want empty non-nil managers, got %#v", got.ManagerIDs)
+	}
+
+	// One member at a time, reporting whether anything changed.
+	added, err := f.r.Teams.AddMember(f.ctx, b.ID, u3.ID)
+	must(t, err)
+	again, err := f.r.Teams.AddMember(f.ctx, b.ID, u3.ID)
+	must(t, err)
+	if !added || again {
+		t.Fatalf("add member: %v then %v", added, again)
+	}
+	removed, err := f.r.Teams.RemoveMember(f.ctx, b.ID, u2.ID)
+	must(t, err)
+	again, err = f.r.Teams.RemoveMember(f.ctx, b.ID, u2.ID)
+	must(t, err)
+	if !removed || again {
+		t.Fatalf("remove member: %v then %v", removed, again)
+	}
+	got, _ = f.r.Teams.Get(f.ctx, b.ID)
+	if !slices.Equal(got.MemberIDs, []int64{u3.ID}) {
+		t.Fatalf("members after add/remove: %v", got.MemberIDs)
+	}
+	_, err = f.r.Teams.AddMember(f.ctx, b.ID, 9999)
+	isErr(t, err, application.ErrConflict)
+	_, err = f.r.Teams.AddMember(f.ctx, 9999, u1.ID)
+	isErr(t, err, application.ErrNotFound)
+	_, err = f.r.Teams.RemoveMember(f.ctx, 9999, u1.ID)
+	isErr(t, err, application.ErrNotFound)
+	must(t, f.r.Teams.SetMembers(f.ctx, b.ID, []int64{u2.ID}))
+
 	b.Description, b.UpdatedBy = "second", "admin"
 	must(t, f.r.Teams.Update(f.ctx, b))
 	got, _ = f.r.Teams.Get(f.ctx, b.ID)

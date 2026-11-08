@@ -1270,6 +1270,129 @@ func TestBreakGlassCanBeTurnedOffAndLogsStayOpen(t *testing.T) {
 	})
 }
 
+func TestScheduledBreakGlass(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	admin.do("POST", "/api/v1/admin/time-windows", map[string]any{
+		"name": "prod hours", "scopeKind": "environment", "scopeValue": "prod", "actions": []string{"exec"},
+		"daysOfWeek": []int{6, 0, 1, 2, 3}, "startTime": "09:00", "endTime": "18:00", "timezone": "Asia/Tehran",
+		"effect": "allow_inside", "enabled": true})
+	// A namespace grant, so closes_at is not cut short by the Argo cache
+	// being stale at future instants (project grants).
+	if status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+		"holder": map[string]any{"kind": "user", "id": e.devID},
+		"scope":  map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "payments-api"}, "actions": []string{"exec"}}); status != 201 && status != 200 {
+		t.Fatalf("grant: %d %v", status, m)
+	}
+	now := time.Date(2026, 10, 21, 17, 30, 0, 0, tehran)
+	e.setTime(now)
+	exec := wl + "/pods/payments-api-abc/exec"
+	reason := "planned migration CHG-77, needs exec after hours"
+	start := func(c *client, startsAt time.Time) (int, map[string]any) {
+		status, m, _ := c.do("POST", "/api/v1/break-glass", map[string]any{"reason": reason, "durationMinutes": 60, "startsAt": startsAt.Format(time.RFC3339)})
+		return status, m
+	}
+	ready := func() map[string]any {
+		ws, _, err := dev.dialWS(exec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, 3*time.Second, "refusal or ready", func() bool { return ws.control("end") != nil || ws.control("ready") != nil })
+		_ = ws.conn.Close()
+		return ws.control("ready")
+	}
+	at := func(m map[string]any, key string) time.Time {
+		got, err := time.Parse(time.RFC3339, fmt.Sprint(m[key]))
+		if err != nil {
+			t.Fatalf("%s: %v", key, m)
+		}
+		return got
+	}
+
+	// The start must lie ahead, within seven days.
+	if status, m := start(dev, now.Add(-time.Hour)); status != 422 {
+		t.Fatalf("start in the past: %d %v", status, m)
+	}
+	if status, m := start(dev, now.Add(8*24*time.Hour)); status != 422 {
+		t.Fatalf("start beyond seven days: %d %v", status, m)
+	}
+	// Scheduled from 18:00, when the window closes: exec now stays open until 19:00.
+	six := time.Date(2026, 10, 21, 18, 0, 0, 0, tehran)
+	status, bg := start(dev, six)
+	if status != 201 || !at(bg, "startedAt").Equal(six) || !at(bg, "expiresAt").Equal(six.Add(time.Hour)) {
+		t.Fatalf("schedule: %d %v", status, bg)
+	}
+	waitFor(t, 6*time.Second, "policy with the scheduled break-glass", func() bool {
+		r := ready()
+		return r != nil && r["closesAt"] != nil && at(r, "closesAt").Equal(six.Add(time.Hour))
+	})
+	// One at a time.
+	if status, m := start(dev, six.Add(2*time.Hour)); status != 409 {
+		t.Fatalf("second break-glass: %d %v", status, m)
+	}
+	// After the window closes it overrides it, tagged.
+	e.setTime(six.Add(10 * time.Minute))
+	waitFor(t, 6*time.Second, "exec under the scheduled break-glass", func() bool {
+		r := ready()
+		return r != nil && r["breakGlassId"] == bg["id"]
+	})
+	if status, _, _ := dev.do("POST", "/api/v1/break-glass/"+fmt.Sprint(bg["id"])+"/end", nil); status != 204 {
+		t.Fatalf("end: %d", status)
+	}
+
+	// A later one is cancelled before its start and never applies.
+	e.setTime(six.Add(20 * time.Minute))
+	nine := time.Date(2026, 10, 21, 21, 0, 0, 0, tehran)
+	status, bg = start(dev, nine)
+	if status != 201 {
+		t.Fatalf("schedule 21:00: %d %v", status, bg)
+	}
+	if status, _, _ := dev.do("POST", "/api/v1/break-glass/"+fmt.Sprint(bg["id"])+"/end", nil); status != 204 {
+		t.Fatalf("cancel before start: %d", status)
+	}
+	_, page, _ := admin.get(fmt.Sprintf("/api/v1/audit?breakGlassId=%v", bg["id"]))
+	items, _ := page["items"].([]any)
+	types := map[string]map[string]any{}
+	for _, it := range items {
+		ev := it.(map[string]any)
+		types[ev["eventType"].(string)], _ = ev["details"].(map[string]any)
+	}
+	if d := types[domain.EventBreakGlassStart]; d == nil || !at(d, "startsAt").Equal(nine) {
+		t.Fatalf("break_glass.start: %v", types)
+	}
+	if d := types[domain.EventBreakGlassEnd]; d == nil || d["beforeStart"] != true {
+		t.Fatalf("break_glass.end: %v", types)
+	}
+	e.setTime(nine.Add(5 * time.Minute))
+	if ready() != nil {
+		t.Fatal("a cancelled scheduled break-glass must not open exec")
+	}
+
+	// Approval mode: the request names the start, expires counting from it,
+	// and the approved break-glass starts then.
+	setBreakGlassMode(t, admin, "approval", map[string]any{"breakGlassRequestMaxAgeMinutes": 30})
+	ten := nine.Add(time.Hour)
+	status, req, _ := dev.do("POST", "/api/v1/break-glass/requests", map[string]any{"reason": reason, "durationMinutes": 45, "startsAt": ten.Format(time.RFC3339)})
+	if status != 201 || !at(req, "startsAt").Equal(ten) || !at(req, "expiresAt").Equal(ten.Add(30*time.Minute)) {
+		t.Fatalf("scheduled request: %d %v", status, req)
+	}
+	e.setTime(nine.Add(40 * time.Minute)) // past created + 30 min, still pending
+	status, m, _ := admin.do("POST", fmt.Sprintf("/api/v1/break-glass/requests/%v/approve", req["id"]), nil)
+	if status != 200 || m["status"] != "approved" {
+		t.Fatalf("approve: %d %v", status, m)
+	}
+	got, err := e.store.Repos().BreakGlass.Get(context.Background(), int64(m["breakGlassId"].(float64)))
+	if err != nil || !got.StartedAt.Equal(ten) || !got.ExpiresAt.Equal(ten.Add(45*time.Minute)) {
+		t.Fatalf("approved break-glass: %+v %v", got, err)
+	}
+	if ready() != nil {
+		t.Fatal("exec open before the approved start")
+	}
+	e.setTime(ten.Add(time.Minute))
+	waitFor(t, 6*time.Second, "exec under the approved scheduled break-glass", func() bool { return ready() != nil })
+}
+
 func setBreakGlassMode(t *testing.T, admin *client, mode string, more map[string]any) {
 	t.Helper()
 	_, cur, _ := admin.get("/api/v1/admin/settings")

@@ -8,6 +8,7 @@ import { Dialog } from '../components/Dialog';
 import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { Seg } from '../components/Seg';
+import { Select } from '../components/Select';
 import { XTerm } from '../components/XTerm';
 import type { XTermHandle } from '../components/XTerm';
 import { useAuth } from '../context/auth';
@@ -21,7 +22,7 @@ import type { EndInfo } from '../lib/endReason';
 import { workloadUrl } from '../lib/routes';
 import { fmtCountdown, fmtTime, msUntil } from '../lib/time';
 import { requestUrl } from '../lib/requestLink';
-import { breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
+import { breakGlassKey, breakGlassOn, breakGlassLabel } from '../lib/breakGlass';
 
 type Phase = 'connect' | 'session' | 'ended';
 
@@ -35,7 +36,7 @@ export function ExecPage() {
   const ref = useMemo(() => ({ cluster, namespace: ns, kind, name }), [cluster, ns, kind, name]);
   // Debug: the shell runs in a new debug container that shares the chosen container's processes.
   const debug = sp.get('mode') === 'debug' && me.settings.debugEnabled;
-  const wl = useApi(() => api.workload(ref), [ref, me.breakGlass?.id]);
+  const wl = useApi(() => api.workload(ref), [ref, breakGlassKey(me)]);
   const podsQ = useApi(() => api.pods(ref), [ref], { enabled: !!wl.data?.access.logs.allowed });
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
 
@@ -265,12 +266,12 @@ function ConnectDialog(p: {
         <dt>Cluster</dt><dd className="mono">{p.wl.cluster}</dd><dt>Namespace</dt><dd className="mono">{p.wl.namespace}</dd>
       </dl>
       {p.pods.length > 1 && (
-        <label className="f">Pod<select className="sel mono" style={{ height: 30 }} value={p.pod} onChange={(e) => p.onPod(e.target.value)}>{p.pods.map((n) => <option key={n}>{n}</option>)}</select></label>
+        <label className="f">Pod<Select label="Pod" mono style={{ height: 30 }} value={p.pod} onChange={p.onPod} options={p.pods.map((n) => ({ value: n, label: n }))} /></label>
       )}
       {p.debugEnabled && (
         <div className="f">Run in<Seg label="Run in" style={{ alignSelf: 'flex-start' }} value={p.debug ? 'debug' : 'exec'} onChange={(v) => p.onDebug(v === 'debug')} options={[{ value: 'exec', label: 'The container' }, { value: 'debug', label: 'A debug container' }]} /></div>
       )}
-      <label className="f">{p.debug ? 'Target container' : 'Container'}<select className="sel" style={{ height: 30 }} value={p.container} onChange={(e) => p.onContainer(e.target.value)}>{p.containers.map((c) => <option key={c}>{c}</option>)}</select></label>
+      <label className="f">{p.debug ? 'Target container' : 'Container'}<Select label={p.debug ? 'Target container' : 'Container'} mono style={{ height: 30 }} value={p.container} onChange={p.onContainer} options={p.containers.map((c) => ({ value: c, label: c }))} /></label>
       <div className="f">Shell<Seg label="Shell" style={{ alignSelf: 'flex-start' }} value={p.shell} onChange={p.onShell} options={[{ value: '/bin/sh', label: '/bin/sh', mono: true }, { value: '/bin/bash', label: '/bin/bash', mono: true }]} /></div>
       {p.debug && (
         <div className="banner info">
