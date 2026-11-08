@@ -356,8 +356,10 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
 ## CI
 
 GitHub: `.github/workflows/ci.yml` runs the backend (build, vet, race tests
-with a PostgreSQL service), frontend (typecheck, lint, tests, build) and
-image build checks. The Dockerfile pulls base
+with a PostgreSQL service), frontend (typecheck, lint, tests, build) and the
+image, which it pushes to Docker Hub on `main` and `v*` tags once both passed
+(variable `DOCKERHUB_USERNAME`, secret `DOCKERHUB_TOKEN`, optional
+`DOCKERHUB_IMAGE`; without the token it only builds). The Dockerfile pulls base
 images from Docker Hub unless `BASE_REGISTRY` (and `GOPROXY`, `GOSUMDB`,
 `NPM_REGISTRY`) point at mirrors.
 
