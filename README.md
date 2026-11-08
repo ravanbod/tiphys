@@ -61,7 +61,8 @@ dark set to match your theme.
 - [docs/kubeaccess.md](docs/kubeaccess.md) (cluster access),
   [docs/database.md](docs/database.md) (schema and roles),
   [docs/frontend.md](docs/frontend.md) (web app and mock mode),
-  [deploy/chart/README.md](deploy/chart/README.md) (per-cluster chart)
+  [deploy/chart/README.md](deploy/chart/README.md) (per-cluster chart),
+  [deploy/chart/tiphys-portal/README.md](deploy/chart/tiphys-portal/README.md) (portal chart)
 - Backend: Go (gin, client-go, pgx), see [CLAUDE.md](CLAUDE.md) for the
   architecture rules. Frontend: React + TypeScript + xterm.js +
   asciinema-player in [web/](web/), embedded into the Go binary.
@@ -167,25 +168,124 @@ stringData:
 
 ## Install in a cluster
 
-1. Per cluster: `helm install tiphys-connector deploy/chart/tiphys-connector`
-   (normally deployed by an Argo CD ApplicationSet; see the chart README).
-   Create a kubeconfig from its `tiphys-connector` token and put it in a Secret
-   annotated `tiphys/cluster: <cluster name>` in the portal's namespace. The
-   portal refuses credentials that are over-privileged. After upgrading the
-   portal, `helm upgrade` the chart on every cluster too: new features may need
-   new rules (the traffic graph, for instance, reads Services, Ingresses and
-   Gateway API routes).
-2. Portal: bootstrap database roles with `deploy/sql/roles.sql`
-   ([docs/database.md](docs/database.md)), create the secrets listed at the top
-   of `deploy/portal/portal.yaml`, and apply it. Set
-   `TIPHYS_BOOTSTRAP_ADMINS` to your Keycloak username (comma-separated for
-   several); listed users are made admin at every login.
-3. Keycloak: a confidential client with the redirect URI
+Every push to `main` and every `v*` tag publishes the portal's container image
+on Docker Hub as [`behradrvb/tiphys`](https://hub.docker.com/r/behradrvb/tiphys)
+(`main` and `sha-<commit>` follow the branch, `X.Y.Z` / `X.Y` / `latest` are
+releases), and each release publishes both Helm charts next to it:
+`oci://registry-1.docker.io/behradrvb/tiphys-portal` (the portal, once) and
+`oci://registry-1.docker.io/behradrvb/tiphys-connector` (every cluster users
+reach). Pin a release in production; `main` moves with every commit.
+
+The portal runs in one cluster, usually the one with Argo CD, and needs
+PostgreSQL 14+, a Keycloak realm, MinIO (or any S3 with Object Lock) for the
+recordings and, optionally, Loki and Argo CD. The steps below use the
+namespace `tiphys-portal`. If you prefer plain manifests to Helm,
+`deploy/portal/portal.yaml` holds the same objects.
+
+### 1. Database: CloudNativePG
+
+We recommend [CloudNativePG](https://cloudnative-pg.io) (CNPG): replicas,
+failover and backups with one manifest. The portal uses three roles
+([docs/database.md](docs/database.md)): the owner runs the migrations, the app
+role can add audit events but never change or delete them, and only the
+retention role deletes old ones. [deploy/cnpg/cluster.yaml](deploy/cnpg/cluster.yaml) creates
+the database and all three; you create their passwords and the Secret the
+portal reads its DSNs from:
+
+```sh
+ns=tiphys-portal
+kubectl create namespace $ns
+for role in owner app retention; do
+  pw=$(openssl rand -hex 24)                 # hex: safe inside a URL
+  kubectl -n $ns create secret generic tiphys-db-$role --type=kubernetes.io/basic-auth \
+    --from-literal=username=tiphys_$role --from-literal=password=$pw
+  kubectl -n $ns label secret tiphys-db-$role cnpg.io/reload=true
+  declare "${role}_url=postgres://tiphys_$role:$pw@tiphys-postgres-rw.$ns.svc:5432/tiphys?sslmode=require"
+done
+kubectl -n $ns create secret generic tiphys-portal-database \
+  --from-literal=app-url="$app_url" --from-literal=retention-url="$retention_url" \
+  --from-literal=migrate-url="$owner_url"
+kubectl -n $ns apply -f deploy/cnpg/cluster.yaml   # after installing the CNPG operator
+```
+
+With `migrate-url` set, the portal applies the migrations itself at startup.
+Any other PostgreSQL works as well: bootstrap the roles with
+`deploy/sql/roles.sql` and put the same three DSNs into
+`tiphys-portal-database`.
+
+### 2. Portal
+
+Create the Secret with the portal's other secrets (each key is mounted as a
+file; leave out the ones you do not use and set them to `""` under
+`secrets.files` in the values):
+
+```sh
+kubectl -n tiphys-portal create secret generic tiphys-portal-secrets \
+  --from-literal=oidc-client-secret=<Keycloak client secret> \
+  --from-literal=session-keys=$(openssl rand -hex 32) \
+  --from-literal=argo-token=<Argo CD token> \
+  --from-literal=minio-access-key=<key> --from-literal=minio-secret-key=<secret>
+```
+
+Then install the chart with your settings. `env` takes the variables
+documented in [.env.example](.env.example); set `TIPHYS_BOOTSTRAP_ADMINS` to
+your Keycloak username so you are admin at your first login:
+
+```yaml
+# values.yaml
+env:
+  PUBLIC_URL: https://tiphys.example.com
+  OIDC_ISSUER_URL: https://keycloak.example.com/realms/main
+  TIPHYS_BOOTSTRAP_ADMINS: your.username
+  ARGO_URL: https://argocd.example.com
+  MINIO_ENDPOINT: minio.example.com:9000
+  KUBE_EXTRA_DOMAIN: tiphys.example.com    # same as the connector's extraDomain
+ingress:
+  enabled: true
+  className: nginx
+  tlsSecretName: tiphys-tls
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+```
+
+```sh
+helm install tiphys oci://registry-1.docker.io/behradrvb/tiphys-portal \
+  --version <X.Y.Z> -n tiphys-portal -f values.yaml
+```
+
+All values are listed in
+[deploy/chart/tiphys-portal/README.md](deploy/chart/tiphys-portal/README.md).
+
+### 3. Clusters
+
+On each cluster users should reach, install the connector chart (normally
+through an Argo CD ApplicationSet; see [deploy/chart/README.md](deploy/chart/README.md)):
+
+```sh
+helm install tiphys-connector oci://registry-1.docker.io/behradrvb/tiphys-connector \
+  --version <X.Y.Z> -n tiphys-connector --create-namespace \
+  --set extraDomain=tiphys.example.com
+```
+
+Create a kubeconfig from its `tiphys-connector` token and register it with a
+Secret annotated `tiphys/cluster: <cluster name>` in the portal's namespace
+(see [Registering a cluster](#registering-a-cluster)). The portal refuses
+credentials that are over-privileged. The chart's `protectedNamespaces` lists
+`tiphys` as the portal's namespace; on the portal's own cluster, add the
+namespace you installed it in (`tiphys-portal` above). After upgrading the portal, upgrade the
+chart on every cluster to the same version: new features may need new rules
+(the traffic graph, for instance, reads Services, Ingresses and Gateway API
+routes).
+
+### Keycloak, Argo CD and the Ingress
+
+1. Keycloak: a confidential client with the redirect URI
    `https://<portal>/auth/callback` and post-logout URI `https://<portal>/*`.
    To make a Keycloak group admin, add a *Group Membership* mapper to the
    client (claim name `groups`, add to ID token, full path off) and set
    `TIPHYS_ADMIN_GROUPS=<group>[,<group>]`.
-4. Argo CD: give the account behind `ARGO_TOKEN_FILE` read access and sync,
+2. Argo CD: give the account behind `ARGO_TOKEN_FILE` read access and sync,
    in `argocd-rbac-cm` (narrow `*/*` to projects if you like; the portal still
    decides who may sync what):
 
@@ -199,7 +299,7 @@ stringData:
 
    Then grant the `sync` action (shown as "ArgoCD Sync") to the teams that may
    sync; nobody has it by default.
-5. Ingress: allow WebSocket upgrades and long idle timeouts on
+3. Ingress: allow WebSocket upgrades and long idle timeouts on
    `/api/v1/**/exec`, `/api/v1/**/debug` and `/logs/stream`.
 
 ## Development

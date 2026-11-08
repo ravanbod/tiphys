@@ -36,7 +36,9 @@ internal/config internal/monitoring internal/requestid
 internal/integration             whole-portal tests with fake cluster/Argo/MinIO
 web/                             React + TypeScript frontend (Vite)
 deploy/chart/tiphys-connector    per-cluster Helm chart (RBAC + admission policies)
+deploy/chart/tiphys-portal       the portal's Helm chart (same objects as deploy/portal)
 deploy/portal                    portal manifests; deploy/sql roles + test DB helper
+deploy/cnpg                      example CloudNativePG cluster with the three DB roles
 docs/                            api.md, database.md, kubeaccess.md, frontend.md
 ```
 
@@ -359,7 +361,9 @@ GitHub: `.github/workflows/ci.yml` runs the backend (build, vet, race tests
 with a PostgreSQL service), frontend (typecheck, lint, tests, build) and the
 image, which it pushes to Docker Hub on `main` and `v*` tags once both passed
 (variable `DOCKERHUB_USERNAME`, secret `DOCKERHUB_TOKEN`, optional
-`DOCKERHUB_IMAGE`; without the token it only builds). The Dockerfile pulls base
+`DOCKERHUB_IMAGE`; without the token it only builds), and lints both charts,
+pushing them as OCI charts with the tag's version on `v*` tags. Keep
+`deploy/portal/portal.yaml` and the portal chart in step. The Dockerfile pulls base
 images from Docker Hub unless `BASE_REGISTRY` (and `GOPROXY`, `GOSUMDB`,
 `NPM_REGISTRY`) point at mirrors.
 

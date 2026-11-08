@@ -1,0 +1,9 @@
+apiVersion: v2
+name: tiphys-portal
+description: The Tiphys access portal (one per installation, next to Argo CD); the per-cluster part is tiphys-connector.
+type: application
+# Released charts take the version of the git tag (vX.Y.Z) for both fields, so
+# the default image tag is the image built from that tag.
+version: 0.1.0
+appVersion: "main"
+kubeVersion: ">=1.25.0-0"

@@ -4,6 +4,7 @@
 #                          minio-access-key, minio-secret-key, loki-password (optional)
 #   tiphys-portal-database: app-url, retention-url (DSNs for the two roles)
 # Replace the example values (host names, image, PUBLIC_URL) for your environment.
+# The Helm chart deploy/chart/tiphys-portal renders the same objects.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -95,7 +96,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: portal
-          image: registry.example.com/tiphys/portal:v1 # your build of this repository
+          image: behradrvb/tiphys:main # pin a release (X.Y.Z) in production, or your own build
           ports:
             - {name: http, containerPort: 8080}
             - {name: metrics, containerPort: 9090}

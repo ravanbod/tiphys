@@ -1,0 +1,24 @@
+{{- $fixed := list "PORT" "METRICS_PORT" "CREDENTIAL_STORE" "CREDENTIAL_NAMESPACE" -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tiphys-portal.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tiphys-portal.labels" . | nindent 4 }}
+data:
+  PUBLIC_URL: {{ include "tiphys-portal.publicUrl" . | quote }}
+  PORT: "8080"
+  METRICS_PORT: "9090"
+  CREDENTIAL_STORE: secrets
+  CREDENTIAL_NAMESPACE: {{ .Release.Namespace | quote }}
+  {{- range $k, $v := .Values.env }}
+  {{- if and (not (has $k $fixed)) (ne $k "PUBLIC_URL") (ne (toString $v) "") }}
+  {{ $k }}: {{ toString $v | quote }}
+  {{- end }}
+  {{- end }}
+  {{- range $k, $key := .Values.secrets.files }}
+  {{- if $key }}
+  {{ $k }}: {{ printf "/secrets/portal/%s" $key | quote }}
+  {{- end }}
+  {{- end }}

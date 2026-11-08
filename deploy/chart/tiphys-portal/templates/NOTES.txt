@@ -1,0 +1,5 @@
+Tiphys portal: {{ include "tiphys-portal.publicUrl" . }}
+
+Register a cluster: install the tiphys-connector chart there, then create a
+Secret in {{ .Release.Namespace }} with its kubeconfig in the `kubeconfig` key,
+annotated `tiphys/cluster: <cluster name>` (see deploy/chart/README.md).

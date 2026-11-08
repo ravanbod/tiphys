@@ -1,0 +1,33 @@
+{{- if .Values.ingress.enabled }}
+{{- $host := .Values.ingress.host | default (urlParse (include "tiphys-portal.publicUrl" .)).hostname }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "tiphys-portal.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tiphys-portal.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecretName }}
+  tls:
+    - hosts: [{{ $host | quote }}]
+      secretName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "tiphys-portal.name" . }}
+                port: {name: http}
+{{- end }}

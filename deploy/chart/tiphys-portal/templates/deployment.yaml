@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tiphys-portal.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tiphys-portal.labels" . | nindent 4 }}
+spec:
+  # One replica: live streams and in-memory state are per pod (see CLAUDE.md,
+  # Known open items). The new pod starts before the old one stops; during the
+  # overlap open streams end and exec sessions on the old pod are marked ended.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "tiphys-portal.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tiphys-portal.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      terminationGracePeriodSeconds: 60 # exec recordings are finalized on shutdown
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: portal
+          image: {{ include "tiphys-portal.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: metrics, containerPort: 9090}
+          envFrom:
+            - configMapRef: {name: {{ include "tiphys-portal.name" . }}}
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: {{ .Values.database.existingSecret }}, key: {{ required "database.appUrlKey is required" .Values.database.appUrlKey }}}}
+            {{- with .Values.database.retentionUrlKey }}
+            - name: DATABASE_RETENTION_URL
+              valueFrom: {secretKeyRef: {name: {{ $.Values.database.existingSecret }}, key: {{ . }}, optional: true}}
+            {{- end }}
+            {{- with .Values.database.migrateUrlKey }}
+            - name: DATABASE_MIGRATE_URL
+              valueFrom: {secretKeyRef: {name: {{ $.Values.database.existingSecret }}, key: {{ . }}, optional: true}}
+            {{- end }}
+          volumeMounts:
+            - {name: secrets, mountPath: /secrets/portal, readOnly: true}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+      volumes:
+        - name: secrets
+          secret: {secretName: {{ .Values.secrets.existingSecret }}}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

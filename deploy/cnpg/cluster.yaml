@@ -1,0 +1,39 @@
+# Example PostgreSQL for the portal with CloudNativePG (https://cloudnative-pg.io).
+# Install the operator first, then create the three role Secrets and the
+# portal's DSN Secret (see "Database" in the README), then apply this file in
+# the portal's namespace.
+#
+# It sets up what deploy/sql/roles.sql does by hand (docs/database.md):
+# - initdb creates the database `tiphys` owned by `tiphys_owner`, the role that
+#   runs the migrations (the portal's DATABASE_MIGRATE_URL);
+# - `tiphys_app` (DATABASE_URL) and `tiphys_retention` (DATABASE_RETENTION_URL)
+#   are managed roles that own nothing and cannot create anything (PostgreSQL
+#   16 gives PUBLIC no CREATE on the public schema); the portal's migrations
+#   grant them their table privileges.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: tiphys-postgres
+spec:
+  instances: 3 # one primary and two replicas; 1 is enough for a test setup
+  imageName: ghcr.io/cloudnative-pg/postgresql:16
+  storage:
+    size: 10Gi
+  bootstrap:
+    initdb:
+      database: tiphys
+      owner: tiphys_owner
+      secret:
+        name: tiphys-db-owner
+  managed:
+    roles:
+      - name: tiphys_app
+        ensure: present
+        login: true
+        passwordSecret:
+          name: tiphys-db-app
+      - name: tiphys_retention
+        ensure: present
+        login: true
+        passwordSecret:
+          name: tiphys-db-retention

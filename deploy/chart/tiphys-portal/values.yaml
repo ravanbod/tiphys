@@ -1,0 +1,94 @@
+image:
+  repository: behradrvb/tiphys
+  # Default: the chart's appVersion (a released chart's version).
+  tag: ""
+  # repo@sha256:... pins the image; wins over tag.
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Plain settings, passed to the portal as environment variables; every name
+# is documented in .env.example. Empty values are left out (the portal's
+# default applies). Never put secrets here: see secrets and database.
+# The chart sets PORT, METRICS_PORT, CREDENTIAL_STORE=secrets and
+# CREDENTIAL_NAMESPACE (the release namespace) itself.
+env:
+  GIN_MODE: release
+  LOG_LEVEL: info
+  # Required: the portal's external URL (also the Ingress host by default).
+  PUBLIC_URL: ""
+  OIDC_ISSUER_URL: ""
+  OIDC_CLIENT_ID: tiphys
+  # Keycloak usernames made admin at every login (comma-separated).
+  TIPHYS_BOOTSTRAP_ADMINS: ""
+  TIPHYS_ADMIN_GROUPS: ""
+  ARGO_URL: ""
+  MINIO_ENDPOINT: ""
+  MINIO_BUCKET: tiphys-recordings
+  LOKI_URL: ""
+  # Must equal the connector chart's extraDomain on every cluster.
+  KUBE_EXTRA_DOMAIN: portal.example.com
+
+# An existing Secret with the portal's secret files, mounted read-only at
+# /secrets/portal. `files` maps each *_FILE setting to its key in that Secret;
+# set a key to "" when you do not use the setting (e.g. no Loki).
+secrets:
+  existingSecret: tiphys-portal-secrets
+  files:
+    OIDC_CLIENT_SECRET_FILE: oidc-client-secret
+    SESSION_ENCRYPTION_KEYS_FILE: session-keys
+    ARGO_TOKEN_FILE: argo-token
+    MINIO_ACCESS_KEY_FILE: minio-access-key
+    MINIO_SECRET_KEY_FILE: minio-secret-key
+    LOKI_PASSWORD_FILE: ""
+    LOKI_TOKEN_FILE: ""
+    ARGO_CA_FILE: ""
+
+# An existing Secret with the PostgreSQL DSNs (docs/database.md). Without the
+# retention key, audit retention deletes are off; with the migrate key (the
+# owner role), the portal applies migrations at startup.
+database:
+  existingSecret: tiphys-portal-database
+  appUrlKey: app-url
+  retentionUrlKey: retention-url
+  migrateUrlKey: migrate-url
+
+serviceAccount:
+  # The portal reads cluster Secrets (annotated tiphys/cluster) in the release
+  # namespace through it; the Role allows get/list/watch on Secrets there only.
+  name: tiphys-portal
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 80
+  metricsPort: 9090
+
+ingress:
+  enabled: false
+  className: ""
+  # Default: the host of env.PUBLIC_URL.
+  host: ""
+  # TLS Secret for the host; "" for none (e.g. TLS ends before the Ingress).
+  tlsSecretName: ""
+  # Shells, debug sessions and log streams are long-lived WebSockets; raise the
+  # proxy timeouts, e.g. for ingress-nginx:
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  annotations: {}
+
+# Prometheus Operator ServiceMonitor for the metrics port.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
+
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 512Mi}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
