@@ -10,6 +10,7 @@ import { useAuth } from '../../context/auth';
 import { useToast } from '../../context/toast';
 import { useApi } from '../../hooks/useApi';
 import { adminErrorText, adminFieldErrors } from '../../lib/adminErrorText';
+import { ApiTokensCard } from './ApiTokens';
 import { ProtectedNamespacesCard, SyncKindsCard } from './SettingsLists';
 import { useAdminMutation } from '../../lib/useAdminMutation';
 
@@ -262,6 +263,9 @@ export function Settings() {
             testing={testing}
             testDisabledReason={rocketDirty ? 'Save the webhook changes first. The test uses the saved settings.' : ''}
           />
+
+          {/* Applies at once too. */}
+          <ApiTokensCard isAdmin={isAdmin} />
 
           <div className="card">
             <div className="hd">Loki retention</div>

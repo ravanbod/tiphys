@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { api } from '../api';
 import type { ArgoAppStatus, ArgoDeploy, NamespaceApp } from '../api';
 import { useAuth } from '../context/auth';
@@ -14,8 +15,12 @@ import { ErrorBanner, Skeleton } from './Feedback';
 import { Icon } from './Icon';
 import { RollbackAppDialog } from './OperationDialogs';
 import { breakGlassOn } from '../lib/breakGlass';
+import { workloadUrl } from '../lib/routes';
 
 type Tab = 'status' | 'history' | 'diff';
+
+/** Kinds with a workload page here. */
+const WORKLOAD_KINDS = new Set(['Deployment', 'StatefulSet', 'DaemonSet', 'Rollout', 'CronJob']);
 
 const short = (rev: string) => (/^[0-9a-f]{40}$/.test(rev) ? rev.slice(0, 7) : rev);
 
@@ -93,7 +98,7 @@ export function ArgoAppPanel({ app, cluster, ns, argoLink, onClose, onChanged }:
             </span>
           </div>
         )}
-        {tab === 'status' && (status.error ? <ErrorBanner error={status.error} onRetry={status.reload} /> : !status.data ? <Skeleton rows={4} /> : <StatusTab s={status.data} now={now} />)}
+        {tab === 'status' && (status.error ? <ErrorBanner error={status.error} onRetry={status.reload} /> : !status.data ? <Skeleton rows={4} /> : <StatusTab s={status.data} now={now} cluster={cluster} />)}
         {tab === 'history' && (history.error ? <ErrorBanner error={history.error} onRetry={history.reload} /> : !history.data ? <Skeleton rows={4} /> : (
           <div className="tbl-wrap">
             <table className="tbl">
@@ -147,7 +152,7 @@ export function ArgoAppPanel({ app, cluster, ns, argoLink, onClose, onChanged }:
   );
 }
 
-function StatusTab({ s, now }: { s: ArgoAppStatus; now: number }) {
+function StatusTab({ s, now, cluster }: { s: ArgoAppStatus; now: number; cluster: string }) {
   const op = s.lastOperation;
   return (
     <div className="col" style={{ gap: 12, paddingTop: 10 }}>
@@ -160,6 +165,30 @@ function StatusTab({ s, now }: { s: ArgoAppStatus; now: number }) {
           <Icon name="warn" /><span><b>{c.type}</b> {c.message}</span>
         </div>
       ))}
+      {s.unhealthy.length > 0 && (
+        <div>
+          <b>Not healthy</b>
+          <div className="tbl-wrap" style={{ marginTop: 6 }}>
+            <table className="tbl">
+              <thead><tr><th>Kind</th><th>Name</th><th>Health</th><th>Reason</th></tr></thead>
+              <tbody>
+                {s.unhealthy.map((r) => (
+                  <tr key={`${r.group}/${r.kind}/${r.namespace}/${r.name}`}>
+                    <td><span className="tag">{r.kind}</span></td>
+                    <td className="mono">
+                      {r.namespace && WORKLOAD_KINDS.has(r.kind)
+                        ? <Link to={workloadUrl({ cluster, namespace: r.namespace, kind: r.kind, name: r.name })} title="Pods and events">{r.namespace}/{r.name}</Link>
+                        : <>{r.namespace ? `${r.namespace}/` : ''}{r.name}</>}
+                    </td>
+                    <td><HealthChip health={r.health} /></td>
+                    <td style={{ overflowWrap: 'anywhere' }}>{r.message || <span className="muted">No reason given; see the workload's pods and events.</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
       <div>
         <b>Last operation</b>
         {!op ? <div className="muted">None yet.</div> : (

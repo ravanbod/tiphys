@@ -2,6 +2,7 @@ package serverhttp
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"io"
 	"net/http"
 	"sort"
@@ -907,6 +908,77 @@ func (h *Handler) AdminUpdateSettings(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, toSettings(s, true))
+}
+
+// AdminPatchSettings changes only the settings sent; unknown fields are
+// refused, so a typo is not silently ignored.
+func (h *Handler) AdminPatchSettings(c *gin.Context) {
+	var in settingsPatchDTO
+	dec := json.NewDecoder(c.Request.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&in); err != nil {
+		h.writeError(c, application.Invalid("body", "invalid JSON body: "+err.Error()))
+		return
+	}
+	s, err := h.svc.Admin.PatchSettings(c.Request.Context(), principal(c), in.toPatch())
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toSettings(s, true))
+}
+
+func (h *Handler) AdminAPITokens(c *gin.Context) {
+	ts, err := h.svc.Admin.APITokens(c.Request.Context(), principal(c))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	now := time.Now()
+	out := make([]apiTokenDTO, len(ts))
+	for i, t := range ts {
+		out[i] = toAPIToken(t, now)
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) AdminCreateAPIToken(c *gin.Context) {
+	var in createAPITokenDTO
+	if !bindJSON(h, c, &in) {
+		return
+	}
+	t := domain.APIToken{Name: in.Name, Description: in.Description}
+	for _, p := range in.Permissions {
+		t.Permissions = append(t.Permissions, domain.Permission(p))
+	}
+	if in.ExpiresAt != nil {
+		at, err := time.Parse(time.RFC3339, *in.ExpiresAt)
+		if err != nil {
+			h.writeError(c, application.Invalid("expiresAt", "expiresAt must be an RFC 3339 time"))
+			return
+		}
+		t.ExpiresAt = &at
+	}
+	t, value, err := h.svc.Admin.CreateAPIToken(c.Request.Context(), principal(c), t)
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	out := toAPIToken(t, time.Now())
+	out.Token = value
+	c.JSON(http.StatusCreated, out)
+}
+
+func (h *Handler) AdminRevokeAPIToken(c *gin.Context) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return
+	}
+	if err := h.svc.Admin.RevokeAPIToken(c.Request.Context(), principal(c), id); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *Handler) AdminRocketTest(c *gin.Context) {

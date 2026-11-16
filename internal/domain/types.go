@@ -686,6 +686,7 @@ const (
 	EventExecTerminate    = "exec.terminate"
 	EventExecReplay       = "exec.replay"
 	EventRestart          = "restart"
+	EventPodDelete        = "pod.delete"
 	EventRunJob           = "run-job"
 	EventArgoSync         = "argo.sync"
 	EventArgoDiff         = "argo.diff"

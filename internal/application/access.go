@@ -158,14 +158,30 @@ func (s *AccessService) HiddenCluster(p Principal, cluster string) bool {
 	return p.User.Role != domain.RoleAdmin && s.policy.Current().Clusters[cluster].Protected
 }
 
-// RequireRole fails with ErrForbiddenRole unless the principal has one of the roles.
+// RequireRole fails with ErrForbiddenRole unless the principal is a user
+// (never an API token) with one of the roles.
 func RequireRole(p Principal, roles ...domain.Role) error {
+	if p.Token != nil {
+		return ErrForbiddenRole
+	}
 	for _, r := range roles {
 		if p.User.Role == r && !p.User.Disabled {
 			return nil
 		}
 	}
 	return ErrForbiddenRole
+}
+
+// RequirePermission allows an API token that carries perm, or a session user
+// with one of the roles.
+func RequirePermission(p Principal, perm domain.Permission, roles ...domain.Role) error {
+	if p.Token != nil {
+		if p.Token.Has(perm) {
+			return nil
+		}
+		return &PermissionError{Permission: perm}
+	}
+	return RequireRole(p, roles...)
 }
 
 func fillTarget(e *domain.AuditEvent, t domain.Target) {

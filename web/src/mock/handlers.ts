@@ -1,5 +1,5 @@
 import type {
-  AccessRequest, Action, AppSummary, AuditEvent, BreakGlass, BreakGlassRequest, CronJobSummary, DecisionExplain, ExecSessionView,
+  AccessRequest, Action, ApiPermission, ApiTokenView, AppSummary, AuditEvent, BreakGlass, BreakGlassRequest, CronJobSummary, DecisionExplain, ExecSessionView,
   GrantInput, GrantView, JobSummary, K8sEvent, Me, NamespaceApp, NamespaceSummary, Pod, Role, ScopeView, SettingsView,
   ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, DecisionInfo, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
 } from '../api/types';
@@ -320,6 +320,10 @@ on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/status', (c): ArgoAppSta
   return {
     health: a.health, healthMessage: failed ? 'Deployment "payments-worker" exceeded its progress deadline' : '',
     syncStatus: a.sync, syncRevision: REVS[0],
+    unhealthy: failed ? [
+      { group: 'apps', kind: 'Deployment', namespace: a.namespace, name: a.name, health: 'Degraded', message: `Deployment "${a.name}" exceeded its progress deadline` },
+      { group: 'networking.k8s.io', kind: 'Ingress', namespace: a.namespace, name: a.name, health: 'Progressing', message: '' },
+    ] : [],
     conditions: failed ? [{ type: 'SyncError', message: 'one or more objects failed to apply, reason: Deployment.apps "payments-worker" is invalid: spec.selector: field is immutable', at: iso(Date.now() - 26 * 3600_000) }] : [],
     lastOperation: {
       phase: failed ? 'Failed' : 'Succeeded', message: failed ? 'one or more objects failed to apply' : 'successfully synced (all tasks run)',
@@ -420,6 +424,8 @@ on('GET', '/clusters/:c/namespaces/:ns/access', (c) => {
       },
     }));
 });
+// staging-1 plays a cluster whose connector chart predates tiphys-pod-delete-only.
+const podDeleteReady = (cluster: string) => cluster !== 'staging-1';
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name', (c) => {
   clusterGuard(c.params.c);
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
@@ -431,6 +437,7 @@ on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name', (c) => {
     ...s, argoApp: app?.name ?? null, strategy: wl.strategy ?? 'RollingUpdate', updated: wl.ready, available: wl.ready,
     images: wl.images ?? [], createdAt: iso(Date.now() - 40 * DAY), lastRolloutAt: iso(Date.now() - 3 * DAY),
     cronJobCount: ns.workloads.filter((w) => w.kind === 'CronJob').length,
+    podDelete: wl.kind !== 'CronJob' && podDeleteReady(ns.cluster),
   };
   return detail;
 });
@@ -489,6 +496,15 @@ on('POST', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/restart', (c) => {
   const id = opId();
   getDb().ops[id] = { id, kind: 'restart', cluster: ns.cluster, namespace: ns.namespace, name: wl.name, owner: c.user.id, willFail: wl.name === 'notifications-api' };
   return { __status: 202, data: { operationId: id } };
+});
+on('DELETE', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods/:pod', (c) => {
+  clusterGuard(c.params.c);
+  const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
+  if (wl.kind === 'CronJob') throw new MockError(422, 'invalid', 'This kind has no pods to delete.');
+  requireAction(c.user, ns, wl, 'restart');
+  if (!podDeleteReady(ns.cluster)) throw new MockError(409, 'pod_delete_unavailable', 'Deleting pods is not set up on this cluster.');
+  if (!podsFor(ns, wl).some((p) => p.name === c.params.pod)) throw new MockError(403, 'pod_not_in_workload', 'The pod does not belong to this workload.');
+  return { __status: 204, data: undefined };
 });
 on('POST', '/clusters/:c/namespaces/:ns/cronjobs/:name/run', (c) => {
   clusterGuard(c.params.c);
@@ -1230,6 +1246,32 @@ R('/admin/settings', (c) => {
 }, 'PUT');
 R('/admin/settings/rocket/test', () => {
   if (!getDb().settings.rocket.webhookUrl) throw new MockError(502, 'cluster_error', 'The webhook URL is empty.');
+  return undefined;
+}, 'POST');
+R('/admin/api-tokens', () => getDb().apiTokens.map((t) => ({ ...t, status: t.revokedAt ? 'revoked' : t.expiresAt && Date.parse(t.expiresAt) <= Date.now() ? 'expired' : 'active' })));
+R('/admin/api-tokens', (c) => {
+  const b = c.body as { name?: string; description?: string; permissions?: ApiPermission[]; expiresAt?: string | null };
+  const d = getDb();
+  const name = (b.name ?? '').trim();
+  if (!name) throw invalid({ name: 'a name of at most 64 characters is required' });
+  if (!b.permissions?.length) throw invalid({ permissions: 'choose at least one permission' });
+  if (d.apiTokens.some((t) => !t.revokedAt && t.name.toLowerCase() === name.toLowerCase())) throw invalid({ name: 'a token with this name already exists; revoke it first' });
+  const value = `tph_${Array.from(crypto.getRandomValues(new Uint8Array(32)), (x) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[x % 64]).join('')}`;
+  const t: ApiTokenView = {
+    id: nextId('apiToken'), name, description: (b.description ?? '').trim(), prefix: value.slice(0, 12), permissions: b.permissions, createdBy: c.user.username,
+    createdAt: iso(Date.now()), expiresAt: b.expiresAt ?? null, lastUsedAt: null, revokedAt: null, revokedBy: '', status: 'active',
+  };
+  d.apiTokens.unshift(t);
+  logAudit(c.user, 'admin.change', null, 'succeeded', { details: { entity: 'api_token', operation: 'create', id: t.id, after: { name, permissions: t.permissions } } });
+  return { __status: 201, data: { ...t, token: value } };
+}, 'POST');
+R('/admin/api-tokens/:id/revoke', (c) => {
+  const t = getDb().apiTokens.find((x) => x.id === Number(c.params.id));
+  if (!t) throw notFound();
+  if (t.revokedAt) throw new MockError(409, 'conflict', 'conflict: the token is already revoked');
+  t.revokedAt = iso(Date.now());
+  t.revokedBy = c.user.username;
+  logAudit(c.user, 'admin.change', null, 'succeeded', { details: { entity: 'api_token', operation: 'revoke', id: t.id } });
   return undefined;
 }, 'POST');
 R('/admin/overview', () => {

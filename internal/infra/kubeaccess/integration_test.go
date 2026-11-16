@@ -300,6 +300,31 @@ func TestE2ERestart(t *testing.T) {
 	}
 }
 
+// TestE2EDeletePod deletes the StatefulSet's pod, which comes back under the
+// same name with a new UID; a pod of another workload is refused.
+func TestE2EDeletePod(t *testing.T) {
+	e := newE2E(t)
+	ctx := context.Background()
+	w := e.target(domain.KindStatefulSet, "db")
+	other := e.runningPod(t, domain.KindDeployment, "other")
+	wantErr(t, e.a.DeletePod(ctx, e2eActor, w, other.Name), application.ErrPodNotInWorkload)
+
+	old := e.runningPod(t, domain.KindStatefulSet, "db")
+	podUID := func() types.UID {
+		p, err := e.asUser.CoreV1().Pods(e.ns).Get(ctx, old.Name, metav1.GetOptions{})
+		if err != nil {
+			return ""
+		}
+		return p.UID
+	}
+	before := podUID()
+	if err := e.a.DeletePod(ctx, e2eActor, w, old.Name); err != nil {
+		t.Fatalf("the cluster rejected the impersonated delete: %v", err)
+	}
+	eventually2(t, 120*time.Second, "db pod recreated", func() bool { u := podUID(); return u != "" && u != before })
+	e.runningPod(t, domain.KindStatefulSet, "db")
+}
+
 func TestE2EWatchNamespaceSeesARollout(t *testing.T) {
 	e := newE2E(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -437,6 +462,27 @@ func TestE2EAdmissionRejectsJobWithoutCronJobOwner(t *testing.T) {
 	j.OwnerReferences[0].UID = "11111111-2222-3333-4444-555555555555"
 	_, err = e.asUser.BatchV1().Jobs(e.ns).Create(context.Background(), j, metav1.CreateOptions{})
 	mustBeAdmissionDenied(t, err, "tiphys-jobs-from-cronjobs")
+}
+
+func TestE2EAdmissionDeletesOnlyControlledPods(t *testing.T) {
+	e := newE2E(t)
+	e.needAdmin(t)
+	if wantAdmissionMode() == domain.AdmissionNone {
+		t.Skip("no admission policies installed")
+	}
+	ctx := context.Background()
+	loose := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "loose", Namespace: e.ns},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox:1.36", Command: []string{"sleep", "100000"}}}},
+	}
+	if _, err := e.admin.CoreV1().Pods(e.ns).Create(ctx, loose, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = e.admin.CoreV1().Pods(e.ns).Delete(context.Background(), "loose", metav1.DeleteOptions{GracePeriodSeconds: ptr.To(int64(0))})
+	})
+	err := e.asUser.CoreV1().Pods(e.ns).Delete(ctx, "loose", metav1.DeleteOptions{})
+	mustBeAdmissionDenied(t, err, "tiphys-pod-delete-only")
 }
 
 func TestE2ESecretsAndPodCreationForbidden(t *testing.T) {

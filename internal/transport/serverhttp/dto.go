@@ -267,6 +267,7 @@ type workloadDetailDTO struct {
 	CreatedAt     string   `json:"createdAt"`
 	LastRolloutAt *string  `json:"lastRolloutAt"`
 	CronJobCount  int      `json:"cronJobCount"`
+	PodDelete     bool     `json:"podDelete"`
 }
 
 func toWorkloadDetail(v application.WorkloadDetailView) workloadDetailDTO {
@@ -276,7 +277,7 @@ func toWorkloadDetail(v application.WorkloadDetailView) workloadDetailDTO {
 	}
 	return workloadDetailDTO{workloadDTO: toWorkload(v.WorkloadView), ArgoApp: strPtr(v.ArgoApp), Strategy: v.Info.Strategy,
 		Updated: v.Info.Updated, Available: v.Info.Available, Images: images, CreatedAt: tstr(v.Info.CreatedAt),
-		LastRolloutAt: timeStr(v.Info.LastRolloutAt), CronJobCount: v.CronJobCount}
+		LastRolloutAt: timeStr(v.Info.LastRolloutAt), CronJobCount: v.CronJobCount, PodDelete: v.PodDelete}
 }
 
 type containerDTO struct {
@@ -855,19 +856,30 @@ type argoOperationDTO struct {
 }
 
 type argoAppStatusDTO struct {
-	Health        string             `json:"health"`
-	HealthMessage string             `json:"healthMessage"`
-	SyncStatus    string             `json:"syncStatus"`
-	SyncRevision  string             `json:"syncRevision"`
-	Conditions    []argoConditionDTO `json:"conditions"`
-	LastOperation *argoOperationDTO  `json:"lastOperation"`
+	Health        string                  `json:"health"`
+	HealthMessage string                  `json:"healthMessage"`
+	SyncStatus    string                  `json:"syncStatus"`
+	SyncRevision  string                  `json:"syncRevision"`
+	Conditions    []argoConditionDTO      `json:"conditions"`
+	LastOperation *argoOperationDTO       `json:"lastOperation"`
+	Unhealthy     []argoResourceHealthDTO `json:"unhealthy"`
+}
+
+type argoResourceHealthDTO struct {
+	argoResourceRefDTO
+	Health  string `json:"health"`
+	Message string `json:"message"`
 }
 
 func toArgoAppStatus(d application.ArgoAppDetails) argoAppStatusDTO {
 	out := argoAppStatusDTO{Health: d.Health, HealthMessage: d.HealthMessage, SyncStatus: d.SyncStatus, SyncRevision: d.SyncRevision,
-		Conditions: make([]argoConditionDTO, len(d.Conditions))}
+		Conditions: make([]argoConditionDTO, len(d.Conditions)), Unhealthy: make([]argoResourceHealthDTO, len(d.Unhealthy))}
 	for i, c := range d.Conditions {
 		out.Conditions[i] = argoConditionDTO{Type: c.Type, Message: c.Message, At: timeStr(c.At)}
+	}
+	for i, r := range d.Unhealthy {
+		out.Unhealthy[i] = argoResourceHealthDTO{argoResourceRefDTO: argoResourceRefDTO{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name},
+			Health: r.Health, Message: r.Message}
 	}
 	if op := d.LastOperation; op != nil {
 		o := &argoOperationDTO{Phase: op.Phase, Message: op.Message, StartedAt: tstr(op.StartedAt), FinishedAt: timeStr(op.FinishedAt),
@@ -972,4 +984,83 @@ func toArgoDiff(d application.ArgoDiff) argoDiffDTO {
 			Diff: r.Diff, Hidden: r.Hidden, Truncated: r.Truncated}
 	}
 	return out
+}
+
+// settingsPatchDTO is PATCH /admin/settings: only the fields sent change.
+type settingsPatchDTO struct {
+	BreakGlassMode                 *domain.BreakGlassMode `json:"breakGlassMode"`
+	BreakGlassDefaultMinutes       *int                   `json:"breakGlassDefaultMinutes"`
+	BreakGlassMaxMinutes           *int                   `json:"breakGlassMaxMinutes"`
+	BreakGlassRequestMaxAgeMinutes *int                   `json:"breakGlassRequestMaxAgeMinutes"`
+	ExecMaxSessionMinutes          *int                   `json:"execMaxSessionMinutes"`
+	ExecIdleTimeoutMinutes         *int                   `json:"execIdleTimeoutMinutes"`
+	RetentionAuditDays             *int                   `json:"retentionAuditDays"`
+	RetentionRecordingsDays        *int                   `json:"retentionRecordingsDays"`
+	Rocket                         *struct {
+		WebhookURL *string         `json:"webhookUrl"`
+		Channel    *string         `json:"channel"`
+		Events     map[string]bool `json:"events"`
+	} `json:"rocket"`
+}
+
+func (d settingsPatchDTO) toPatch() application.SettingsPatch {
+	pt := application.SettingsPatch{
+		BreakGlassMode: d.BreakGlassMode, BreakGlassDefaultMin: d.BreakGlassDefaultMinutes, BreakGlassMaxMinutes: d.BreakGlassMaxMinutes,
+		BreakGlassRequestMaxAgeMin: d.BreakGlassRequestMaxAgeMinutes,
+		ExecMaxSessionMinutes:      d.ExecMaxSessionMinutes, ExecIdleTimeoutMinutes: d.ExecIdleTimeoutMinutes,
+		RetentionAuditDays: d.RetentionAuditDays, RetentionRecordingsDays: d.RetentionRecordingsDays,
+	}
+	if r := d.Rocket; r != nil {
+		pt.RocketWebhookURL, pt.RocketChannel = r.WebhookURL, r.Channel
+		if r.Events != nil {
+			pt.RocketEvents = map[domain.NotificationEvent]bool{}
+			for k, v := range r.Events {
+				pt.RocketEvents[domain.NotificationEvent(k)] = v
+			}
+		}
+	}
+	return pt
+}
+
+type apiTokenDTO struct {
+	ID          int64    `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Prefix      string   `json:"prefix"`
+	Permissions []string `json:"permissions"`
+	CreatedBy   string   `json:"createdBy"`
+	CreatedAt   string   `json:"createdAt"`
+	ExpiresAt   *string  `json:"expiresAt"`
+	LastUsedAt  *string  `json:"lastUsedAt"`
+	RevokedAt   *string  `json:"revokedAt"`
+	RevokedBy   string   `json:"revokedBy"`
+	// Status is active, expired or revoked.
+	Status string `json:"status"`
+	// Token is the value, only in the response that created it.
+	Token string `json:"token,omitempty"`
+}
+
+func toAPIToken(t domain.APIToken, now time.Time) apiTokenDTO {
+	perms := make([]string, len(t.Permissions))
+	for i, p := range t.Permissions {
+		perms[i] = string(p)
+	}
+	status := "active"
+	switch {
+	case t.RevokedAt != nil:
+		status = "revoked"
+	case !t.Active(now):
+		status = "expired"
+	}
+	return apiTokenDTO{ID: t.ID, Name: t.Name, Description: t.Description, Prefix: t.Prefix, Permissions: perms,
+		CreatedBy: t.CreatedBy, CreatedAt: tstr(t.CreatedAt), ExpiresAt: timeStr(t.ExpiresAt), LastUsedAt: timeStr(t.LastUsedAt),
+		RevokedAt: timeStr(t.RevokedAt), RevokedBy: t.RevokedBy, Status: status}
+}
+
+type createAPITokenDTO struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
+	// ExpiresAt is RFC 3339; null or left out: never.
+	ExpiresAt *string `json:"expiresAt"`
 }

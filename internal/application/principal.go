@@ -5,7 +5,10 @@ import "tiphys/internal/domain"
 // Principal is the authenticated user making a request, together with the
 // request metadata that audit events carry.
 type Principal struct {
-	User      domain.User
+	// User is, for an API token, only the name "token:<name>": no ID, no role.
+	User domain.User
+	// Token is set when the request authenticated with an API token.
+	Token     *domain.APIToken
 	SessionID string
 	CSRFToken string
 	SourceIP  string

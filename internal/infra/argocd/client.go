@@ -278,6 +278,10 @@ type details struct {
 			Kind      string `json:"kind"`
 			Namespace string `json:"namespace"`
 			Name      string `json:"name"`
+			Health    *struct {
+				Status  string `json:"status"`
+				Message string `json:"message"`
+			} `json:"health"`
 		} `json:"resources"`
 		Health struct {
 			Status  string `json:"status"`
@@ -402,7 +406,11 @@ func (c *HTTPClient) GetAppDetails(ctx context.Context, appNamespace, name strin
 		SyncStatus: st.Sync.Status, SyncRevision: st.Sync.Revision,
 		AutoSync: d.Spec.SyncPolicy.automated(), MultiSource: len(d.Spec.Sources) > 0}
 	for _, r := range st.Resources {
-		out.Resources = append(out.Resources, application.ArgoResourceRef{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name})
+		ref := application.ArgoResourceRef{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name}
+		out.Resources = append(out.Resources, ref)
+		if r.Health != nil && r.Health.Status != "" && r.Health.Status != "Healthy" {
+			out.Unhealthy = append(out.Unhealthy, application.ArgoResourceHealth{ArgoResourceRef: ref, Health: r.Health.Status, Message: r.Health.Message})
+		}
 	}
 	for _, cnd := range st.Conditions {
 		out.Conditions = append(out.Conditions, application.ArgoCondition{Type: cnd.Type, Message: cnd.Message, At: cnd.LastTransitionTime})

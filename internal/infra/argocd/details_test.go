@@ -15,6 +15,10 @@ func TestGetAppDetails(t *testing.T) {
 	  "status":{
 	    "health":{"status":"Degraded","message":"Deployment exceeded its progress deadline"},
 	    "sync":{"status":"OutOfSync","revision":"abc123"},
+	    "resources":[
+	      {"group":"apps","kind":"Deployment","namespace":"payments","name":"api","health":{"status":"Degraded","message":"Deployment \"api\" exceeded its progress deadline"}},
+	      {"kind":"Service","namespace":"payments","name":"api","health":{"status":"Healthy"}},
+	      {"kind":"ConfigMap","namespace":"payments","name":"api-config"}],
 	    "conditions":[{"type":"SyncError","message":"one or more objects failed to apply","lastTransitionTime":"2026-10-30T09:01:00Z"}],
 	    "operationState":{"phase":"Failed","message":"one or more objects failed to apply","startedAt":"2026-10-30T09:00:00Z","finishedAt":"2026-10-30T09:01:00Z",
 	      "operation":{"initiatedBy":{"username":"tiphys"}},
@@ -35,6 +39,10 @@ func TestGetAppDetails(t *testing.T) {
 	if d.Health != "Degraded" || d.HealthMessage == "" || d.SyncStatus != "OutOfSync" || d.SyncRevision != "abc123" ||
 		len(d.Conditions) != 1 || d.Conditions[0].Type != "SyncError" || d.Conditions[0].At == nil {
 		t.Fatalf("details = %+v", d)
+	}
+	if len(d.Resources) != 3 || len(d.Unhealthy) != 1 || d.Unhealthy[0].Kind != "Deployment" || d.Unhealthy[0].Name != "api" ||
+		d.Unhealthy[0].Health != "Degraded" || d.Unhealthy[0].Message != `Deployment "api" exceeded its progress deadline` {
+		t.Fatalf("resources = %+v, unhealthy = %+v", d.Resources, d.Unhealthy)
 	}
 	op := d.LastOperation
 	if op == nil || op.Phase != "Failed" || op.InitiatedBy != "tiphys" || op.Revision != "abc123" || op.FinishedAt == nil ||

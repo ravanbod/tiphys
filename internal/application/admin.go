@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -74,6 +75,9 @@ func (s *AdminService) mutateMany(ctx context.Context, p Principal, cs []*change
 			e.Details = map[string]any{"entity": c.entity, "operation": c.operation, "id": c.id, "before": c.before, "after": c.after}
 			for k, v := range c.extra {
 				e.Details[k] = v
+			}
+			if p.Token != nil {
+				e.Details["tokenId"] = p.Token.ID
 			}
 			ev, err := s.audit.RecordIn(ctx, r, e)
 			if err != nil {
@@ -743,7 +747,7 @@ func grantSummary(g domain.Grant) map[string]any {
 // ---- Time windows and holidays ----
 
 func (s *AdminService) Windows(ctx context.Context, p Principal) ([]domain.TimeWindow, error) {
-	if err := RequireRole(p, domain.RoleAdmin, domain.RoleAuditor); err != nil {
+	if err := RequirePermission(p, domain.PermTimeWindowsRead, domain.RoleAdmin, domain.RoleAuditor); err != nil {
 		return nil, err
 	}
 	return s.store.Repos().Windows.List(ctx)
@@ -771,7 +775,7 @@ func (s *AdminService) normalizeWindow(w *domain.TimeWindow) error {
 }
 
 func (s *AdminService) CreateWindow(ctx context.Context, p Principal, w domain.TimeWindow) (domain.TimeWindow, error) {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermTimeWindowsCreate, domain.RoleAdmin); err != nil {
 		return w, err
 	}
 	if err := s.normalizeWindow(&w); err != nil {
@@ -787,7 +791,7 @@ func (s *AdminService) CreateWindow(ctx context.Context, p Principal, w domain.T
 }
 
 func (s *AdminService) UpdateWindow(ctx context.Context, p Principal, w domain.TimeWindow) (domain.TimeWindow, error) {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermTimeWindowsUpdate, domain.RoleAdmin); err != nil {
 		return w, err
 	}
 	if err := s.normalizeWindow(&w); err != nil {
@@ -807,7 +811,7 @@ func (s *AdminService) UpdateWindow(ctx context.Context, p Principal, w domain.T
 }
 
 func (s *AdminService) DeleteWindow(ctx context.Context, p Principal, id int64) error {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermTimeWindowsDelete, domain.RoleAdmin); err != nil {
 		return err
 	}
 	c := &change{entity: "time_window", operation: "delete", id: id}
@@ -822,7 +826,7 @@ func (s *AdminService) DeleteWindow(ctx context.Context, p Principal, id int64) 
 }
 
 func (s *AdminService) Holidays(ctx context.Context, p Principal) ([]domain.Holiday, error) {
-	if err := RequireRole(p, domain.RoleAdmin, domain.RoleAuditor); err != nil {
+	if err := RequirePermission(p, domain.PermHolidaysRead, domain.RoleAdmin, domain.RoleAuditor); err != nil {
 		return nil, err
 	}
 	return s.store.Repos().Holidays.List(ctx)
@@ -839,7 +843,7 @@ func validHoliday(h domain.Holiday) error {
 }
 
 func (s *AdminService) CreateHoliday(ctx context.Context, p Principal, h domain.Holiday) (domain.Holiday, error) {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermHolidaysCreate, domain.RoleAdmin); err != nil {
 		return h, err
 	}
 	if err := validHoliday(h); err != nil {
@@ -854,7 +858,7 @@ func (s *AdminService) CreateHoliday(ctx context.Context, p Principal, h domain.
 }
 
 func (s *AdminService) UpdateHoliday(ctx context.Context, p Principal, h domain.Holiday) (domain.Holiday, error) {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermHolidaysUpdate, domain.RoleAdmin); err != nil {
 		return h, err
 	}
 	if err := validHoliday(h); err != nil {
@@ -873,7 +877,7 @@ func (s *AdminService) UpdateHoliday(ctx context.Context, p Principal, h domain.
 }
 
 func (s *AdminService) DeleteHoliday(ctx context.Context, p Principal, id int64) error {
-	if err := s.requireAdmin(p); err != nil {
+	if err := RequirePermission(p, domain.PermHolidaysDelete, domain.RoleAdmin); err != nil {
 		return err
 	}
 	c := &change{entity: "holiday", operation: "delete", id: id}
@@ -890,7 +894,7 @@ func (s *AdminService) DeleteHoliday(ctx context.Context, p Principal, id int64)
 // ---- Settings ----
 
 func (s *AdminService) Settings(p Principal) (domain.Settings, error) {
-	if err := RequireRole(p, domain.RoleAdmin, domain.RoleAuditor); err != nil {
+	if err := RequirePermission(p, domain.PermSettingsRead, domain.RoleAdmin, domain.RoleAuditor); err != nil {
 		return domain.Settings{}, err
 	}
 	return s.settings.Get(), nil
@@ -900,6 +904,94 @@ func (s *AdminService) UpdateSettings(ctx context.Context, p Principal, v domain
 	if err := s.requireAdmin(p); err != nil {
 		return v, err
 	}
+	return s.saveSettings(ctx, p, v)
+}
+
+// SettingsPatch changes some settings; nil fields stay as they are. Each
+// field belongs to a section, and an API token needs that section's write
+// permission (SettingsPatch.apply).
+type SettingsPatch struct {
+	BreakGlassMode             *domain.BreakGlassMode
+	BreakGlassDefaultMin       *int
+	BreakGlassMaxMinutes       *int
+	BreakGlassRequestMaxAgeMin *int
+	ExecMaxSessionMinutes      *int
+	ExecIdleTimeoutMinutes     *int
+	RetentionAuditDays         *int
+	RetentionRecordingsDays    *int
+	RocketWebhookURL           *string
+	RocketChannel              *string
+	// RocketEvents changes only the events it lists.
+	RocketEvents map[domain.NotificationEvent]bool
+}
+
+// apply writes the patch into v and returns the permissions it needs.
+func (pt SettingsPatch) apply(v *domain.Settings) []domain.Permission {
+	var need []domain.Permission
+	section := func(perm domain.Permission, set ...bool) {
+		if slices.Contains(set, true) {
+			need = append(need, perm)
+		}
+	}
+	setInt := func(dst *int, src *int) bool {
+		if src != nil {
+			*dst = *src
+		}
+		return src != nil
+	}
+	setStr := func(dst *string, src *string) bool {
+		if src != nil {
+			*dst = *src
+		}
+		return src != nil
+	}
+	if pt.BreakGlassMode != nil {
+		v.BreakGlassMode = *pt.BreakGlassMode
+	}
+	section(domain.PermSettingsBreakGlassWrite, pt.BreakGlassMode != nil,
+		setInt(&v.BreakGlassDefaultMin, pt.BreakGlassDefaultMin), setInt(&v.BreakGlassMaxMinutes, pt.BreakGlassMaxMinutes),
+		setInt(&v.BreakGlassRequestMaxAgeMin, pt.BreakGlassRequestMaxAgeMin))
+	section(domain.PermSettingsExecWrite,
+		setInt(&v.ExecMaxSessionMinutes, pt.ExecMaxSessionMinutes), setInt(&v.ExecIdleTimeoutMinutes, pt.ExecIdleTimeoutMinutes))
+	section(domain.PermSettingsRetentionWrite,
+		setInt(&v.RetentionAuditDays, pt.RetentionAuditDays), setInt(&v.RetentionRecordingsDays, pt.RetentionRecordingsDays))
+	if pt.RocketEvents != nil {
+		// A copy: v shares its map with the cached settings.
+		events := maps.Clone(v.Rocket.Events)
+		if events == nil {
+			events = map[domain.NotificationEvent]bool{}
+		}
+		maps.Copy(events, pt.RocketEvents)
+		v.Rocket.Events = events
+	}
+	section(domain.PermSettingsNotificationsWrite, pt.RocketEvents != nil,
+		setStr(&v.Rocket.WebhookURL, pt.RocketWebhookURL), setStr(&v.Rocket.Channel, pt.RocketChannel))
+	return need
+}
+
+// PatchSettings changes only the settings in the patch. Admins may change
+// any; an API token needs the write permission of every section it touches.
+func (s *AdminService) PatchSettings(ctx context.Context, p Principal, pt SettingsPatch) (domain.Settings, error) {
+	v := s.settings.Get()
+	need := pt.apply(&v)
+	if len(need) == 0 {
+		return v, Invalid("body", "no settings to change")
+	}
+	for _, perm := range need {
+		if err := RequirePermission(p, perm, domain.RoleAdmin); err != nil {
+			return v, err
+		}
+	}
+	for e := range pt.RocketEvents {
+		if !slices.Contains(domain.AllNotificationEvents, e) {
+			return v, Invalid("rocket.events", "unknown event "+string(e))
+		}
+	}
+	return s.saveSettings(ctx, p, v)
+}
+
+// saveSettings validates and stores v; the caller has checked permissions.
+func (s *AdminService) saveSettings(ctx context.Context, p Principal, v domain.Settings) (domain.Settings, error) {
 	if err := ValidateSettings(v); err != nil {
 		return v, err
 	}

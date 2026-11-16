@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -152,6 +153,74 @@ func TestRestartAndRunJob(t *testing.T) {
 	status, m, _ = dev.do("POST", "/api/v1/clusters/prod-1/namespaces/payments-api/cronjobs/reconcile/run", nil)
 	if status != 409 || errCode(m) != "already_running" {
 		t.Fatalf("second run: %d %v", status, m)
+	}
+}
+
+func TestDeletePod(t *testing.T) {
+	e := newEnv(t)
+	dev := e.login(e.devID)
+	ctx := context.Background()
+	podDelete := func(path string) any {
+		_, m, _ := dev.get(path)
+		return m["podDelete"]
+	}
+	if podDelete(wl) != true || podDelete("/api/v1/clusters/prod-1/namespaces/payments-api/workloads/cronjobs/reconcile") != false {
+		t.Fatalf("podDelete: deployment %v, cronjob %v", podDelete(wl), podDelete("/api/v1/clusters/prod-1/namespaces/payments-api/workloads/cronjobs/reconcile"))
+	}
+	podEvents := func() []domain.AuditEvent {
+		evs, _ := e.store.Repos().Audit.List(ctx, application.AuditFilter{EventType: domain.EventPodDelete})
+		return evs
+	}
+
+	if status, m, _ := dev.do("DELETE", wl+"/pods/payments-api-abc", nil); status != 204 {
+		t.Fatalf("delete: %d %v", status, m)
+	}
+	e.kube.mu.Lock()
+	deleted := fmt.Sprint(e.kube.deletes)
+	e.kube.mu.Unlock()
+	if deleted != "[payments-api-abc]" {
+		t.Fatalf("deleted: %s", deleted)
+	}
+	waitFor(t, 3*time.Second, "delete audited", func() bool { return len(podEvents()) == 2 })
+	for _, ev := range podEvents() {
+		if ev.Action != "restart" || ev.Username != "sara" || ev.Pod != "payments-api-abc" ||
+			(ev.Result != domain.ResultAllowed && ev.Result != domain.ResultSucceeded) {
+			t.Fatalf("audit event: %+v", ev)
+		}
+	}
+
+	// A pod of another workload is refused by the cluster access and audited as failed.
+	if status, m, _ := dev.do("DELETE", wl+"/pods/payments-worker-xyz", nil); status != 403 || errCode(m) != "pod_not_in_workload" {
+		t.Fatalf("foreign pod: %d %v", status, m)
+	}
+	waitFor(t, 3*time.Second, "failure audited", func() bool {
+		evs := podEvents()
+		return len(evs) == 4 && slices.ContainsFunc(evs, func(ev domain.AuditEvent) bool { return ev.Result == domain.ResultFailed })
+	})
+	if status, m, _ := dev.do("DELETE", "/api/v1/clusters/prod-1/namespaces/payments-api/workloads/cronjobs/reconcile/pods/reconcile-pod", nil); status != 422 {
+		t.Fatalf("cronjob pod: %d %v", status, m)
+	}
+
+	e.kube.mu.Lock()
+	e.kube.noPodDelete = true
+	e.kube.mu.Unlock()
+	if status, m, _ := dev.do("DELETE", wl+"/pods/payments-api-abc", nil); status != 409 || errCode(m) != "pod_delete_unavailable" {
+		t.Fatalf("no policy: %d %v", status, m)
+	}
+	if podDelete(wl) != false {
+		t.Fatal("podDelete offered on a cluster without the policy")
+	}
+
+	// Deleting a pod needs restart.
+	grants, _ := e.store.Repos().Grants.List(ctx)
+	g := grants[0]
+	g.Actions = []domain.Action{domain.ActionLogs}
+	if err := e.store.Repos().Grants.Update(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	e.policy.Changed(ctx)
+	if status, m, _ := dev.do("DELETE", wl+"/pods/payments-api-abc", nil); status != 403 || errDetailReason(m) != "no_grant" {
+		t.Fatalf("without restart: %d %v", status, m)
 	}
 }
 

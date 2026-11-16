@@ -1,5 +1,5 @@
 import type {
-  AccessRequest, AuditEvent, BreakGlass, BreakGlassRequest, ClusterView, EnvironmentOverride, ExecSessionView, GrantView,
+  AccessRequest, ApiTokenView, AuditEvent, BreakGlass, BreakGlassRequest, ClusterView, EnvironmentOverride, ExecSessionView, GrantView,
   HolidayView, JobSummary, K8sEvent, SettingsView, TimeWindowView, UserView, WorkloadKind, Role, Action,
 } from '../api/types';
 
@@ -76,6 +76,7 @@ export interface Db {
   sessions: ExecSessionView[];
   audit: AuditEvent[];
   settings: SettingsView;
+  apiTokens: ApiTokenView[];
   argo: { fetchedAt: number; stale: boolean; appCount: number; projectCount: number; lastError: string | null };
   jobs: Record<string, JobSummary[]>; // key cluster/ns/cronjob
   ops: Record<string, Operation>;
@@ -335,8 +336,17 @@ function seed(): Db {
       { id: 2, kind: 'argo_project', cluster: 'prod-2', argoProject: 'search-lab', environment: 'staging' },
     ],
     grants, windows, holidays, requests, breakGlasses: [bgNima], bgRequests, sessions, audit, settings,
+    apiTokens: [
+      { id: 1, name: 'holiday-sync', description: 'Imports the HR calendar every night', prefix: 'tph_Qm4x9KpA', permissions: ['holidays:read', 'holidays:create', 'holidays:update'],
+        createdBy: 'reza.ahmadi', createdAt: iso(now - 40 * DAY), expiresAt: iso(now + 50 * DAY), lastUsedAt: iso(now - 7 * HOUR), revokedAt: null, revokedBy: '', status: 'active' },
+      { id: 2, name: 'change-freeze', description: 'Release pipeline: freezes prod around releases', prefix: 'tph_b7Lw2nRe',
+        permissions: ['time_windows:read', 'time_windows:create', 'time_windows:delete', 'settings:read', 'settings.break_glass:write'],
+        createdBy: 'reza.ahmadi', createdAt: iso(now - 12 * DAY), expiresAt: null, lastUsedAt: null, revokedAt: null, revokedBy: '', status: 'active' },
+      { id: 3, name: 'old-ci', description: '', prefix: 'tph_Zt0c5HyU', permissions: ['settings:read'],
+        createdBy: 'reza.ahmadi', createdAt: iso(now - 200 * DAY), expiresAt: iso(now - 20 * DAY), lastUsedAt: iso(now - 30 * DAY), revokedAt: iso(now - 25 * DAY), revokedBy: 'reza.ahmadi', status: 'revoked' },
+    ],
     argo: { fetchedAt: now - 42_000, stale: false, appCount: apps.length, projectCount: 3, lastError: null },
-    jobs, ops: {}, nextId: { grant: 100, request: 100, user: 100, team: 100, window: 100, holiday: 100, bg: 100, bgRequest: 100, override: 100, audit: 9000 },
+    jobs, ops: {}, nextId: { grant: 100, request: 100, user: 100, team: 100, window: 100, holiday: 100, bg: 100, bgRequest: 100, override: 100, audit: 9000, apiToken: 100 },
   };
 }
 

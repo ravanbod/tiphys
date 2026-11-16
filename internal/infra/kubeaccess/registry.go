@@ -36,11 +36,12 @@ type Registry struct {
 }
 
 type clusterEntry struct {
-	base        *rest.Config
-	sum         [sha256.Size]byte
-	privilegeOK atomic.Bool // set by the registry's own privilege check
-	enabled     atomic.Bool // set by SetUsable
-	debugReady  atomic.Bool // the debug admission policy is installed (privilege check)
+	base           *rest.Config
+	sum            [sha256.Size]byte
+	privilegeOK    atomic.Bool // set by the registry's own privilege check
+	enabled        atomic.Bool // set by SetUsable
+	debugReady     atomic.Bool // the debug admission policy is installed (privilege check)
+	podDeleteReady atomic.Bool // the pod delete admission policy is installed (privilege check)
 }
 
 func (e *clusterEntry) usable() bool { return e.privilegeOK.Load() && e.enabled.Load() }
@@ -195,6 +196,13 @@ func (r *Registry) Registered() []string {
 
 // SetUsable marks a cluster usable or not (health). It cannot override a
 // failed privilege check: an over-privileged cluster stays refused.
+// PodDeleteReady reports whether the last privilege check found the pod
+// delete policy.
+func (r *Registry) PodDeleteReady(cluster string) bool {
+	e, err := r.entry(cluster)
+	return err == nil && e.podDeleteReady.Load()
+}
+
 func (r *Registry) SetUsable(cluster string, usable bool) {
 	if e, err := r.entry(cluster); err == nil {
 		e.enabled.Store(usable)

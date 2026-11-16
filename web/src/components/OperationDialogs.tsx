@@ -162,6 +162,63 @@ export function RestartDialog({ wl, onClose }: { wl: WorkloadSummary; onClose: (
   );
 }
 
+/** Confirms deleting one pod of a workload; its controller replaces it. Needs restart. */
+export function DeletePodDialog({ wl, pod, onClose }: { wl: WorkloadSummary; pod: string; onClose: (changed: boolean) => void }) {
+  const info = wl.access.restart;
+  const prod = isProd(wl.environment);
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<unknown>(null);
+  const canGo = !prod || typed === wl.name;
+
+  async function go() {
+    if (!canGo || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await api.deletePod({ cluster: wl.cluster, namespace: wl.namespace, kind: wl.kind, name: wl.name }, pod);
+      onClose(true);
+    } catch (e) {
+      setErr(e);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog
+      onClose={() => onClose(false)} tone={info?.breakGlassId ? 'bg' : prod ? 'prod' : undefined} title="Delete pod?"
+      subtitle={`${wl.kind === 'StatefulSet' ? 'The StatefulSet recreates it under the same name' : `The ${wl.kind} replaces it with a new pod`}. Containers get their usual shutdown grace period.`}
+      footer={
+        <>
+          <button type="button" className="btn" onClick={() => onClose(false)}>Cancel</button>
+          <button type="button" className={`btn act${canGo && !busy ? '' : ' dis'}`} aria-disabled={!canGo || busy} onClick={() => void go()}>
+            <Icon name="trash" />Delete pod
+          </button>
+        </>
+      }
+    >
+      <BgNote info={info} />
+      <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
+        <dt>Pod</dt><dd className="mono">{pod}</dd>
+        <dt>Workload</dt><dd className="row"><KindTag kind={wl.kind} /><span className="mono">{wl.name}</span></dd>
+        <dt>Namespace</dt><dd className="mono">{wl.namespace}</dd>
+        <dt>Cluster</dt><dd className="mono">{wl.cluster}</dd>
+        <dt>Environment</dt><dd><EnvBadge env={wl.environment} /></dd>
+      </dl>
+      {wl.kind !== 'DaemonSet' && wl.desired <= 1 && (
+        <div className="banner yel"><Icon name="warn" /><span>This workload runs a single pod: it is unavailable until the new pod is ready. A restart replaces it without downtime.</span></div>
+      )}
+      {prod && (
+        <label className="f">
+          <span>Type <b className="mono" style={{ color: 'var(--tx)' }}>{wl.name}</b> to confirm</span>
+          <input className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type the workload name to confirm" autoComplete="off" spellCheck={false} data-autofocus />
+        </label>
+      )}
+      {err != null && <div className="banner red" role="alert">{errText(err)}</div>}
+    </Dialog>
+  );
+}
+
 /**
  * Confirms and follows a sync of a whole Argo CD application. The portal
  * always syncs to the app's target revision without pruning; production

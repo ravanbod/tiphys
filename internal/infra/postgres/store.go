@@ -105,6 +105,7 @@ func newRepos(d dbtx) application.Repositories {
 		Audit:        auditRepo{d},
 		Settings:     settingsRepo{d},
 		WebSessions:  webSessionRepo{d},
+		APITokens:    apiTokenRepo{d},
 	}
 }
 

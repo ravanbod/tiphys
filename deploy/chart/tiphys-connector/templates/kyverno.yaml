@@ -1,6 +1,6 @@
 {{- if eq .Values.admission.mode "kyverno" }}
 {{- $users := "tiphys:user" }}
-# The same three rules as vap.yaml, for clusters without
+# The same rules as vap.yaml but debug, for clusters without
 # ValidatingAdmissionPolicy (Kubernetes < 1.30). Needs Kyverno 1.10 or newer.
 #
 # 1. Restart only. Every top-level spec key other than template and restartAt
@@ -104,4 +104,36 @@ spec:
       validate:
         message: "this namespace is protected: no writes or exec"
         deny: {}
+{{- if include "tiphys.podDelete" . }}
+---
+# 5. Pod delete only of pods a ReplicaSet, StatefulSet or DaemonSet controls.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: tiphys-pod-delete-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  validationFailureAction: {{ .Values.admission.kyvernoAction }}
+  background: false
+  failurePolicy: Fail
+  rules:
+    - name: controlled-pods-only
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              operations: [DELETE]
+            subjects:
+              - kind: User
+                name: {{ $users | quote }}
+      validate:
+        message: "only a pod controlled by a ReplicaSet, StatefulSet or DaemonSet may be deleted"
+        deny:
+          conditions:
+            any:
+              - key: {{ "{{ length(request.oldObject.metadata.ownerReferences[?to_string(controller) == 'true' && starts_with(apiVersion, 'apps/') && contains(['ReplicaSet', 'StatefulSet', 'DaemonSet'], kind)] || parse_json('[]')) }}" | quote }}
+                operator: Equals
+                value: 0
+{{- end }}
 {{- end }}

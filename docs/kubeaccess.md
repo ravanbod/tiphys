@@ -91,7 +91,9 @@ graph are matched in memory too); the only selector is
 
 - **Logs**: `TailLines` in {0, 100, 1000, 10000} (0 = whole log, for downloads),
   `SinceSeconds` in {0, 300, 3600, 86400}. The container must exist in the pod.
-- **Exec**: SPDY, TTY, command is only the allow-listed shell. Output must be
+- **Exec**: SPDY, TTY, command is only the allow-listed shell (`/bin/bash`
+  runs as the fixed `/bin/sh -c '[ -x /bin/bash ] && exec /bin/bash; exec /bin/sh'`,
+  so a container without bash gets sh). Output must be
   drained by the caller until `Done`. `Err()` is nil after `Close()`.
 - **Debug** (needs `WithDebugImage`, else `ErrDebugUnavailable`; also refused
   while the cluster's last privilege check did not find the
@@ -111,6 +113,11 @@ graph are matched in memory too); the only selector is
   without Complete or Failed means timed out or cancelled. Deadline 0 means the
   Deployment's `progressDeadlineSeconds`, else 600 s. A Rollout counts as done
   only when `status.restartedAt >= spec.restartAt` and the phase is Healthy.
+- **DeletePod** (refused with `ErrPodDeleteUnavailable` while the cluster's
+  last privilege check did not find `tiphys-pod-delete-only`): restartable
+  kinds only; re-reads the pod, checks its owner chain and deletes it with its
+  UID as precondition and no grace period override. A precondition failure
+  (the pod was replaced in between) returns `application.ErrConflict`.
 - **WatchNamespace** lists the namespace's pods (and the events' resource
   version), then watches pods and events from there and reopens the watches
   when they end (after a new list when the version expired, with backoff up to
@@ -141,7 +148,7 @@ graph are matched in memory too); the only selector is
 unreachable, every 30 s until it answers) run SelfSubjectAccessReviews as the
 connector, without impersonation. Required: impersonate user `tiphys:user`.
 Must be denied: get Secrets in `kube-system`, create Pods in all namespaces,
-`kube-system` and `default`, update `pods/ephemeralcontainers`, impersonate user
+`kube-system` and `default`, delete Pods, update `pods/ephemeralcontainers`, impersonate user
 `system:admin`, impersonate group `system:masters`. Any failure fills `Violations`, sets `PrivilegeOK=false` and
 marks the cluster unusable; `SetUsable(true)` cannot override that. The
 portal's periodic `Probe` (every 5 minutes) re-evaluates, so a rotated
@@ -150,7 +157,8 @@ credential recovers without restart.
 Admission mode: ValidatingAdmissionPolicy named `tiphys-*` -> `vap`, else Kyverno
 ClusterPolicy named `tiphys-*` -> `kyverno`, else `none` (also when the read is
 forbidden or the API is not served). `DebugReady` is true when the VAP
-`tiphys-debug-only` exists (there is no Kyverno version).
+`tiphys-debug-only` exists (there is no Kyverno version); `PodDeleteReady` when
+`tiphys-pod-delete-only` exists, as a VAP or a Kyverno policy.
 
 Pasted kubeconfigs are accepted only with an https server, inline CA (or the
 system roots) and an inline bearer token. Rejected (`ErrKubeconfigRejected`,
@@ -206,7 +214,8 @@ and the defense-in-depth criteria called directly as `tiphys:user`: image change
 and other edits rejected by admission, Job without CronJob owner rejected,
 Secrets forbidden, the connector unable to impersonate anyone else, protected
 namespaces rejecting writes and exec, and the privilege check flagging a
-cluster-admin token. Set `TIPHYS_TEST_ADMISSION=kyverno` after installing the
+cluster-admin token, deleting a StatefulSet's pod (it comes back with a new UID)
+and `tiphys-pod-delete-only` rejecting the delete of a bare pod. Set `TIPHYS_TEST_ADMISSION=kyverno` after installing the
 chart with `admission.mode=kyverno`.
 
 Debug: install the chart with `--set debug.enabled=true --set debug.image=<repo@sha256:...>`

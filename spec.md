@@ -4,7 +4,7 @@ This document defines how Tiphys behaves; it describes the current code. The scr
 
 ## Scope
 
-Tiphys is a brokered access portal: developers log in with Keycloak and read logs, exec, restart workloads, trigger CronJobs and sync or roll back Argo CD applications in Kubernetes **without ever holding cluster credentials**. Authorization lives in the portal's own database; every action is audited and every exec session is recorded.
+Tiphys is a brokered access portal: developers log in with Keycloak and read logs, exec, restart workloads or delete single pods, trigger CronJobs and sync or roll back Argo CD applications in Kubernetes **without ever holding cluster credentials**. Authorization lives in the portal's own database; every action is audited and every exec session is recorded.
 
 **Goals**
 
@@ -66,6 +66,14 @@ The portal connects to each API server directly, like Argo CD, using a token tha
 - Bootstrap: environment variable `TIPHYS_BOOTSTRAP_ADMINS` (comma-separated Keycloak usernames, case-insensitive) makes those users admins at every login, also when they already exist as regular users. `TIPHYS_ADMIN_GROUPS` (comma-separated Keycloak groups, read from the ID token's `groups` claim) does the same for group members. Both are audited as admin changes, never demote anyone, skip disabled users, and do not apply to local users. The portal database still holds the role; groups only grant it.
 - Admins have implicit access to every non-protected scope and are not limited by time windows (assumption, see Defaults). Their actions are audited and their exec sessions recorded exactly like everyone else's.
 - At least one active admin must always exist; the API refuses demoting or disabling the last one.
+
+**API tokens** (service accounts for configuration)
+
+- Admins create tokens on the Settings page with a name, an optional description, an expiry (30, 90 or 365 days, or never) and a set of permissions: read, create, update and delete of time windows and of holidays; read of the settings; and a write permission per settings section (break-glass, session limits, retention, notifications). A write includes its read (the dialog ticks it).
+- The value (`tph_…`) is shown once; only its SHA-256 is stored. It is sent as `Authorization: Bearer`; no CSRF token is needed, as no cookie is involved.
+- A token is not a user: it has no role, uses no grants, never reaches a cluster, and cannot create or revoke tokens. It reaches only the time window, holiday and settings endpoints (settings are changed with `PATCH`, which needs the write permission of every section it touches); the services check its permission on each call.
+- Tokens cannot be edited: an admin revokes one (it fails at once) and creates another. Revoked tokens stay listed. Auditors see the list read-only.
+- A token's changes are audited like an admin's, under the name `token:<name>` with the token's ID in `details`.
 
 ## Authorization
 
@@ -152,6 +160,7 @@ All cluster access goes through the internal `kubeaccess` module (see Cluster co
 | `Exec(pod, container, shell)` | `exec` | CONNECT `pods/exec` (TTY, stdin) |
 | `Debug(pod, container, shell)` | `exec` | UPDATE `pods/ephemeralcontainers`, then CONNECT `pods/exec` |
 | `Restart(workload)` | `restart` | PATCH the workload (see below) |
+| `DeletePod(pod)` | `restart` | DELETE `pods` with a UID precondition (see Delete pod) |
 | `RunCronJob(cronjob)` | `run-job` | GET CronJob, list Jobs, CREATE Job |
 
 "On the whole namespace" means a grant on single workloads is not enough, since the result shows the other workloads of the namespace too. Argo CD actions (sync, rollback, status, history, diff) do not go through `kubeaccess`, except the discovery a rollback plan reads; see Argo CD applications.
@@ -186,6 +195,13 @@ Before every verb that names a pod, kubeaccess re-reads the pod and verifies its
 
 - The portal then watches status and streams progress to the browser (desired / updated / ready / available) until complete, failed, or `progressDeadlineSeconds` (default 600) passes.
 - The outcome (succeeded, failed with reason, timed out) is written to the audit event.
+
+### Delete pod
+
+- One pod of a Deployment, StatefulSet, DaemonSet or Rollout, for its controller to replace (a StatefulSet recreates it under the same name). It is a restart of a single pod, so it needs `restart`; CronJob/Job pods and pods of no workload cannot be deleted.
+- kubeaccess re-reads the pod and checks its owner chain, then deletes it with that pod's UID as a precondition, so a pod recreated under the same name in between is not deleted (`409 conflict`). No grace period is set: the pod's own applies; never forced.
+- Synchronous (`204`): the outcome is audited at once as `pod.delete` with the pod; the replacement shows in the pod list and live changes.
+- Offered (`WorkloadDetail.podDelete`) and allowed only on clusters where the privilege check found the chart's `tiphys-pod-delete-only` policy; elsewhere the button is hidden and the API refuses (`409 pod_delete_unavailable`).
 
 ### Run CronJob
 
@@ -222,7 +238,7 @@ The portal connects directly to each cluster's API server, the same way Argo CD 
 - Each cluster's kubeconfig (API server URL, CA, `tiphys-connector` token) is a Secret in the management cluster, in the portal's namespace, annotated `tiphys/cluster: <name>` (key `kubeconfig`). The name must match the cluster's name in Argo CD. An optional `tiphys/environment` annotation sets the cluster's environment and then wins over the admin UI. An optional `tiphys/protected: "true"` annotation makes it a protected cluster: users and auditors do not see it in the access request form and cannot request access to it, but admins still grant on it and those grants work as usual.
 - The operator creates, replaces and deletes these Secrets; **the portal never writes Secrets** (its Role is get/list/watch only). It watches them, so a change applies without restart. A cluster whose Secret goes away stays, shown as "No credential", so its grants and history are kept.
 - For local testing only, `CLUSTER_REGISTRATION_FROM_UI` lets admins add a cluster or replace its credential by pasting a kubeconfig, which is then written to a credential directory (never to a Secret).
-- **Privilege check**, on registration and every 5 minutes, using SelfSubjectAccessReview as the connector: it must be allowed to impersonate `tiphys:user`, and must be **denied** each of: get Secrets in `kube-system`, create Pods (any namespace, `kube-system`, `default`), add ephemeral containers to Pods in any namespace, impersonate `system:admin`, impersonate group `system:masters`. If any denied check passes, the credential is over-privileged: the portal refuses to use it and flags the cluster. This stops anyone from registering Argo CD's admin credential by mistake. A cluster is unusable until its check passes.
+- **Privilege check**, on registration and every 5 minutes, using SelfSubjectAccessReview as the connector: it must be allowed to impersonate `tiphys:user`, and must be **denied** each of: get Secrets in `kube-system`, create Pods (any namespace, `kube-system`, `default`), delete Pods in any namespace, add ephemeral containers to Pods in any namespace, impersonate `system:admin`, impersonate group `system:masters`. If any denied check passes, the credential is over-privileged: the portal refuses to use it and flags the cluster. This stops anyone from registering Argo CD's admin credential by mistake. A cluster is unusable until its check passes.
 - **Health**: the portal calls `/version` every 30 seconds on healthy clusters and every 10 seconds on clusters whose last check failed; after 3 failures in a row the cluster is marked unreachable, and one success marks it reachable again. The UI shows reachability, Kubernetes version, privilege-check result and admission mode.
 - Tokens are rotated at least yearly (runbook: create a new token Secret, update the cluster's Secret, delete the old token).
 
@@ -306,6 +322,9 @@ rules:
   resources: ["pods/exec"]
   verbs: ["create", "get"]
 - apiGroups: [""]
+  resources: ["pods"]                             # only with pod delete enabled
+  verbs: ["delete"]
+- apiGroups: [""]
   resources: ["pods/ephemeralcontainers"]         # only with debug enabled
   verbs: ["update"]
 - apiGroups: ["apps"]
@@ -322,7 +341,7 @@ rules:
   verbs: ["get", "list", "watch", "create"]
 ```
 
-No access to Secrets, ConfigMaps, delete, or any cluster-scoped write. The extras' domain is the chart value `extraDomain`, which must equal the portal's (`portal.example.com` by default); pick your own once and use it everywhere.
+No access to Secrets, ConfigMaps, delete (except pods, see below), or any cluster-scoped write. The extras' domain is the chart value `extraDomain`, which must equal the portal's (`portal.example.com` by default); pick your own once and use it everywhere.
 
 ### Admission policies (defense in depth)
 
@@ -332,10 +351,11 @@ In the chart as `ValidatingAdmissionPolicy` + binding (Kubernetes 1.30+), matchi
 2. **Jobs only from CronJobs**: on CREATE of Jobs, require an `ownerReference` of kind `CronJob` and the `cronjob.kubernetes.io/instantiate: manual` annotation.
 3. **Protected namespaces**: reject any write or exec in namespaces listed in the policy's parameter (kept in sync with the portal's protected list).
 4. **Debug only** (with debug enabled): an update of `pods/ephemeralcontainers` may add exactly one container, named `tiphys-debug-*`, running the configured image and only `sleep <seconds>` within a bounded lifetime, targeting a container of the pod, and setting no env, volumes, ports, probes, securityContext or resources; a pod may hold a bounded number of them.
+5. **Pod delete only** (with pod delete enabled): a DELETE of a pod is admitted only when a ReplicaSet, StatefulSet or DaemonSet (`apps/*`) controls it, so it is always replaced.
 
 These cap the damage of a bug or compromise in the portal; they do not replace its checks. Policy 2 cannot prove a Job's spec equals its CronJob's template, so `kubeaccess` must build Jobs only from the CronJob it reads, never from client input.
 
-If a cluster runs Kubernetes older than 1.30, policies 1–3 ship as Kyverno policies instead (debug is then unavailable), and the admin UI shows the cluster's admission mode.
+If a cluster runs Kubernetes older than 1.30, policies 1–3 and 5 ship as Kyverno policies instead (debug is then unavailable), and the admin UI shows the cluster's admission mode.
 
 ## Data model
 
@@ -392,6 +412,9 @@ audit_events     (id, at, user_id NULL, username, event_type, action NULL,
                   details JSONB,                 -- options, before/after for admin changes
                   source_ip, user_agent)
 settings         (key PRIMARY KEY, value JSONB)
+api_tokens       (id, name, description, token_hash UNIQUE,   -- sha256 of the value
+                  prefix, permissions TEXT[], created_by, expires_at NULL,
+                  last_used_at NULL, revoked_at NULL, revoked_by)
 ```
 
 **Rules**
@@ -488,6 +511,7 @@ settings         (key PRIMARY KEY, value JSONB)
 - [ ] Revoking the grant terminates an open exec within 30 seconds; disabling the user within 5 seconds.
 - [ ] Five minutes before a window closes, the client receives a warning; at close the session ends with reason `outside_window`.
 - [ ] Restart of a Deployment, StatefulSet, DaemonSet and Rollout each completes and reports progress.
+- [ ] Deleting a StatefulSet's pod brings it back under the same name; a pod of another workload is refused.
 - [ ] Run CronJob creates a Job owned by the CronJob; a second run with `concurrencyPolicy: Forbid` while the first is active is refused.
 - [ ] Sync of an Argo CD application runs without prune, records the username in the operation's info, and reports its outcome; a sync while another operation runs is refused.
 - [ ] Rolling back an application needs `rollback` (not `sync`) on every namespace it deploys to now and every namespace the deploy's revision deploys to; a revision with cluster-scoped resources needs an admin unless their kinds are allowed; applications with auto-sync, multi-source applications and deploys of another source are refused; it never prunes.
@@ -497,6 +521,7 @@ settings         (key PRIMARY KEY, value JSONB)
 
 - [ ] Changing a Deployment's image is rejected by admission.
 - [ ] Creating a Job without a CronJob owner is rejected.
+- [ ] Deleting a pod no ReplicaSet, StatefulSet or DaemonSet controls is rejected.
 - [ ] Reading a Secret is forbidden by RBAC, and adding a cluster with a cluster-admin kubeconfig is refused by the privilege check.
 - [ ] The connector ServiceAccount cannot impersonate any user other than `tiphys:user`.
 

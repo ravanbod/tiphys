@@ -12,6 +12,7 @@ const TITLES: Record<string, string> = {
   'exec.terminate': 'Session terminated',
   'exec.replay': 'Recording replayed',
   restart: 'Restart',
+  'pod.delete': 'Pod deleted',
   'run-job': 'CronJob run',
   'argo.sync': 'Argo CD sync',
   'argo.diff': 'Argo CD diff viewed',

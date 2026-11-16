@@ -11,6 +11,7 @@ the portal's identity can do.
 | ClusterRole + binding `tiphys-actions` | What `tiphys:users` may do (bound to the group, not to the connector); the full list is in the spec's RBAC section. Besides workloads, pods, events and logs it reads `namespaces` (names for the pickers, without Argo CD) and, for the namespace page's traffic graph, `services`, `ingresses`, Gateway API `httproutes`/`grpcroutes` and `get` on `gateways`. After upgrading the portal, run `helm upgrade` on each cluster: until then the portal falls back to Argo CD's namespaces, and the traffic graph shows an error |
 | ClusterRole + binding `tiphys-connector-admission-reader` | get/list `validatingadmissionpolicies` and Kyverno `clusterpolicies`, so the portal can show the cluster's admission mode. It reads policy names only and grants nothing on workloads or Secrets |
 | `tiphys-restart-only`, `tiphys-jobs-from-cronjobs`, `tiphys-protected-namespaces` | ValidatingAdmissionPolicy + binding (`admission.mode=vap`), or Kyverno ClusterPolicy (`kyverno`) |
+| `tiphys-pod-delete-only` (with `podDelete.enabled`, not in `admission.mode=none`) | ValidatingAdmissionPolicy + binding, or Kyverno ClusterPolicy. With it, `tiphys-actions` also gets `delete` on `pods`; the policy admits only pods a ReplicaSet, StatefulSet or DaemonSet controls |
 | `tiphys-debug-only` (only with `debug.enabled`) | ValidatingAdmissionPolicy + binding; there is no Kyverno version, so debug needs `admission.mode=vap`. With it, `tiphys-actions` also gets `update` on `pods/ephemeralcontainers` (see Debug containers) |
 
 ## Values
@@ -23,6 +24,7 @@ the portal's identity can do.
 | `admission.mode` | `vap` | `vap` (Kubernetes 1.30+), `kyverno` (older clusters), `none` |
 | `admission.validationActions` | `[Deny]` | VAP binding actions. Use `[Warn]` or `[Audit]` for a dry run |
 | `admission.kyvernoAction` | `Enforce` | Kyverno `validationFailureAction` |
+| `podDelete.enabled` | `true` | The portal's Delete pod (authorized as `restart`); the portal offers it only where it finds `tiphys-pod-delete-only` |
 | `debug.enabled` | `false` | Debug containers; needs `admission.mode=vap` (the render fails otherwise) |
 | `debug.image` | `""` | Debug image pinned by digest (`repo@sha256:<64 hex>`); must equal the portal's `DEBUG_IMAGE` |
 | `debug.maxContainersPerPod` | `20` | Ephemeral containers a pod may hold; then debug on it is refused until the pod is replaced |

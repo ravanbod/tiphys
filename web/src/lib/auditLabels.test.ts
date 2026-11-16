@@ -12,6 +12,7 @@ const base: AuditEvent = {
 describe('auditLabels', () => {
   it('titles', () => {
     expect(eventTitle(base)).toBe('Exec started');
+    expect(eventTitle({ eventType: 'pod.delete', details: null })).toBe('Pod deleted');
     expect(eventTitle({ eventType: 'weird.thing_x', details: null })).toBe('Weird thing x');
     expect(eventTitle({ eventType: 'admin.change', details: { entity: 'grant', operation: 'update' } })).toBe('Grant updated');
     expect(eventTitle({ eventType: 'admin.change', details: null })).toBe('Admin change');

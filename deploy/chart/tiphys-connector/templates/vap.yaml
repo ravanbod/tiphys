@@ -162,6 +162,45 @@ metadata:
 spec:
   policyName: tiphys-protected-namespaces
   validationActions: {{ toJson .Values.admission.validationActions }}
+{{- if include "tiphys.podDelete" . }}
+---
+# 5. Pod delete only of controlled pods: tiphys:user may delete a pod only
+#    when a ReplicaSet, StatefulSet or DaemonSet controls it, so its
+#    controller replaces it. (The numbering follows spec.md.)
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: tiphys-pod-delete-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["*"]
+        operations: ["DELETE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: tiphys-user
+      expression: {{ $match | quote }}
+  validations:
+    - expression: >-
+        oldObject.metadata.?ownerReferences.orValue([]).exists(o,
+          o.?controller.orValue(false) == true && o.apiVersion.startsWith('apps/') &&
+          o.kind in ['ReplicaSet', 'StatefulSet', 'DaemonSet'])
+      message: "only a pod controlled by a ReplicaSet, StatefulSet or DaemonSet may be deleted"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: tiphys-pod-delete-only
+  labels:
+    {{- include "tiphys.labels" . | nindent 4 }}
+spec:
+  policyName: tiphys-pod-delete-only
+  validationActions: {{ toJson .Values.admission.validationActions }}
+{{- end }}
 {{- if .Values.debug.enabled }}
 {{- include "tiphys.debugChecked" . }}
 ---

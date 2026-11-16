@@ -103,6 +103,13 @@ rules:
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create", "get"]
+  {{- if include "tiphys.podDelete" . }}
+  # Deleting one pod for its controller to replace; tiphys-pod-delete-only
+  # admits only pods with a ReplicaSet, StatefulSet or DaemonSet controller.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+  {{- end }}
   {{- if .Values.debug.enabled }}
   {{- include "tiphys.debugChecked" . }}
   # Debug containers; what may be added is limited by tiphys-debug-only.

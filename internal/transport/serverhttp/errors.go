@@ -64,7 +64,11 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 	var priv *application.PrivilegeError
 	var clusterErr *application.ClusterError
 	var argoErr *application.ArgoError
+	var permErr *application.PermissionError
 	switch {
+	case errors.As(err, &permErr):
+		abort(c, http.StatusForbidden, "missing_permission", "This API token lacks the "+string(permErr.Permission)+" permission.",
+			map[string]any{"permission": permErr.Permission})
 	case errors.As(err, &denied):
 		abort(c, http.StatusForbidden, "denied", denialText[denied.Decision.Reason], map[string]any{"decision": toDecisionInfo(denied.Decision)})
 	case errors.As(err, &invalid):
@@ -95,6 +99,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 		abort(c, http.StatusConflict, "already_running", "Another operation on this application is already in progress in Argo CD.", nil)
 	case errors.Is(err, application.ErrAutoSyncEnabled):
 		abort(c, http.StatusConflict, "auto_sync_enabled", "This application syncs automatically, so Argo CD does not roll it back. Turn off auto-sync in Git or Argo CD first.", nil)
+	case errors.Is(err, application.ErrPodDeleteUnavailable):
+		abort(c, http.StatusConflict, "pod_delete_unavailable", "Deleting pods is not set up on this cluster: its connector chart lacks the tiphys-pod-delete-only policy.", nil)
 	case errors.Is(err, application.ErrLastAdmin):
 		abort(c, http.StatusConflict, "last_admin", "At least one active admin must exist.", nil)
 	case errors.Is(err, application.ErrConflict):

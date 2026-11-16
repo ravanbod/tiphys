@@ -60,6 +60,7 @@ func TestProbeFlagsEachDeniedCheckSeparately(t *testing.T) {
 	for _, extra := range []authv1.ResourceAttributes{
 		{Verb: "get", Resource: "secrets", Namespace: "kube-system"},
 		{Verb: "create", Resource: "pods"},
+		{Verb: "delete", Resource: "pods"},
 		{Verb: "update", Resource: "pods", Subresource: "ephemeralcontainers"},
 		{Verb: "impersonate", Resource: "users", Name: "system:admin"},
 		{Verb: "impersonate", Resource: "groups", Name: "system:masters"},
@@ -147,6 +148,35 @@ func TestDebugPolicyDetection(t *testing.T) {
 	r.allow(connectorOnly)
 	if p, _ := r.Probe(ctx, "c1"); p.AdmissionMode != domain.AdmissionKyverno || p.DebugReady {
 		t.Fatalf("kyverno: %+v", p)
+	}
+}
+
+func TestPodDeletePolicyDetection(t *testing.T) {
+	vap := func(name string) *admissionv1.ValidatingAdmissionPolicy {
+		return &admissionv1.ValidatingAdmissionPolicy{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	}
+	ky := func(name string) *unstructured.Unstructured {
+		return &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "kyverno.io/v1", "kind": "ClusterPolicy", "metadata": map[string]any{"name": name}}}
+	}
+	ctx := context.Background()
+
+	r := newRig(t, vap("tiphys-restart-only"))
+	r.allow(connectorOnly)
+	if p, _ := r.Probe(ctx, "c1"); p.PodDeleteReady || r.clusters["c1"].podDeleteReady.Load() {
+		t.Fatalf("pod delete ready without the policy: %+v", p)
+	}
+	r = newRig(t, vap("tiphys-restart-only"), vap("tiphys-pod-delete-only"))
+	r.allow(connectorOnly)
+	if p, _ := r.Probe(ctx, "c1"); !p.PodDeleteReady || !r.clusters["c1"].podDeleteReady.Load() {
+		t.Fatalf("vap policy not detected: %+v", p)
+	}
+	r = newRig(t)
+	r.dyn.Tracker().Add(ky("tiphys-restart-only"))
+	r.dyn.Tracker().Add(ky("tiphys-pod-delete-only"))
+	r.allow(connectorOnly)
+	if p, _ := r.Probe(ctx, "c1"); p.AdmissionMode != domain.AdmissionKyverno || !p.PodDeleteReady {
+		t.Fatalf("kyverno policy not detected: %+v", p)
 	}
 }
 

@@ -28,6 +28,14 @@ admission:
   # Kyverno validationFailureAction: Enforce or Audit.
   kyvernoAction: Enforce
 
+# Pod delete (the portal's Delete pod, authorized as restart): tiphys:user
+# may delete pods, and the tiphys-pod-delete-only admission policy allows
+# only pods controlled by a ReplicaSet, StatefulSet or DaemonSet, which their
+# controller replaces. The portal offers it only where it finds that policy,
+# so admission.mode none leaves it off.
+podDelete:
+  enabled: true
+
 # Debug containers (the portal's Debug button, DEBUG_IMAGE): tiphys:user may
 # add an ephemeral container to a pod, and the tiphys-debug-only admission
 # policy allows only the pinned image running `sleep <seconds>` with no env,

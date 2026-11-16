@@ -5,12 +5,12 @@ Contract between `web/` and the Go portal. The frontend is served by the portal 
 ## Conventions
 
 - Base path `/api/v1`, JSON, `camelCase`. Timestamps are RFC 3339 UTC strings (`"2026-10-20T10:12:00Z"`). Durations are integer seconds unless named `...Minutes`.
-- Auth: HttpOnly session cookie `tiphys_session` (set by `/auth/callback`). The browser never sees Keycloak tokens.
-- CSRF: every non-GET request (and WebSocket upgrade) must send `X-CSRF-Token: <csrfToken from GET /me>`. Rate limit: 30 non-stream actions per user per minute → `429`.
+- Auth: HttpOnly session cookie `tiphys_session` (set by `/auth/callback`). The browser never sees Keycloak tokens. Or an **API token** (see [API tokens](#api-tokens)): `Authorization: Bearer tph_…`, accepted only on the token routes listed there.
+- CSRF: every non-GET request (and WebSocket upgrade) must send `X-CSRF-Token: <csrfToken from GET /me>`; requests with an API token need none. Rate limit: 30 non-stream actions per user (or token) per minute → `429`.
 - Errors: HTTP status + body `{"error": {"code": string, "message": string, "details"?: object}}`.
   - `401 unauthenticated` → frontend redirects to `/auth/login?next=<path>`, or to the login page `/login?next=<path>` when `GET /auth/options` says `localLogin`.
   - `403 denied` → authorization decision; `details` is a `DecisionInfo` (below), so the UI can show the reason, `reopensAt` and `closesAt`.
-  - `403 forbidden_role` → role does not allow the endpoint. `403 break_glass_disabled` → break-glass is turned off in the settings. `409 break_glass_approval_required` → `POST /break-glass` in mode `approval`: request it instead. `409 auto_sync_enabled` → a rollback of an app that syncs automatically (Argo CD refuses it). `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
+  - `403 forbidden_role` → role does not allow the endpoint. `403 token_not_allowed` → an API token on a route outside the token routes; `403 missing_permission` (`details.permission`) → the token lacks the permission. `403 break_glass_disabled` → break-glass is turned off in the settings. `409 break_glass_approval_required` → `POST /break-glass` in mode `approval`: request it instead. `409 auto_sync_enabled` → a rollback of an app that syncs automatically (Argo CD refuses it). `404 not_found`. `409 conflict` (`409 last_admin` when a change would leave no active admin). `422 invalid` (`details.fields?: Record<string,string>`). `429 rate_limited`. `502 cluster_error` (cluster unreachable/forbidden). `502 argo_error` (Argo CD unreachable or refused a sync). `503 recording_unavailable` (exec refused because MinIO is down).
 - Health: `GET /healthz`, `GET /readyz` (no auth). Metrics are on a separate port.
 - Lists are returned as plain arrays unless stated (audit uses a cursor).
 
@@ -88,9 +88,10 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | GET | `/clusters/{c}/namespaces/{ns}/apps` | `NamespaceApp[]` — Argo CD applications deploying to the namespace (destination or any resource there), from the Argo cache (≤60 s old). Same check as listing the namespace; 403 otherwise. |
 | GET | `/clusters/{c}/namespaces/{ns}/cronjobs` | `CronJobSummary[]` incl. recent jobs (user needs `run-job` or `logs` on at least one CronJob; list is filtered to allowed ones) |
 | POST | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/restart` | 202 `{ operationId }` (needs `restart`; not for CronJob) |
+| DELETE | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}` | 204. Deletes one pod of the workload for its controller to replace (needs `restart`; 422 for CronJob). 403 `pod_not_in_workload`; 409 `conflict` when the pod was replaced in between; 409 `pod_delete_unavailable` on a cluster without the chart's `tiphys-pod-delete-only` policy. Audited as `pod.delete` (started, then the outcome) with the pod. |
 | POST | `/clusters/{c}/namespaces/{ns}/cronjobs/{name}/run` | 202 `{ operationId, jobName }` (needs `run-job`); 409 `already_running` when `concurrencyPolicy: Forbid` and a job is active |
 | POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync` | 202 `{ operationId }`. Syncs an Argo CD application that deploys to the namespace (404 otherwise) to its target revision, always without prune, dry run or a chosen revision; the user is named in the operation's info. Needs `sync` on **every** namespace the app deploys to (destination and resources) and a fresh Argo cache; an app with other cluster-scoped resources needs an admin (`app_scope`), unless their kinds are in `settings.argoSyncClusterKinds`; the `argo.sync` details then name them (`clusterResources`). 403 names the denying namespace in the audit event. 409 `already_running` when Argo CD has another operation running; 502 `argo_error` when Argo CD fails. Audited as `argo.sync` (started, then the outcome). |
-| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/status` | `ArgoAppStatus`: health and sync (with messages), `status.conditions` and the last operation with its per-resource results, read from Argo CD on each call. Same check as listing the namespace's apps (checked before the app is looked up, so 404 reveals nothing); 502 `argo_error`. |
+| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/status` | `ArgoAppStatus`: health and sync (with messages), `status.conditions`, the resources Argo CD does not assess as Healthy (`unhealthy`, each with its health message) and the last operation with its per-resource results, read from Argo CD on each call. Same check as listing the namespace's apps (checked before the app is looked up, so 404 reveals nothing); 502 `argo_error`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history` | `ArgoDeploy[]`: the last 10 deploys of `status.history`, newest first, each with its commit (author, message) when Argo CD can describe the revision (Git, single source), `portalUser`/`portalAction` (`argo.sync` or `argo.rollback`) when the audit shows it was started through the portal (matched by the operation's `startedAt`; Argo CD's `initiatedBy` is then the token's account), and `rollbackBlocked`: `current`, `auto_sync`, `multi_source`, `source_changed` (the deploy's source differs from the app's current one but for `targetRevision`) or null. Same check as `status`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | `ArgoRollbackPlan`: what rolling back to deploy `id` would do. Reads the manifests of the app's current source at the deploy's revision from Argo CD (`applications, get`) and places them with the cluster's discovery (as `tiphys:user`): a namespaced object without a namespace goes to the destination, a kind the cluster does not serve counts as cluster-scoped. Needs `rollback` on the app as it is now (a denial is audited); the plan's own decision is not audited. 409 `auto_sync_enabled`; 422 for a deploy not in the history, the current one, a multi-source app or a changed source; 502 `argo_error` / `cluster_error`. |
 | POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | 202 `{ operationId }`. Rolls the app back to deploy `id`, like Rollback in Argo CD, always without prune or dry run. Allowed only when the plan's decision is (`rollback` on every namespace of the app and of the revision, a fresh Argo cache, `app_scope` for cluster-scoped resources of either). Argo CD's rollback request carries no info, so the user is named only in the audit: `argo.rollback` (started, with `historyId`, `revision`, `namespaces`, `clusterResources`; then the outcome with `operationStartedAt`). Same errors as the plan, plus 409 `already_running`. Progress on `/operations/{id}/stream` like a sync. The app is then OutOfSync with Git until the next sync. |
@@ -159,6 +160,7 @@ interface WorkloadDetail extends WorkloadSummary {
   strategy: string; updated: number; available: number;
   images: string[]; createdAt: string; lastRolloutAt: string | null;
   cronJobCount: number;
+  podDelete: boolean;  // the cluster's privilege check found tiphys-pod-delete-only and the kind is not CronJob: offer Delete pod
 }
 
 interface Pod {
@@ -227,7 +229,7 @@ A rollout is a new revision of the workload (Deployment revision, StatefulSet up
 Authenticated by the session cookie; the server checks `Origin` equals the portal's origin and the `csrf` query parameter equals the CSRF token (browsers cannot set headers on WebSockets): `?csrf=<csrfToken>`. Paths:
 
 - Logs: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/logs/stream?container=&previous=&follow=true&tailLines=100&sinceSeconds=&timestamps=`
-- Exec: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/exec?container=&shell=/bin/sh&cols=80&rows=24`
+- Exec: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/exec?container=&shell=/bin/sh&cols=80&rows=24` — `shell` is `/bin/sh` (default) or `/bin/bash`, which falls back to `/bin/sh` in containers without bash (the UI's default).
 - Debug: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/debug?container=&shell=/bin/sh&cols=80&rows=24` — exec in a new debug container (`DEBUG_IMAGE`) that shares `container`'s processes and the pod's network. Needs the `exec` action and is an exec session in every other way (recorded, re-evaluated, same limits). Registered only when `me.settings.debugEnabled`. The upgrade waits until the container runs (up to 45 s).
 - Live watch (admin/auditor, read-only): `GET /api/v1/sessions/{id}/watch`
 
@@ -397,6 +399,18 @@ interface SettingsView {
   lokiRetentionInfo: string | null;   // informational only
   argoSyncClusterKinds: string[];     // cluster-scoped kinds ("Kind.group", ≤50) that do not leave an app's sync to admins; core kinds, rbac/admissionregistration/apiextensions/apiregistration groups, StorageClass and PriorityClass are refused (422). Optional on PUT: left out, it is kept.
 }
+type ApiPermission =
+  | 'time_windows:read' | 'time_windows:create' | 'time_windows:update' | 'time_windows:delete'
+  | 'holidays:read' | 'holidays:create' | 'holidays:update' | 'holidays:delete'
+  | 'settings:read' | 'settings.break_glass:write' | 'settings.exec:write' | 'settings.retention:write' | 'settings.notifications:write';
+interface ApiTokenView {
+  id: number; name: string; description: string; prefix: string /* "tph_" + 8 characters, to recognize it */;
+  permissions: ApiPermission[]; createdBy: string; createdAt: string; expiresAt: string | null /* null: never */;
+  lastUsedAt: string | null /* updated at most once a minute */; revokedAt: string | null; revokedBy: string;
+  status: 'active' | 'expired' | 'revoked';
+  token?: string; // only in the POST response
+}
+interface ApiTokenInput { name: string; description?: string; permissions: ApiPermission[]; expiresAt?: string | null }
 interface DecisionExplain extends DecisionInfo { cluster: string; namespace: string; workload: string | null; action: Action; evaluatedAt: string; userRole: Role; teams: string[]; matchedGrants: GrantView[] }
 ```
 
@@ -431,5 +445,30 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | GET | `/admin/argo` | `{ fetchedAt, ageSeconds, stale, appCount, projectCount, lastError }` |
 | POST | `/admin/argo/refresh` | refresh now |
 | GET / PUT | `/admin/settings` | `SettingsView` |
+| PATCH | `/admin/settings` | Changes only the fields sent (`SettingsView` without `lokiRetentionInfo` and `argoSyncClusterKinds`, every field optional, `rocket.*` too; `rocket.events` changes only the events listed) → `SettingsView`. Unknown fields are refused (422), as is an empty body. For API tokens, see below. |
 | POST | `/admin/settings/rocket/test` | sends a test message |
+| GET / POST | `/admin/api-tokens` | `ApiTokenView[]`, newest first, revoked ones included. POST (admin session only, never a token) `ApiTokenInput` → 201 `ApiTokenView` with `token`, the only time the value is shown. 422 on `name` (required, ≤ 64 characters, unique among tokens not revoked), `permissions` (at least one, from the catalog) or `expiresAt` (future). Audited as `admin.change` (`entity: api_token`, `operation: create`), without the value. |
+| POST | `/admin/api-tokens/{id}/revoke` | 204; the token fails at once. 409 if already revoked. Tokens cannot be edited: revoke and create another. |
 | GET | `/admin/overview` | `{ activeExecSessions, openLogStreams, pendingRequests, pendingBreakGlassRequests, activeBreakGlasses, clustersUnreachable }` for badges (`pendingRequests` counts a batch once) |
+
+## API tokens
+
+Service accounts that change configuration from scripts and pipelines. An admin creates one on the Settings page (or `POST /admin/api-tokens`) with a set of permissions and an optional expiry; the value (`tph_` + 43 characters) is shown once and only its SHA-256 is stored. A token is not a user: it has no role, uses no grants, and reaches only these routes (any other → `403 token_not_allowed`):
+
+| Method | Path | Permission |
+| --- | --- | --- |
+| GET | `/admin/time-windows` | `time_windows:read` |
+| POST | `/admin/time-windows` | `time_windows:create` |
+| PUT | `/admin/time-windows/{id}` | `time_windows:update` |
+| DELETE | `/admin/time-windows/{id}` | `time_windows:delete` |
+| GET | `/admin/holidays` | `holidays:read` |
+| POST / PUT / DELETE | `/admin/holidays`, `/admin/holidays/{id}` | `holidays:create` / `:update` / `:delete` |
+| GET | `/admin/settings` | `settings:read` (the webhook URL is masked) |
+| PATCH | `/admin/settings` | the write permission of every section the body touches: `settings.break_glass:write` (`breakGlassMode`, `breakGlassDefaultMinutes`, `breakGlassMaxMinutes`, `breakGlassRequestMaxAgeMinutes`), `settings.exec:write` (`execMaxSessionMinutes`, `execIdleTimeoutMinutes`), `settings.retention:write` (`retention*Days`), `settings.notifications:write` (`rocket`) |
+
+A token without the permission gets `403 missing_permission`; a revoked, expired or unknown token `401`. Its changes are audited as `admin.change` with username `token:<name>`, no user ID and `details.tokenId`.
+
+```sh
+curl -X PATCH -H "Authorization: Bearer $TIPHYS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"breakGlassMode":"approval"}' https://tiphys.example.com/api/v1/admin/settings
+```

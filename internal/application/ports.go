@@ -48,6 +48,7 @@ type Repositories struct {
 	Audit        AuditRepository
 	Settings     SettingsRepository
 	WebSessions  WebSessionRepository
+	APITokens    APITokenRepository
 }
 
 // AuditRetention deletes audit rows past retention. It is a separate port
@@ -287,6 +288,17 @@ type WebSessionRepository interface {
 	ListRefreshDue(ctx context.Context, before time.Time) ([]WebSession, error)
 }
 
+type APITokenRepository interface {
+	// Create stores the token with the sha256 hex of its value.
+	Create(ctx context.Context, t domain.APIToken, hash string) (domain.APIToken, error)
+	Get(ctx context.Context, id int64) (domain.APIToken, error)
+	GetByHash(ctx context.Context, hash string) (domain.APIToken, error)
+	// List returns every token, revoked ones included, newest first.
+	List(ctx context.Context) ([]domain.APIToken, error)
+	Revoke(ctx context.Context, id int64, at time.Time, by string) error
+	TouchLastUsed(ctx context.Context, id int64, at time.Time) error
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------
@@ -392,6 +404,14 @@ type ArgoAppDetails struct {
 	AutoSync              bool                 // spec.syncPolicy.automated is enabled
 	MultiSource           bool                 // spec.sources
 	Resources             []ArgoResourceRef    // status.resources
+	Unhealthy             []ArgoResourceHealth // status.resources with a health other than Healthy
+}
+
+// ArgoResourceHealth is a resource's health as Argo CD assesses it, e.g.
+// Degraded with "Deployment ... exceeded its progress deadline".
+type ArgoResourceHealth struct {
+	ArgoResourceRef
+	Health, Message string
 }
 
 type ArgoCondition struct {
@@ -663,19 +683,23 @@ type ClusterProbe struct {
 	// DebugReady is true when the chart's tiphys-debug-only policy is
 	// installed; debug containers are refused on the cluster otherwise.
 	DebugReady bool
+	// PodDeleteReady is true when the chart's tiphys-pod-delete-only policy
+	// is installed; deleting pods is refused on the cluster otherwise.
+	PodDeleteReady bool
 }
 
 // Sentinel errors from ClusterAccess.
 var (
-	ErrProtectedNamespace = errors.New("namespace is protected")
-	ErrPodNotInWorkload   = errors.New("pod does not belong to the workload")
-	ErrInvalidName        = errors.New("invalid name")
-	ErrClusterUnknown     = errors.New("cluster not registered")
-	ErrClusterUnusable    = errors.New("cluster is unreachable or over-privileged")
-	ErrAlreadyRunning     = errors.New("a job of this cronjob is already running")
-	ErrSyncInProgress     = errors.New("an operation on this application is already in progress")
-	ErrAutoSyncEnabled    = errors.New("the application syncs automatically, so it cannot be rolled back")
-	ErrDebugUnavailable   = errors.New("debug containers are not enabled on this cluster")
+	ErrProtectedNamespace   = errors.New("namespace is protected")
+	ErrPodNotInWorkload     = errors.New("pod does not belong to the workload")
+	ErrInvalidName          = errors.New("invalid name")
+	ErrClusterUnknown       = errors.New("cluster not registered")
+	ErrClusterUnusable      = errors.New("cluster is unreachable or over-privileged")
+	ErrAlreadyRunning       = errors.New("a job of this cronjob is already running")
+	ErrSyncInProgress       = errors.New("an operation on this application is already in progress")
+	ErrAutoSyncEnabled      = errors.New("the application syncs automatically, so it cannot be rolled back")
+	ErrDebugUnavailable     = errors.New("debug containers are not enabled on this cluster")
+	ErrPodDeleteUnavailable = errors.New("deleting pods is not set up on this cluster")
 )
 
 // DebugError is returned when the cluster refused or could not start a debug
@@ -723,6 +747,12 @@ type ClusterAccess interface {
 	Debug(ctx context.Context, actor KubeActor, w KubeWorkloadTarget, pod string, spec KubeDebugSpec, shell string, cols, rows uint16) (ExecStream, error)
 	// Restart patches the workload (restartedAt annotation or spec.restartAt).
 	Restart(ctx context.Context, actor KubeActor, w KubeWorkloadTarget) error
+	// DeletePod verifies the pod's owner chain and deletes exactly that pod
+	// (UID precondition, its own grace period) for its controller to
+	// replace. ErrPodDeleteUnavailable when the cluster lacks the
+	// tiphys-pod-delete-only policy; ErrConflict when the pod was replaced
+	// in between.
+	DeletePod(ctx context.Context, actor KubeActor, w KubeWorkloadTarget, pod string) error
 	// WatchRollout emits status until complete, failed, ctx done or the
 	// deadline passes; the channel is closed at the end.
 	WatchRollout(ctx context.Context, actor KubeActor, w KubeWorkloadTarget, deadline time.Duration) (<-chan RolloutStatus, error)
@@ -756,6 +786,9 @@ type ClusterAccess interface {
 	// SetUsable marks a cluster as usable or not (privilege check result);
 	// unusable clusters refuse every verb with ErrClusterUnusable.
 	SetUsable(cluster string, usable bool)
+	// PodDeleteReady reports whether the cluster's last privilege check found
+	// the tiphys-pod-delete-only policy (DeletePod refuses otherwise).
+	PodDeleteReady(cluster string) bool
 }
 
 // CredentialStore keeps cluster kubeconfigs as Secrets in the management

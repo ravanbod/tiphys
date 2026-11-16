@@ -8,6 +8,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "tiphys.user" -}}tiphys:user{{- end -}}
 {{- define "tiphys.group" -}}tiphys:users{{- end -}}
 
+{{/* Non-empty when pod delete is on: it needs an admission policy. */}}
+{{- define "tiphys.podDelete" -}}
+{{- if and .Values.podDelete.enabled (ne .Values.admission.mode "none") -}}true{{- end -}}
+{{- end -}}
+
 {{/* Fails the render when debug is on without what makes it safe. */}}
 {{- define "tiphys.debugChecked" -}}
 {{- if .Values.debug.enabled -}}

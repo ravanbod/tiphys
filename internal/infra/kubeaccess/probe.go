@@ -17,9 +17,10 @@ import (
 )
 
 const (
-	policyPrefix = "tiphys-"
-	debugPolicy  = "tiphys-debug-only"
-	probeTimeout = 10 * time.Second
+	policyPrefix    = "tiphys-"
+	debugPolicy     = "tiphys-debug-only"
+	podDeletePolicy = "tiphys-pod-delete-only"
+	probeTimeout    = 10 * time.Second
 )
 
 var kyvernoClusterPolicies = schema.GroupVersionResource{Group: "kyverno.io", Version: "v1", Resource: "clusterpolicies"}
@@ -43,6 +44,7 @@ var mustDeny = []privilegeCheck{
 	{authv1.ResourceAttributes{Verb: "create", Resource: "pods"}, "can create Pods in any namespace"},
 	{authv1.ResourceAttributes{Verb: "create", Resource: "pods", Namespace: "kube-system"}, "can create Pods in kube-system"},
 	{authv1.ResourceAttributes{Verb: "create", Resource: "pods", Namespace: "default"}, "can create Pods in default"},
+	{authv1.ResourceAttributes{Verb: "delete", Resource: "pods"}, "can delete Pods in any namespace"},
 	{authv1.ResourceAttributes{Verb: "update", Resource: "pods", Subresource: "ephemeralcontainers"}, "can add ephemeral containers to Pods in any namespace"},
 	{authv1.ResourceAttributes{Verb: "impersonate", Resource: "users", Name: "system:admin"}, "can impersonate user system:admin"},
 	{authv1.ResourceAttributes{Verb: "impersonate", Resource: "groups", Name: "system:masters"}, "can impersonate group system:masters"},
@@ -100,6 +102,7 @@ func (r *Registry) probeEntry(ctx context.Context, e *clusterEntry) (application
 	if err == nil {
 		e.privilegeOK.Store(p.PrivilegeOK)
 		e.debugReady.Store(p.DebugReady)
+		e.podDeleteReady.Store(p.PodDeleteReady)
 	}
 	return p, err
 }
@@ -118,7 +121,7 @@ func (r *Registry) probeConfig(ctx context.Context, base *rest.Config) (applicat
 		return application.ClusterProbe{}, err
 	}
 	p.PrivilegeOK = len(p.Violations) == 0
-	p.AdmissionMode, p.DebugReady = detectAdmission(ctx, c)
+	p.AdmissionMode, p.DebugReady, p.PodDeleteReady = detectAdmission(ctx, c)
 	return p, nil
 }
 
@@ -182,31 +185,35 @@ func review(ctx context.Context, c *clients, attrs authv1.ResourceAttributes) (b
 
 // detectAdmission looks for the chart's policies by name. Any error (the API
 // is not served, RBAC forbids the read) means none. debugReady reports whether
-// the debug policy is installed; it exists only as a VAP.
-func detectAdmission(ctx context.Context, c *clients) (mode domain.AdmissionMode, debugReady bool) {
+// the debug policy is installed (it exists only as a VAP), podDeleteReady
+// whether the pod delete policy is.
+func detectAdmission(ctx context.Context, c *clients) (mode domain.AdmissionMode, debugReady, podDeleteReady bool) {
 	if l, err := c.kube.AdmissionregistrationV1().ValidatingAdmissionPolicies().List(ctx, metav1.ListOptions{}); err == nil {
 		names := make([]string, len(l.Items))
 		for i, p := range l.Items {
 			names[i] = p.Name
 		}
-		if found, debug := chartPolicies(names); found {
-			return domain.AdmissionVAP, debug
+		if found, debug, podDelete := chartPolicies(names); found {
+			return domain.AdmissionVAP, debug, podDelete
 		}
 	}
 	if l, err := c.dyn.Resource(kyvernoClusterPolicies).List(ctx, metav1.ListOptions{}); err == nil {
-		for _, p := range l.Items {
-			if strings.HasPrefix(p.GetName(), policyPrefix) {
-				return domain.AdmissionKyverno, false
-			}
+		names := make([]string, len(l.Items))
+		for i, p := range l.Items {
+			names[i] = p.GetName()
+		}
+		if found, _, podDelete := chartPolicies(names); found {
+			return domain.AdmissionKyverno, false, podDelete
 		}
 	}
-	return domain.AdmissionNone, false
+	return domain.AdmissionNone, false, false
 }
 
-func chartPolicies(names []string) (found, debug bool) {
+func chartPolicies(names []string) (found, debug, podDelete bool) {
 	for _, n := range names {
 		found = found || strings.HasPrefix(n, policyPrefix)
 		debug = debug || n == debugPolicy
+		podDelete = podDelete || n == podDeletePolicy
 	}
-	return found, debug
+	return found, debug, podDelete
 }

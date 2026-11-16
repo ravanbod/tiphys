@@ -57,6 +57,7 @@ Secrets (passwords, DSNs) come from mounted Kubernetes Secrets; never put them i
 - `clusters.protected` (migration 00006) mirrors the cluster Secret's `tiphys/protected` annotation: the cluster is hidden from access requests, grants on it still work.
 - `audit_events` has no foreign keys, so the trail is independent of the rows it mentions. `at` defaults to `now()`; `List` orders by `id` descending (keyset pagination with `BeforeID`), default limit 50, maximum 1000.
 - `web_sessions`: `id` is the SHA-256 hex of the cookie value; token columns hold whatever the caller passes (already sealed).
+- `api_tokens` (migration 00013): `token_hash` is the SHA-256 hex of the value, which is never stored; `prefix` is its first 12 characters for display. `permissions` is a `TEXT[]` of `domain.Permission` values, checked by the application. A partial unique index allows one token per `lower(name)` that is not revoked. Revoking sets `revoked_at`/`revoked_by`; rows are never deleted.
 - `settings`: one row per key (`exec.max_session_minutes`, `exec.idle_timeout_minutes`, `break_glass.mode`, `break_glass.enabled`, `break_glass.default_minutes`, `break_glass.max_minutes`, `break_glass.request_max_age_minutes`, `retention.audit_days`, `retention.recordings_days`, `rocket`), JSONB values. Missing keys read as `domain.DefaultSettings()`. `break_glass.enabled` is the mode as the release before migration 7 read it: written as `mode != off`, and read only when `break_glass.mode` is missing (`false` → `off`, otherwise `self`).
 
 ## Tests

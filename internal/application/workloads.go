@@ -101,6 +101,9 @@ type WorkloadDetailView struct {
 	WorkloadView
 	ArgoApp      string
 	CronJobCount int
+	// PodDelete: the cluster allows deleting the workload's pods (it has the
+	// tiphys-pod-delete-only policy and the kind has replaceable pods).
+	PodDelete bool
 }
 
 // CronJobView is a CronJob with its recent jobs.
@@ -257,7 +260,8 @@ func (s *WorkloadService) kubeErr(cluster string, err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, ErrProtectedNamespace), errors.Is(err, ErrPodNotInWorkload), errors.Is(err, ErrInvalidName),
-		errors.Is(err, ErrAlreadyRunning), errors.Is(err, ErrNotFound), errors.Is(err, context.Canceled):
+		errors.Is(err, ErrAlreadyRunning), errors.Is(err, ErrNotFound), errors.Is(err, context.Canceled),
+		errors.Is(err, ErrPodDeleteUnavailable), errors.Is(err, ErrConflict):
 		return err
 	}
 	return &ClusterError{Cluster: cluster, Err: err}
@@ -387,6 +391,7 @@ func (s *WorkloadService) Workload(ctx context.Context, p Principal, cluster, ns
 	}
 	info.Namespace = ns
 	d := WorkloadDetailView{WorkloadView: WorkloadView{Info: info, Cluster: cluster, Environment: s.access.Environment(cluster, ns), Access: am}}
+	d.PodDelete = ref.Kind.Restartable() && s.kube.PodDeleteReady(cluster)
 	if apps := s.argo.AppsFor(cluster, ns); len(apps) > 0 {
 		d.ArgoApp = apps[0].Name
 	}
@@ -536,6 +541,33 @@ func (s *WorkloadService) Restart(ctx context.Context, p Principal, cluster, ns 
 	op := s.ops.Create(p.User.ID, s.clock.Now())
 	go s.followRollout(op, actor, kt, started)
 	return OperationStarted{OperationID: op.ID}, nil
+}
+
+// DeletePod deletes one pod of a workload for its controller to replace. It
+// needs restart: it is a restart of a single pod.
+func (s *WorkloadService) DeletePod(ctx context.Context, p Principal, cluster, ns string, ref domain.WorkloadRef, pod string) error {
+	if err := validateNames(ns, ref); err != nil {
+		return err
+	}
+	if !ref.Kind.Restartable() {
+		return Invalid("kind", "this kind has no pods to delete")
+	}
+	if !domain.ValidDNS1123Subdomain(pod) {
+		return Invalid("pod", "invalid pod name")
+	}
+	t := wlTarget(cluster, ns, ref)
+	t.Pod = pod
+	d, started, err := s.start(ctx, p, t, domain.ActionRestart, domain.EventPodDelete, nil)
+	if err != nil {
+		return err
+	}
+	kt := KubeWorkloadTarget{Cluster: cluster, Namespace: ns, Workload: ref}
+	if err := s.kube.DeletePod(ctx, p.KubeActor(d.BreakGlassID), kt, pod); err != nil {
+		s.outcome(started, domain.ResultFailed, err.Error(), map[string]any{"outcome": "failed"})
+		return s.kubeErr(cluster, err)
+	}
+	s.outcome(started, domain.ResultSucceeded, "", map[string]any{"outcome": "succeeded"})
+	return nil
 }
 
 func (s *WorkloadService) followRollout(op *Operation, actor KubeActor, kt KubeWorkloadTarget, started domain.AuditEvent) {

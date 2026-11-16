@@ -1,7 +1,7 @@
 import { del, get, patch, post, put, request, requestText } from './client';
 import { kindSegment, qs, seg } from './query';
 import type {
-  AccessCheckInput, AccessGrant, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
+  AccessCheckInput, AccessGrant, ApiTokenInput, ApiTokenView, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
   CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CreateAccessRequestBatch, CronJobSummary, DecisionExplain,
   EnvironmentOverride, EnvironmentOverrideInput, ExecSessionDetail, ExecSessionView, GrantFilters, GrantInput,
   GrantView, HolidayInput, HolidayView, K8sEvent, ManagedTeamView, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
@@ -71,6 +71,7 @@ export const api = {
   cronJobs: (cluster: string, ns: string) =>
     get<CronJobSummary[]>(`/clusters/${seg(cluster)}/namespaces/${seg(ns)}/cronjobs`),
   restart: (r: WorkloadRef) => post<{ operationId: string }>(`${workloadPath(r)}/restart`),
+  deletePod: (r: WorkloadRef, pod: string) => del<void>(`${workloadPath(r)}/pods/${seg(pod)}`),
   runCronJob: (cluster: string, ns: string, name: string) =>
     post<{ operationId: string; jobName: string }>(
       `/clusters/${seg(cluster)}/namespaces/${seg(ns)}/cronjobs/${seg(name)}/run`,
@@ -172,5 +173,8 @@ export const api = {
   settings: () => get<SettingsView>('/admin/settings'),
   saveSettings: (b: SettingsView) => put<SettingsView>('/admin/settings', b),
   testRocket: () => post<void>('/admin/settings/rocket/test'),
+  apiTokens: () => get<ApiTokenView[]>('/admin/api-tokens'),
+  createApiToken: (b: ApiTokenInput) => post<ApiTokenView>('/admin/api-tokens', b),
+  revokeApiToken: (id: number) => post<void>(`/admin/api-tokens/${id}/revoke`),
   overview: () => get<AdminOverview>('/admin/overview'),
 };

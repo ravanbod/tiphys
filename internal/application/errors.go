@@ -39,6 +39,11 @@ func (e *DeniedError) Error() string {
 	return fmt.Sprintf("denied: %s", e.Decision.Reason)
 }
 
+// PermissionError is returned when an API token lacks the permission.
+type PermissionError struct{ Permission domain.Permission }
+
+func (e *PermissionError) Error() string { return fmt.Sprintf("the token lacks %s", e.Permission) }
+
 // InvalidError is a request validation failure.
 type InvalidError struct {
 	Message string

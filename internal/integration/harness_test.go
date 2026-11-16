@@ -465,6 +465,8 @@ type client struct {
 	token  string
 	csrf   string
 	userID int64
+	// bearer, when set, is an API token sent instead of the cookie and CSRF.
+	bearer string
 }
 
 // login creates a web session for the user and returns an API client.
@@ -499,8 +501,12 @@ func (c *client) do(method, path string, body any) (int, map[string]any, []byte)
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, c.e.srv.URL+path, rd)
-	req.AddCookie(&http.Cookie{Name: "tiphys_session", Value: c.token})
-	req.Header.Set("X-CSRF-Token", c.csrf)
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	} else {
+		req.AddCookie(&http.Cookie{Name: "tiphys_session", Value: c.token})
+		req.Header.Set("X-CSRF-Token", c.csrf)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

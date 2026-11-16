@@ -19,11 +19,14 @@ import (
 type fakeKube struct {
 	mu       sync.Mutex
 	restarts []string
-	jobs     []string
-	execs    []*fakeExec
-	debugs   []application.KubeDebugSpec
-	actors   []application.KubeActor
-	watches  []*fakeWatch
+	deletes  []string
+	// noPodDelete: the clusters lack the tiphys-pod-delete-only policy.
+	noPodDelete bool
+	jobs        []string
+	execs       []*fakeExec
+	debugs      []application.KubeDebugSpec
+	actors      []application.KubeActor
+	watches     []*fakeWatch
 }
 
 type fakeWatch struct {
@@ -196,6 +199,20 @@ func (k *fakeKube) Restart(_ context.Context, a application.KubeActor, w applica
 	return nil
 }
 
+func (k *fakeKube) DeletePod(_ context.Context, a application.KubeActor, w application.KubeWorkloadTarget, pod string) error {
+	k.record(a)
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.noPodDelete {
+		return application.ErrPodDeleteUnavailable
+	}
+	if pod != k.podFor(w) {
+		return application.ErrPodNotInWorkload
+	}
+	k.deletes = append(k.deletes, pod)
+	return nil
+}
+
 func (k *fakeKube) WatchRollout(context.Context, application.KubeActor, application.KubeWorkloadTarget, time.Duration) (<-chan application.RolloutStatus, error) {
 	ch := make(chan application.RolloutStatus, 2)
 	ch <- application.RolloutStatus{Desired: 3, Updated: 1, Ready: 2, Available: 2}
@@ -277,3 +294,8 @@ func (k *fakeKube) Probe(context.Context, string) (application.ClusterProbe, err
 func (k *fakeKube) Version(context.Context, string) (string, error) { return "v1.31.0", nil }
 func (k *fakeKube) Registered() []string                            { return []string{"prod-1", "stg-1"} }
 func (k *fakeKube) SetUsable(string, bool)                          {}
+func (k *fakeKube) PodDeleteReady(string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return !k.noPodDelete
+}

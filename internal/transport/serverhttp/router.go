@@ -10,6 +10,21 @@ import (
 	"tiphys/internal/domain"
 )
 
+// tokenRoutes are the only routes an API token reaches ("METHOD path");
+// the services check the token's permissions.
+var tokenRoutes = map[string]bool{
+	"GET /api/v1/admin/time-windows":        true,
+	"POST /api/v1/admin/time-windows":       true,
+	"PUT /api/v1/admin/time-windows/:id":    true,
+	"DELETE /api/v1/admin/time-windows/:id": true,
+	"GET /api/v1/admin/holidays":            true,
+	"POST /api/v1/admin/holidays":           true,
+	"PUT /api/v1/admin/holidays/:id":        true,
+	"DELETE /api/v1/admin/holidays/:id":     true,
+	"GET /api/v1/admin/settings":            true,
+	"PATCH /api/v1/admin/settings":          true,
+}
+
 // NewRouter wires every route. Authorization lives in the application
 // services; the router only enforces login, CSRF, rate limits and roles.
 func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
@@ -60,6 +75,7 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api.GET(ns+"/workloads/:kind/:name/pods", user, h.Pods)
 	api.GET(ns+"/workloads/:kind/:name/events", user, h.Events)
 	api.POST(ns+"/workloads/:kind/:name/restart", user, h.Restart)
+	api.DELETE(ns+"/workloads/:kind/:name/pods/:pod", user, h.DeletePod)
 	api.GET(ns+"/workloads/:kind/:name/pods/:pod/logs/download", user, h.DownloadLogs)
 	api.GET(ns+"/access", user, h.WhoHasAccess)
 	api.GET(ns+"/events", user, h.NamespaceEvents)
@@ -161,6 +177,10 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	a.POST("/argo/refresh", h.AdminArgoRefresh)
 	a.GET("/settings", h.AdminSettings)
 	a.PUT("/settings", h.AdminUpdateSettings)
+	a.PATCH("/settings", h.AdminPatchSettings)
+	a.GET("/api-tokens", h.AdminAPITokens)
+	a.POST("/api-tokens", h.AdminCreateAPIToken)
+	a.POST("/api-tokens/:id/revoke", h.AdminRevokeAPIToken)
 	a.POST("/settings/rocket/test", h.AdminRocketTest)
 
 	r.NoRoute(h.staticHandler())

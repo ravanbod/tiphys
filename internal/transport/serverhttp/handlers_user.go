@@ -391,6 +391,19 @@ func (h *Handler) Restart(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"operationId": op.OperationID})
 }
 
+// DeletePod deletes one pod of the workload; its controller replaces it.
+func (h *Handler) DeletePod(c *gin.Context) {
+	ref, ok := h.workloadRef(c)
+	if !ok {
+		return
+	}
+	if err := h.svc.Workloads.DeletePod(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), ref, c.Param("pod")); err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (h *Handler) RunCronJob(c *gin.Context) {
 	op, err := h.svc.Workloads.RunCronJob(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("name"))
 	if err != nil {

@@ -45,7 +45,7 @@ export function ExecPage() {
   const podObj = pods.find((p) => p.name === pod);
   const containers = podObj ? podObj.containers.filter((c) => !c.init) : [];
   const [container, setContainer] = useState('');
-  const [shell, setShell] = useState<'/bin/sh' | '/bin/bash'>('/bin/sh');
+  const [shell, setShell] = useState<'/bin/sh' | '/bin/bash'>('/bin/bash');
   const [phase, setPhase] = useState<Phase>('connect');
   const [connecting, setConnecting] = useState(false);
   const [connectErr, setConnectErr] = useState<string | null>(null);
@@ -272,7 +272,7 @@ function ConnectDialog(p: {
         <div className="f">Run in<Seg label="Run in" style={{ alignSelf: 'flex-start' }} value={p.debug ? 'debug' : 'exec'} onChange={(v) => p.onDebug(v === 'debug')} options={[{ value: 'exec', label: 'The container' }, { value: 'debug', label: 'A debug container' }]} /></div>
       )}
       <label className="f">{p.debug ? 'Target container' : 'Container'}<Select label={p.debug ? 'Target container' : 'Container'} mono style={{ height: 30 }} value={p.container} onChange={p.onContainer} options={p.containers.map((c) => ({ value: c, label: c }))} /></label>
-      <div className="f">Shell<Seg label="Shell" style={{ alignSelf: 'flex-start' }} value={p.shell} onChange={p.onShell} options={[{ value: '/bin/sh', label: '/bin/sh', mono: true }, { value: '/bin/bash', label: '/bin/bash', mono: true }]} /></div>
+      <div className="f">Shell<Seg label="Shell" style={{ alignSelf: 'flex-start' }} value={p.shell} onChange={p.onShell} options={[{ value: '/bin/bash', label: '/bin/bash', mono: true }, { value: '/bin/sh', label: '/bin/sh', mono: true }]} /></div>
       {p.debug && (
         <div className="banner info">
           <span>A debug container with network tools is added to the pod. It sees the target container's processes and the pod's network, and stays in the pod until the pod is replaced.</span>

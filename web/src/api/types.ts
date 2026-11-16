@@ -161,6 +161,8 @@ export interface ArgoAppStatus {
       status: string; message: string; hookType: string; hookPhase: string; syncPhase: string;
     }[];
   } | null;
+  /** The app's resources whose health is not Healthy, with Argo CD's reason. */
+  unhealthy: (ArgoResourceRef & { health: string; message: string })[];
 }
 
 /** A deploy of an Argo CD application, newest first (GET .../history). */
@@ -256,6 +258,8 @@ export interface WorkloadDetail extends WorkloadSummary {
   createdAt: string;
   lastRolloutAt: string | null;
   cronJobCount: number;
+  /** The cluster has the tiphys-pod-delete-only policy and the kind has replaceable pods. */
+  podDelete: boolean;
 }
 
 export interface PodContainer {
@@ -711,6 +715,45 @@ export interface SettingsView {
   lokiRetentionInfo: string | null;
   /** Cluster-scoped kinds ("Kind.group") whose resources do not leave syncing an Argo CD app to admins. */
   argoSyncClusterKinds: string[];
+}
+/** What an API token may do (domain.AllPermissions). Tokens only change configuration. */
+export type ApiPermission =
+  | 'time_windows:read'
+  | 'time_windows:create'
+  | 'time_windows:update'
+  | 'time_windows:delete'
+  | 'holidays:read'
+  | 'holidays:create'
+  | 'holidays:update'
+  | 'holidays:delete'
+  | 'settings:read'
+  | 'settings.break_glass:write'
+  | 'settings.exec:write'
+  | 'settings.retention:write'
+  | 'settings.notifications:write';
+export interface ApiTokenView {
+  id: number;
+  name: string;
+  description: string;
+  /** The start of the value, to recognize it. */
+  prefix: string;
+  permissions: ApiPermission[];
+  createdBy: string;
+  createdAt: string;
+  /** null: never expires. */
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string;
+  status: 'active' | 'expired' | 'revoked';
+  /** The value, only in the response that created the token. */
+  token?: string;
+}
+export interface ApiTokenInput {
+  name: string;
+  description: string;
+  permissions: ApiPermission[];
+  expiresAt: string | null;
 }
 export interface DecisionExplain extends DecisionInfo {
   cluster: string;

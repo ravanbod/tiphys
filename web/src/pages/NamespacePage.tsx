@@ -174,10 +174,14 @@ function TabLink({ id, tab, children }: { id: Tab; tab: Tab; children: React.Rea
 function ArgoApps({ cluster, ns }: { cluster: string; ns: string }) {
   const { me } = useAuth();
   const now = useNow(30_000);
-  const apps = useApi(() => api.namespaceApps(cluster, ns), [cluster, ns, breakGlassKey(me)]);
+  // The live stream carries no Argo CD state: poll the server's cache (refreshed every 60 s).
+  const apps = useApi(() => api.namespaceApps(cluster, ns), [cluster, ns, breakGlassKey(me)], { poll: 30_000 });
   const [syncing, setSyncing] = useState<NamespaceApp | null>(null);
-  const [shown, setShown] = useState<NamespaceApp | null>(null);
+  const [shownKey, setShownKey] = useState('');
   if (!apps.data?.length) return null;
+  const appKey = (a: NamespaceApp) => `${a.appNamespace}/${a.name}`;
+  // Looked up in the polled list so the panel shows the current sync and health.
+  const shown = apps.data.find((a) => appKey(a) === shownKey);
   const base = me.settings.argoUrl;
   const link = (a: NamespaceApp) => `${base}/applications/${encodeURIComponent(a.appNamespace || 'argocd')}/${encodeURIComponent(a.name)}`;
   return (
@@ -191,10 +195,10 @@ function ArgoApps({ cluster, ns }: { cluster: string; ns: string }) {
           <thead><tr><th>Application</th><th>Project</th><th>Health</th><th>Sync</th><th>Last sync</th><th /></tr></thead>
           <tbody>
             {apps.data.map((a) => (
-              <tr key={`${a.appNamespace}/${a.name}`}>
+              <tr key={appKey(a)}>
                 <td>
                   <span className="row" style={{ gap: 6 }}>
-                    <button type="button" className="linklike blue mono" title="Status, history and changes" onClick={() => setShown(a)}><b style={{ fontWeight: 500 }}>{a.name}</b></button>
+                    <button type="button" className="linklike blue mono" title="Status, history and changes" onClick={() => setShownKey(appKey(a))}><b style={{ fontWeight: 500 }}>{a.name}</b></button>
                     {base && <a href={link(a)} target="_blank" rel="noreferrer" title="Open in Argo CD" aria-label={`Open ${a.name} in Argo CD`}><Icon name="ext" /></a>}
                   </span>
                 </td>
@@ -214,7 +218,7 @@ function ArgoApps({ cluster, ns }: { cluster: string; ns: string }) {
           </tbody>
         </table>
       </div>
-      {shown && <ArgoAppPanel app={shown} cluster={cluster} ns={ns} argoLink={base ? link(shown) : ''} onClose={() => setShown(null)} onChanged={apps.reload} />}
+      {shown && <ArgoAppPanel app={shown} cluster={cluster} ns={ns} argoLink={base ? link(shown) : ''} onClose={() => setShownKey('')} onChanged={apps.reload} />}
       {syncing && (
         <SyncAppDialog app={syncing} cluster={cluster} namespace={ns} onClose={(changed) => { setSyncing(null); if (changed) apps.reload(); }} />
       )}

@@ -82,259 +82,101 @@ Warn/Error. Every request-path line carries `requestid.Field(ctx)`.
 
 ## Behavior that isn't obvious from the code
 
+Details live in `spec.md` and `docs/`; these are the rules easy to break.
+
 - **Argo cache older than 15 minutes** → project-scoped grants stop matching
-  (reason `argo_stale`); namespace and workload grants are unaffected.
-- **Auditors work like users** (`Role.UsesGrants`): grants decide their
-  workload access, and they can request access and use break-glass; on top
-  they read audit, sessions and configuration. Only admins change
-  configuration and approve/reject requests. `/my/access` lists only the
-  caller's own requests (`AccessRequestService.ListOwn`).
-- **Cluster and environment grants** (admin only; access requests refuse them
-  with 422): `cluster` covers every namespace of a cluster, also later ones;
-  `environment` covers every namespace whose `Policy.Environment` (namespace
-  override → Argo project override → cluster label) matches, so it follows
-  label/override changes and ignores Argo staleness. `unlabeled` cannot be
-  granted; protected namespaces are never covered (migration 5).
-- **Approving adds to the same-scope grant**: `AccessRequestService.Approve`
-  adds the actions to the requester's own (never a team's; for a team's request,
-  the team's own) unexpired grant on
-  exactly the same scope (`Scope.Same`, workloads as a set) that ends no later
-  than the approved access, which then takes the new expiry (`mergeTarget`;
-  the longest such grant). A grant that outlasts it is left alone and a new
-  grant is created, so new actions never outlast what was approved; so does
-  `separate: true`. `web/src/lib/requestMerge.ts` mirrors the rule for the
-  admin's preview and the request form, which shows held actions as held.
-- **Break-glass** only overrides time windows and holidays; it is tagged on a
-  decision only when it actually overrode a closed window. The feature has a
-  mode (`Settings.BreakGlassMode`, Settings page, `me.settings.breakGlassMode`):
-  `self` (default) starts it without approval; `off` means `Start`/`Request`/
-  `Approve` return `ErrBreakGlassDisabled` (403 `break_glass_disabled`),
-  `PolicyService` attaches no break-glass to decisions (so active ones stop
-  overriding windows and open streams that depended on them end), and the UI hides
-  it; `approval` makes `Start` return 409 `break_glass_approval_required` and
-  users send a request instead (`BreakGlassService.Request`, table
-  `break_glass_requests`, one pending per user). An admin approves it on the
-  Access requests page, which creates an ordinary `break_glass` row starting
-  then, for the requested or the admin's duration (up to the maximum), audited
-  as `break_glass.start` by the admin with `owner`; or rejects it; the requester
-  may cancel. Pending requests expire after `BreakGlassRequestMaxAgeMin`
-  (default 60, `BreakGlassService.Run` every 30 s; reads already show them
-  expired).
-  **Scheduled break-glass**: `startsAt` on `Start`/`Request` (≤ 7 days ahead,
-  `MaxBreakGlassLead`; ≤ 1 min ahead counts as now) makes it an ordinary
-  `break_glass` row starting later; an approval starts it at `max(now,
-  startsAt)` and a scheduled request expires counting from `startsAt`
-  (migration 12). The policy snapshot holds the active **or next scheduled**
-  one per user (`ListCurrent`), so `Decide`/`closes_at` already see the start;
-  one active or scheduled per user (`checkNoCurrent`); `End` before the start
-  cancels it (`beforeStart`). The previous release ignores rows that have not
-  started. The old `break_glass.enabled` key is still written (`mode != off`)
-  for the previous release, which therefore lets users self-start during a
-  rollout overlap.
-- **Logs are never limited by time windows or holidays** (`Policy.timeClosed` and
-  `boundaries` return early for `logs`), so reading logs never needs break-glass,
-  with the feature on or off. Rules that still list `logs` are ignored and the UI
-  no longer offers it.
-- **Debug**: an exec session in a new ephemeral container
-  (`DEBUG_IMAGE`, e.g. netshoot pinned by digest) that `kubeaccess.Debug` adds
-  to the pod with `targetContainerName` = the chosen container, so it shares
-  its processes and the pod's network. It is authorized as `exec` (no own
-  action), recorded and re-evaluated like exec; `exec_sessions.debug_container`
-  and the `exec.start` details name the container. The container runs only
-  `sleep <max session + 1 min>` and is never removed (Kubernetes cannot); it
-  stays in the pod spec until the pod is replaced. Off when `DEBUG_IMAGE` is
-  empty (route not registered, `me.settings.debugEnabled` false) and on any
-  cluster whose privilege check did not find the chart's `tiphys-debug-only`
-  VAP (`debug.enabled`, VAP mode only), which admits only that exact container
-  shape for `tiphys:user`. The upgrade waits up to 45 s for the container.
-- `closes_at` is computed by scanning window/holiday boundaries, grant
-  expiries and the break-glass end for the first instant `Decide` would deny.
-- **Exec**: recording is written in 30 s segments (segment 0 = asciicast
-  header, written at start so a dead MinIO refuses the session). A failed
-  flush ends the session with `recording_failed`.
-- **WebSockets** authenticate with the session cookie, check `Origin`, and
-  take the CSRF token as `?csrf=`. Binary frames are raw bytes, text frames
-  JSON control messages. Denials happen before the upgrade as normal HTTP
-  errors.
-- **Sessions**: Keycloak tokens are stored encrypted server-side; the cookie
-  is a random token whose sha256 is the DB key. Refreshed every ≤5 min; the
-  scope set deliberately omits `offline_access` so the portal session ends
-  with the Keycloak session.
-- **Audit**: the app DB role has INSERT/SELECT only on `audit_events`;
-  retention deletes use a separate role (`DATABASE_RETENTION_URL`).
-- **Admins from Keycloak groups**: `TIPHYS_ADMIN_GROUPS` (comma-separated)
-  promotes members to admin at every login (`AuthService.promoteByGroups`),
-  audited as an `admin.change` with before/after. It never demotes, ignores
-  case and a leading `/`, and skips disabled users. It is the only use of
-  Keycloak groups: the portal DB still holds the role, groups only grant it. The client needs a group
-  membership mapper adding `groups` to the ID token (`OIDC_GROUPS_CLAIM`).
-  `TIPHYS_BOOTSTRAP_ADMINS` (comma-separated usernames, case-insensitive) works
-  the same way at every login (audited as `promote_by_username`), also for users
-  who already logged in; a user demoted on the Users page while still listed is
-  promoted again at the next login. Both go through `AuthService.promoteAdmin`.
-- **Request batches**: a user (or a team manager for the team) may ask for the
-  same actions on 2–20 namespaces of one cluster at once
-  (`POST /access-requests/batch`, `AccessRequestService.CreateBatch`): one
-  ordinary request per namespace sharing `batch_id` (migration 11), created in
-  one transaction (a protected namespace or cluster refuses the whole batch)
-  with one notification. An admin decides a batch only as a whole
-  (`DecideBatch`): the chosen requests are approved (each merging by the usual
-  rule), the rest rejected, in one transaction, so a request no longer pending
-  fails everything with 409; single `/approve` and `/reject` refuse batch
-  requests. Admins cannot add namespaces. The pending count counts a batch once.
-  Admins create the same grant on 2–50 namespaces at once
-  (`POST /admin/grants/batch`, `AdminService.CreateGrants`): ordinary grants,
-  one transaction through `mutateMany` (one `admin.change` per grant with a
-  shared `batchId`, one notification), no merging.
-- **Team managers**: an admin picks a team's managers (`PUT /admin/teams/{id}/managers`,
-  table `team_managers`, Teams page; Keycloak users only, need not be members).
-  A manager adds and removes members on My teams (`/my/teams`,
-  `AdminService.AddTeamMember`/`RemoveTeamMember`, checked in the transaction by
-  `requireTeamManager`), so the people they add receive the team's grants; only
-  admins change the team's name, grants and managers. Managers add only enabled
-  Keycloak users (local users skip Keycloak's MFA) and a local user never manages.
-  Audited as `admin.change` (`add_member`/`remove_member`) by the manager, admins
-  notified; a no-op change audits nothing. A manager may also file an access
-  request for the team (`teamId`, `AccessRequest.TeamID`, checked by
-  `requireTeamManager` in the transaction; My teams lists the team's requests
-  via `AccessRequestService.ForTeam`): approval grants the team, merging into the
-  team's own same-scope grant by the same rule. `approved_for_team` (migration
-  10) makes an approval by the previous release fail instead of granting the
-  manager.
-- **Local users**: with `LOCAL_USERS_ENABLED=true` (default
-  off) an admin can create a user with a password (`users.password_hash`,
-  bcrypt cost 12) who logs in on the login page through `POST /auth/local-login`
-  (`AuthService.LocalLogin`), never through Keycloak, so Keycloak's MFA and
-  policies do not apply. The session has no tokens and lasts at most 8 h; the
-  5-minute refresh (`refreshLocal`) only checks the user is not disabled and the
-  feature is still on, so turning it off ends local sessions within 5 minutes.
-  A Keycloak login never binds to a local user (and the DB CHECK forbids a sub
-  with a hash); a Keycloak user cannot be given a password. Setting a password
-  ends the user's sessions. Login is limited per IP and per username in memory
-  (per pod). Admin groups and bootstrap admins do not apply to local users.
-- **Dev login**: `DEV_LOGIN_USER=<name>` (refused with `GIN_MODE=release`, the
-  default) replaces Keycloak with `oidc.Dev`: its authorize URL is the portal's
-  own callback, so the normal login path runs (user, session, `login` audit),
-  and `/login` redirects straight to `/auth/login`. `DEV_LOGIN_USER=admin` is
-  put in `tiphys-dev-admins`, which is appended to the admin groups, so it is
-  promoted at every login; any other name is a regular user. The refresh token
-  carries the username, so after switching users the old session ends at its
-  next refresh (≤5 min). OIDC_* settings are optional then.
-- **Namespace lists** (pickers and "By namespace") come only from the clusters
-  (`ClusterAccess.ListNamespaces`, cached 30 s per cluster), plus, for "By
-  namespace", the namespaces the user's grants name on registered clusters. A
-  failing cluster lists nothing. Argo CD never adds a namespace or cluster: it
-  only annotates these with apps and projects, so apps on clusters tiphys does
-  not know (or in namespaces no cluster reported) are not shown. Argo CD is
-  optional enrichment (apps, health/sync, project grants).
-- **Traffic graph** on the namespace page, like Argo CD's
-  network view: `GET .../namespaces/{ns}/traffic` (`kubeaccess.NamespaceTraffic`)
-  draws LB addresses and Gateways → Ingresses/HTTPRoutes/GRPCRoutes → Services →
-  workloads from the cluster itself (not Argo), with a `problem` on nodes where
-  traffic may not get through. Every Service of the namespace is in the
-  graph, and Istio ambient **waypoints** (Gateways of class `istio-waypoint`,
-  found by the labels Istio puts on their Service; bound by
-  `istio.io/use-waypoint`/`-namespace` on the Service, else the Namespace,
-  `none` opts out) lead to the routes attached to a Service they carry, or to
-  the Service itself. The UI shows everything no Address, Gateway, Ingress or
-  LoadBalancer/NodePort Service leads to under "Inside the cluster only"
-  dividers; "Hide in-cluster Services" hides it and its label then counts its
-  problems (`inClusterNodes` in `web/src/lib/traffic.ts`).
-  Authorized like namespace events (`logs` on the
-  whole namespace). Needs the chart's `services`, `ingresses`, `httproutes`/
-  `grpcroutes` and `gateways` (get only) rules; Gateways in protected namespaces
-  are never read.
-- **Argo CD sync**: a
-  `sync` action (grants, window rules, requests; not on a `workloads` scope)
-  lets users sync a whole app from the namespace page's Argo CD card through
-  `POST .../apps/{appNs}/{name}/sync` (`WorkloadService.SyncApp`), with the
-  same `ARGO_TOKEN_FILE`, which therefore needs `applications, sync`.
-  `domain.DecideApp` allows it only when `Decide` allows `sync` on **every**
-  namespace the app deploys to (destination and status.resources), with a
-  fresh Argo cache; apps with cluster-scoped resources other than their own
-  Namespace objects are admins only (`app_scope`), except for kinds listed in
-  `Settings.ArgoSyncClusterKinds` (Settings page, `Kind.group` like kubectl,
-  key `argo.sync_cluster_kinds`; `domain.CheckSyncClusterKind` refuses core
-  kinds, RBAC, admission, CRDs, API services, StorageClass and PriorityClass,
-  also in `Policy.AdminOnlyResources`). Always the target
-  revision, never prune/dry run/revision; the username goes into the
-  operation's `infos`. Audited as `argo.sync` (details name the cluster-scoped
-  resources it applies, `clusterResources`), followed by polling
-  `operationState` (10 min), then the Argo cache is refreshed.
-  Clicking an app opens its details, read live from Argo CD (`applications,
-  get`): status/conditions/last operation and history (anyone who sees the
-  namespace's apps), and the diff a sync would apply (`.../diff`, same right
-  as the sync, audited as `argo.diff`; Secret contents are never shown).
-- **Argo CD rollback**: a separate `rollback` action (same places and scope
-  rule as `sync`; sync does not imply it, since it deploys what is no longer
-  in Git) offers Roll back on earlier deploys of the History tab
-  (`GET`/`POST .../apps/{appNs}/{name}/history/{id}/rollback`, plan and run,
-  `argorollback.go`). Argo CD authorizes it as `applications, sync` and
-  refuses apps with auto-sync (409 `auto_sync_enabled`; the portal never turns
-  it off); multi-source apps, the current deploy and deploys whose source
-  differs from the current one but for `targetRevision` (`ArgoDeploy.SameSource`)
-  are refused with 422. `rollbackPlan` reads the revision's manifests
-  (`ArgoClient.Manifests`, current source at that revision) and places them
-  with `ClusterAccess.ResourceScopes` (discovery as `tiphys:user`; no
-  namespace → destination; unserved kinds count as cluster-scoped), then
-  `DecideApp` runs on `ArgoApp.Including(...)`: the app now **plus** the
-  revision, since a rollback never prunes. Never prune/dry run. Rollback
-  requests carry no `infos`, so only the audit (`argo.rollback`, started then
-  outcome) names the user; outcomes of sync and rollback record
-  `operationStartedAt`, which `AppHistory` matches to the deploy's
-  `deployStartedAt` to show the portal user (`portalUser`).
-- **Live changes**: `GET /api/v1/live?ns=<cluster>/<ns>` (SSE, ≤10 namespaces,
-  ≤8 streams per user and pod) is one stream per browser tab
-  (`web/src/context/live.tsx`) for the namespaces the open page shows.
-  `kubeaccess.WatchNamespace` watches pods and events as `tiphys:user`,
-  attributes them to workloads by owner chain and detects rollouts (new
-  revision, then polled until complete); `WorkloadService.Live` needs a grant
-  in each namespace at connect and decides every change again
-  (`liveView`: details need `logs` on the workload). The stream is a
-  `StreamLive` in the `StreamManager` (no single target; ends after 10 min,
-  with the session or a disabled user) and the browser reconnects. Pages
-  refetch over REST on changes and poll slowly meanwhile; toasts are capped
-  at three, fold repeats and can be muted per page (memory only). No chart
-  change: the rules already allow watch.
-- **Argo apps on the namespace page** are shown although the rest of the Argo
-  UI is behind `ARGO_UI = false` (`web/src/lib/features.ts`):
-  `GET .../namespaces/{ns}/apps` returns every app whose destination or
-  resources are in the namespace, with health, sync and the last sync
-  operation (`status.operationState`), linked to `ARGO_PUBLIC_URL` (default
-  `ARGO_URL`, sent as `me.settings.argoUrl`). The Argo CD cache card on
-  Clusters & environments (fetch age, counts, last error, Refresh now) is
-  shown too.
-- **Cluster health** is checked in the background by `ClusterService.Run`
-  (tick 5 s): healthy clusters every 30 s, ones that failed their last check
-  every 10 s, privilege check every 5 min. Three failures in a row mark a
-  cluster unreachable; one success marks it reachable again. "Credential not
-  loaded yet" counts as an ordinary failure. The Clusters page polls every 15 s.
-- **Cluster credentials**: a cluster is unusable until its privilege check
-  passes (connector must be allowed to impersonate `tiphys:user` and denied
-  secrets/pods/system:admin/system:masters).
-- **Clusters are registered by Secrets**, not through the UI: any Secret in the
-  portal's namespace annotated `tiphys/cluster: <name>` (kubeconfig in the
-  `kubeconfig` key) is a cluster; `ClusterService` creates the row and keeps
-  it, shown as "No credential", if the Secret goes away. An optional
-  `tiphys/environment: <label>` annotation sets the environment and wins over
-  the UI: the row follows it on every watch event and sync (audited as
-  `environment_from_secret`), `SetEnvironment` returns 409 while it is there,
-  and the UI shows it read-only. Without it the environment is set in the UI
-  and kept when the annotation is removed. `tiphys/protected: "true"` makes a
-  **protected cluster** (`Cluster.Protected`, audited as `protected_from_secret`,
-  always follows the annotation, kept if the Secret goes away): unlike protected
-  namespaces it is not part of `Decide`; it only hides the cluster from
-  non-admins' catalog pickers (`AccessService.HiddenCluster`) and
-  `AccessRequestService.Create` refuses it (422), so admins grant on it and
-  grants work as usual. **The portal never writes, updates or deletes Secrets**:
-  `SecretStore.Put/Delete` always return `ErrReadOnly` and its Role is get/list/
-  watch only; the operator manages the Secrets. `CLUSTER_REGISTRATION_FROM_UI=true`
-  (local testing; config refuses it unless `CREDENTIAL_STORE=dir`) registers the
-  Add/Replace endpoints and tells the UI (`me.settings.clusterRegistration`);
-  the kubeconfig is then written to `CREDENTIAL_DIR`. `ClusterService.Add`
-  creates the row before writing the credential so `registerFromStore`
-  (triggered by it) finds it. Delete removes the credential file too in that
-  mode, and otherwise refuses while the Secret exists.
+  (`argo_stale`); other grants are unaffected. Argo CD only annotates
+  namespaces the clusters report (`ClusterAccess.ListNamespaces`, cached 30 s,
+  plus namespaces the user's grants name); it never adds a namespace or cluster.
+- **Auditors work like users** (`Role.UsesGrants`) and also read audit,
+  sessions and configuration. Only admins change configuration or decide
+  requests; `/my/access` lists only the caller's own requests.
+- **Cluster and environment grants** are admin only (requests get 422).
+  `environment` follows `Policy.Environment` (namespace override → Argo project
+  override → cluster label); `unlabeled` cannot be granted; protected
+  namespaces are never covered.
+- **Approving merges** the actions into the requester's (or the team's own)
+  unexpired grant on exactly the same scope that ends no later than the
+  approval (`mergeTarget`); otherwise, or with `separate: true`, a new grant.
+  `web/src/lib/requestMerge.ts` mirrors the rule.
+- **Break-glass** overrides only time windows and holidays; logs are never
+  time-limited. `Settings.BreakGlassMode` is `self`, `off`
+  (`ErrBreakGlassDisabled`; active ones stop overriding) or `approval`
+  (`BreakGlassService.Request`, admins decide on Access requests). It can be
+  scheduled ≤ 7 days ahead; the snapshot holds the active or next one per user
+  (`ListCurrent`). The old `break_glass.enabled` key is still written for the
+  previous release.
+- **Delete pod** is authorized as `restart` (`WorkloadService.DeletePod`,
+  `kubeaccess.DeletePod`: owner chain, then a UID precondition); hidden
+  (`WorkloadDetail.podDelete`, `ClusterAccess.PodDeleteReady`) and refused
+  (`ErrPodDeleteUnavailable`) on clusters lacking the chart's
+  `tiphys-pod-delete-only` policy (VAP or Kyverno).
+- **Debug** is exec in an ephemeral container (`DEBUG_IMAGE`,
+  `kubeaccess.Debug`), authorized and recorded as exec and never removed. Off
+  without `DEBUG_IMAGE` or on clusters lacking the chart's `tiphys-debug-only`
+  VAP.
+- **Exec recording**: 30 s segments, segment 0 written at start (a dead MinIO
+  refuses the session); a failed flush ends it with `recording_failed`.
+- `closes_at` is the first instant `Decide` would deny (windows, holidays,
+  grant expiries, break-glass end).
+- **WebSockets** authenticate with the cookie, check `Origin`, take CSRF as
+  `?csrf=`; binary frames are raw bytes, text frames JSON control. Denials are
+  plain HTTP errors before the upgrade.
+- **Sessions**: Keycloak tokens encrypted server-side; the cookie is a random
+  token whose sha256 is the DB key; refreshed every ≤ 5 min; no
+  `offline_access`, so the session ends with Keycloak's.
+- **Audit**: the app DB role has only INSERT/SELECT on `audit_events`;
+  retention uses `DATABASE_RETENTION_URL`.
+- **Admin promotion** at every login (`AuthService.promoteAdmin`):
+  `TIPHYS_ADMIN_GROUPS` (groups claim `OIDC_GROUPS_CLAIM`, the only use of
+  Keycloak groups) and `TIPHYS_BOOTSTRAP_ADMINS` (usernames). Never demotes;
+  skips disabled and local users.
+- **Batches**: requests for 2–20 namespaces of one cluster share a `batch_id`
+  and are decided only as a whole (`DecideBatch`, one transaction; single
+  approve/reject refuse them). Admins grant 2–50 namespaces at once
+  (`AdminService.CreateGrants`, no merging).
+- **Team managers** (`team_managers`) add and remove members (enabled Keycloak
+  users only) and request access for the team; `requireTeamManager` checks in
+  the transaction. Only admins change a team's name, grants and managers.
+- **Local users** (`LOCAL_USERS_ENABLED`): bcrypt password via
+  `POST /auth/local-login`, no Keycloak MFA, sessions ≤ 8 h whose refresh only
+  re-checks the user and the flag. Never combined with a Keycloak sub.
+- **Dev login** (`DEV_LOGIN_USER`, refused in release) swaps Keycloak for
+  `oidc.Dev` on the normal login path; `admin` is promoted through the
+  `tiphys-dev-admins` group.
+- **Traffic graph** (`kubeaccess.NamespaceTraffic`) is read from the cluster,
+  not Argo, including Istio ambient waypoints; authorized as `logs` on the
+  namespace. In-cluster grouping: `inClusterNodes` in `web/src/lib/traffic.ts`.
+- **Argo CD sync and rollback** are separate actions (not on `workloads`
+  scopes). `domain.DecideApp` needs the action on every namespace the app
+  touches and a fresh cache; cluster-scoped resources are admin only except
+  `Settings.ArgoSyncClusterKinds` (`domain.CheckSyncClusterKind`). Never prune,
+  dry run or pick a revision on sync. Rollback refuses auto-sync apps (409) and
+  other sources (422) and decides on the app plus the revision
+  (`ArgoApp.Including`). Diffs are audited; Secret contents are never shown.
+- **Argo UI** stays off (`ARGO_UI = false`, `web/src/lib/features.ts`) except
+  the namespace page's apps card and the Argo CD cache card.
+- **Live changes** (`GET /api/v1/live`, SSE, ≤ 10 namespaces, ≤ 8 streams per
+  user and pod): `kubeaccess.WatchNamespace` as `tiphys:user`, every change
+  decided again (`liveView`), a `StreamLive` ending after 10 min. One stream
+  per tab (`web/src/context/live.tsx`).
+- **Cluster health** (`ClusterService.Run`): healthy every 30 s, failing every
+  10 s, privilege check every 5 min; three failures → unreachable. A cluster is
+  unusable until its privilege check passes.
+- **Clusters are registered by Secrets** annotated `tiphys/cluster: <name>`
+  (key `kubeconfig`). `tiphys/environment` wins over the UI (409 on
+  `SetEnvironment`); `tiphys/protected: "true"` hides the cluster from
+  non-admins' pickers and refuses requests. **The portal never writes
+  Secrets** (`SecretStore` returns `ErrReadOnly`).
+  `CLUSTER_REGISTRATION_FROM_UI=true` (only with `CREDENTIAL_STORE=dir`) is for
+  local testing.
+- **API tokens** (`domain.APIToken`, `AuthService.AuthenticateToken`): admins
+  create them on Settings with permissions from `domain.AllPermissions`; only
+  the sha256 is stored. A token principal has `Principal.Token` set and a
+  role-less `User` named `token:<name>`, so `RequireRole` always refuses it;
+  services that tokens may call use `RequirePermission`. The router lets a
+  token reach only `tokenRoutes` (time windows, holidays, settings GET and
+  `PATCH`) and skips CSRF for it. Tokens never manage tokens.
 - All env vars are documented in `.env.example`.
 
 ## Testing

@@ -42,6 +42,19 @@ func (a *Access) Exec(ctx context.Context, actor application.KubeActor, w applic
 	return a.openShell(ctx, c, w.Cluster, w.Namespace, pod, container, shell, cols, rows)
 }
 
+// bashOrSh starts bash when the container has it and sh otherwise.
+const bashOrSh = "[ -x /bin/bash ] && exec /bin/bash; exec /bin/sh"
+
+// shellCommand is the fixed command for an allow-listed shell. /bin/bash
+// falls back to /bin/sh inside the container, so a container without bash
+// still gets one session instead of a failed one.
+func shellCommand(shell string) []string {
+	if shell == "/bin/bash" {
+		return []string{"/bin/sh", "-c", bashOrSh}
+	}
+	return []string{shell}
+}
+
 // openShell starts the allow-listed shell in a container that was checked by
 // the caller.
 func (a *Access) openShell(ctx context.Context, c *clients, cluster, namespace, pod, container, shell string, cols, rows uint16) (application.ExecStream, error) {
@@ -49,7 +62,7 @@ func (a *Access) openShell(ctx context.Context, c *clients, cluster, namespace, 
 		Resource("pods").Namespace(namespace).Name(pod).SubResource("exec").
 		VersionedParams(&corev1.PodExecOptions{
 			Container: container,
-			Command:   []string{shell},
+			Command:   shellCommand(shell),
 			Stdin:     true,
 			Stdout:    true,
 			Stderr:    false, // TTY merges stderr into stdout

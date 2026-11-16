@@ -9,7 +9,7 @@ import { Bump } from '../components/Bump';
 import { CronJobsPanel } from '../components/CronJobsPanel';
 import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
-import { RestartDialog, RunCronDialog } from '../components/OperationDialogs';
+import { DeletePodDialog, RestartDialog, RunCronDialog } from '../components/OperationDialogs';
 import { Crumbs } from '../components/PageHeader';
 import { WhoHasAccess } from '../components/WhoHasAccess';
 import { useAuth } from '../context/auth';
@@ -59,6 +59,7 @@ export function WorkloadDetailPage() {
   const wl = useApi(() => api.workload(ref), [cluster, ns, kind, name, breakGlassKey(me)], { poll: live ? 60000 : 30000 });
   useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
   const [restart, setRestart] = useState(false);
+  const [deletePod, setDeletePod] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [runs, setRuns] = useState(0); // remounts the CronJobs panel after a run
   const navigate = useNavigate();
@@ -144,13 +145,13 @@ export function WorkloadDetailPage() {
           ) : (
             <PodsTable
               pods={pods.data} loading={pods.loading && !pods.data} error={pods.error} reload={pods.reload} now={now} selected={selected?.name ?? null}
-              onSelect={setSel} wl={d}
+              onSelect={setSel} onDelete={setDeletePod} wl={d}
             />
           )}
         </div>
 
         {tab === 'pods' && selected && (
-          <PodPanel pod={selected} events={events.data ?? []} wl={d} now={now} onClose={() => setSel('')} />
+          <PodPanel pod={selected} events={events.data ?? []} wl={d} now={now} onClose={() => setSel('')} onDelete={setDeletePod} />
         )}
       </div>
       {running && (
@@ -161,12 +162,18 @@ export function WorkloadDetailPage() {
         />
       )}
       {restart && <RestartDialog wl={d} onClose={(changed) => { setRestart(false); if (changed) { wl.reload(); pods.reload(); } }} />}
+      {deletePod && <DeletePodDialog wl={d} pod={deletePod} onClose={(changed) => {
+        setDeletePod(null);
+        if (!changed) return;
+        if (selected?.name === deletePod) setSel('');
+        pods.reload();
+      }} />}
     </>
   );
 }
 
-function PodsTable({ pods, loading, error, reload, now, selected, onSelect, wl }: {
-  pods: Pod[] | undefined; loading: boolean; error: unknown; reload: () => void; now: number; selected: string | null; onSelect: (n: string) => void; wl: WorkloadDetail;
+function PodsTable({ pods, loading, error, reload, now, selected, onSelect, onDelete, wl }: {
+  pods: Pod[] | undefined; loading: boolean; error: unknown; reload: () => void; now: number; selected: string | null; onSelect: (n: string) => void; onDelete: (n: string) => void; wl: WorkloadDetail;
 }) {
   const { debugEnabled } = useAuth().me.settings;
   const rows = useAnimatedList(pods, (p) => p.name, (p) => `${p.phase}|${p.ready}|${p.restarts}|${p.lastTermination}`, `${wl.cluster}/${wl.namespace}/${wl.kind}/${wl.name}`);
@@ -194,6 +201,7 @@ function PodsTable({ pods, loading, error, reload, now, selected, onSelect, wl }
                     <ActionButton action="logs" decision={wl.access.logs} label="Logs" icon="list" size="sm" to={logsUrl(loc, p.name)} target={wl.name} hint="none" />
                     <ActionButton action="exec" decision={wl.access.exec} label="Exec" icon="term" size="sm" to={execUrl(loc, p.name)} target={wl.name} hint="none" />
                     {debugEnabled && <ActionButton action="exec" decision={wl.access.exec} label="Debug" icon="bug" size="sm" plain to={execUrl(loc, p.name, undefined, true)} target={wl.name} hint="none" />}
+                    {wl.podDelete && <ActionButton action="restart" decision={wl.access.restart} label="Delete" icon="trash" size="sm" plain onClick={() => onDelete(p.name)} target={wl.name} hint="none" />}
                   </span>
                 </td>
               </tr>
@@ -233,7 +241,7 @@ function EventsTable({ events, error, loading, now, reload, scope }: { events: K
   );
 }
 
-function PodPanel({ pod, events, wl, now, onClose }: { pod: Pod; events: K8sEvent[]; wl: WorkloadDetail; now: number; onClose: () => void }) {
+function PodPanel({ pod, events, wl, now, onClose, onDelete }: { pod: Pod; events: K8sEvent[]; wl: WorkloadDetail; now: number; onClose: () => void; onDelete: (n: string) => void }) {
   const { debugEnabled } = useAuth().me.settings;
   const loc = { cluster: wl.cluster, namespace: wl.namespace, kind: wl.kind, name: wl.name };
   const podEvents = events.filter((e) => e.object.endsWith(pod.name.replace(`${wl.name}-`, '')) || e.object.includes(pod.name)).slice(0, 5);
@@ -283,6 +291,7 @@ function PodPanel({ pod, events, wl, now, onClose }: { pod: Pod; events: K8sEven
           <ActionButton action="logs" decision={wl.access.logs} label="Logs" icon="list" to={logsUrl(loc, pod.name)} target={wl.name} hint="none" />
           <ActionButton action="exec" decision={wl.access.exec} label="Exec" icon="term" to={execUrl(loc, pod.name)} target={wl.name} hint="none" />
           {debugEnabled && <ActionButton action="exec" decision={wl.access.exec} label="Debug" icon="bug" plain to={execUrl(loc, pod.name, undefined, true)} target={wl.name} hint="none" />}
+          {wl.podDelete && <ActionButton action="restart" decision={wl.access.restart} label="Delete" icon="trash" plain onClick={() => onDelete(pod.name)} target={wl.name} hint="none" />}
         </div>
       </div>
     </aside>

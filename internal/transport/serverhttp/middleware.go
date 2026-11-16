@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,9 +106,24 @@ func (h *Handler) setSessionCookie(c *gin.Context, token string, maxAge int) {
 	})
 }
 
-// authRequired resolves the session cookie to a Principal.
+// authRequired resolves the session cookie, or an API token sent as
+// "Authorization: Bearer", to a Principal. A token reaches only tokenRoutes.
 func (h *Handler) authRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if v, ok := strings.CutPrefix(c.GetHeader("Authorization"), "Bearer "); ok {
+			p, err := h.svc.Auth.AuthenticateToken(c.Request.Context(), strings.TrimSpace(v), c.ClientIP(), c.Request.UserAgent())
+			if err != nil {
+				h.writeError(c, err)
+				return
+			}
+			if !tokenRoutes[c.Request.Method+" "+c.FullPath()] {
+				abort(c, http.StatusForbidden, "token_not_allowed", "API tokens cannot use this endpoint.", nil)
+				return
+			}
+			c.Set(principalKey, p)
+			c.Next()
+			return
+		}
 		token, _ := c.Cookie(sessionCookie)
 		p, err := h.svc.Auth.Authenticate(c.Request.Context(), token, c.ClientIP(), c.Request.UserAgent())
 		if err != nil {
@@ -135,6 +151,11 @@ func csrfRequired() gin.HandlerFunc {
 			return
 		}
 		p := principal(c)
+		if p.Token != nil {
+			// No cookie, so nothing for another site to ride on.
+			c.Next()
+			return
+		}
 		got := c.GetHeader("X-CSRF-Token")
 		if got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(p.CSRFToken)) != 1 {
 			abort(c, http.StatusForbidden, "csrf", "Missing or invalid CSRF token.", nil)
@@ -152,13 +173,21 @@ func (h *Handler) rateLimited() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if !h.limits.Allow(principal(c).User.ID, time.Now()) {
+		if !h.limits.Allow(rateKey(principal(c)), time.Now()) {
 			c.Header("Retry-After", "10")
 			abort(c, http.StatusTooManyRequests, "rate_limited", "Too many actions, slow down.", nil)
 			return
 		}
 		c.Next()
 	}
+}
+
+// rateKey is the user ID, or for an API token its ID negated.
+func rateKey(p application.Principal) int64 {
+	if p.Token != nil {
+		return -p.Token.ID
+	}
+	return p.User.ID
 }
 
 // requireRoles allows only the given roles.
@@ -172,13 +201,15 @@ func (h *Handler) requireRoles(roles ...domain.Role) gin.HandlerFunc {
 	}
 }
 
-// readOnlyForAuditors lets auditors through on GET only; admins on anything.
+// adminOrReadOnlyAuditor lets auditors through on GET only; admins on
+// anything; API tokens on their routes.
 func (h *Handler) adminOrReadOnlyAuditor() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		p := principal(c)
 		switch {
 		case p.User.Role == domain.RoleAdmin:
 		case p.User.Role == domain.RoleAuditor && c.Request.Method == http.MethodGet:
+		case p.Token != nil: // only tokenRoutes; the services check its permissions
 		default:
 			h.writeError(c, application.ErrForbiddenRole)
 			return
