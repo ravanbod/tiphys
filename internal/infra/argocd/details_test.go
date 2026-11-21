@@ -5,13 +5,16 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"tiphys/internal/application"
 )
 
 func TestGetAppDetails(t *testing.T) {
 	var body map[string]any
 	var uri string
 	c := syncServer(t, http.StatusOK, `{
-	  "spec":{"source":{"repoURL":"https://git.example.com/payments.git"}},
+	  "spec":{"source":{"repoURL":"https://git.example.com/payments.git","targetRevision":"main"},
+	    "syncPolicy":{"syncOptions":["CreateNamespace=true"],"retry":{"limit":2,"backoff":{"duration":"5s","factor":2,"maxDuration":"3m"}}}},
 	  "status":{
 	    "health":{"status":"Degraded","message":"Deployment exceeded its progress deadline"},
 	    "sync":{"status":"OutOfSync","revision":"abc123"},
@@ -40,6 +43,10 @@ func TestGetAppDetails(t *testing.T) {
 		len(d.Conditions) != 1 || d.Conditions[0].Type != "SyncError" || d.Conditions[0].At == nil {
 		t.Fatalf("details = %+v", d)
 	}
+	if d.TargetRevision != "main" || len(d.SyncOptions) != 1 || d.SyncOptions[0] != "CreateNamespace=true" ||
+		d.Retry == nil || d.Retry.Limit != 2 || d.Retry.Backoff == nil || *d.Retry.Backoff != (application.ArgoBackoff{Duration: "5s", Factor: 2, MaxDuration: "3m"}) {
+		t.Fatalf("target %q, options %v, retry %+v", d.TargetRevision, d.SyncOptions, d.Retry)
+	}
 	if len(d.Resources) != 3 || len(d.Unhealthy) != 1 || d.Unhealthy[0].Kind != "Deployment" || d.Unhealthy[0].Name != "api" ||
 		d.Unhealthy[0].Health != "Degraded" || d.Unhealthy[0].Message != `Deployment "api" exceeded its progress deadline` {
 		t.Fatalf("resources = %+v, unhealthy = %+v", d.Resources, d.Unhealthy)
@@ -65,12 +72,13 @@ func TestManagedResourcesPrefersNormalizedAndPredicted(t *testing.T) {
 	  {"group":"apps","kind":"Deployment","namespace":"p","name":"api","modified":true,
 	   "liveState":"{\"live\":1}","normalizedLiveState":"{\"normalized\":1}","targetState":"{\"target\":1}","predictedLiveState":"{\"predicted\":1}"},
 	  {"kind":"Service","namespace":"p","name":"new","liveState":"null","targetState":"{\"target\":1}","predictedLiveState":""},
-	  {"kind":"ConfigMap","namespace":"p","name":"old","liveState":"{\"live\":1}","targetState":"null"}]}`, &body, &uri)
+	  {"kind":"ConfigMap","namespace":"p","name":"old","liveState":"{\"live\":1}","targetState":"null"},
+	  {"kind":"ConfigMap","namespace":"p","name":"kept","liveState":"{\"metadata\":{\"annotations\":{\"argocd.argoproj.io/sync-options\":\"ServerSideApply=true, Prune=false\"}}}","targetState":"null"}]}`, &body, &uri)
 	items, err := c.ManagedResources(context.Background(), "argocd", "payments-api")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uri != "GET /api/v1/applications/payments-api/managed-resources?appNamespace=argocd" || len(items) != 3 {
+	if uri != "GET /api/v1/applications/payments-api/managed-resources?appNamespace=argocd" || len(items) != 4 {
 		t.Fatalf("request %s, items %+v", uri, items)
 	}
 	if string(items[0].Live) != `{"normalized":1}` || string(items[0].Desired) != `{"predicted":1}` || !items[0].Modified {
@@ -79,8 +87,11 @@ func TestManagedResourcesPrefersNormalizedAndPredicted(t *testing.T) {
 	if items[1].Live != nil || string(items[1].Desired) != `{"target":1}` {
 		t.Fatalf("missing: %+v", items[1])
 	}
-	if string(items[2].Live) != `{"live":1}` || items[2].Desired != nil {
+	if string(items[2].Live) != `{"live":1}` || items[2].Desired != nil || items[2].NoPrune {
 		t.Fatalf("extra: %+v", items[2])
+	}
+	if !items[3].NoPrune {
+		t.Fatalf("Prune=false: %+v", items[3])
 	}
 }
 

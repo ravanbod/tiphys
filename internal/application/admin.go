@@ -810,6 +810,34 @@ func (s *AdminService) UpdateWindow(ctx context.Context, p Principal, w domain.T
 	return w, err
 }
 
+// PatchWindow changes some fields of a window: apply edits the stored window
+// (in the transaction), and the result is validated like an update.
+func (s *AdminService) PatchWindow(ctx context.Context, p Principal, id int64, apply func(*domain.TimeWindow) error) (domain.TimeWindow, error) {
+	var w domain.TimeWindow
+	if err := RequirePermission(p, domain.PermTimeWindowsUpdate, domain.RoleAdmin); err != nil {
+		return w, err
+	}
+	c := &change{entity: "time_window", operation: "update", id: id}
+	err := s.mutate(ctx, p, c, func(r Repositories) error {
+		before, err := r.Windows.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		c.before, w = before, before
+		if err := apply(&w); err != nil {
+			return err
+		}
+		w.ID = id
+		if err := s.normalizeWindow(&w); err != nil {
+			return err
+		}
+		w.UpdatedBy = p.User.Username
+		c.after = w
+		return r.Windows.Update(ctx, w)
+	})
+	return w, err
+}
+
 func (s *AdminService) DeleteWindow(ctx context.Context, p Principal, id int64) error {
 	if err := RequirePermission(p, domain.PermTimeWindowsDelete, domain.RoleAdmin); err != nil {
 		return err
@@ -871,6 +899,32 @@ func (s *AdminService) UpdateHoliday(ctx context.Context, p Principal, h domain.
 			return err
 		}
 		c.before = before
+		return r.Holidays.Update(ctx, h)
+	})
+	return h, err
+}
+
+// PatchHoliday changes some fields of a holiday, like PatchWindow.
+func (s *AdminService) PatchHoliday(ctx context.Context, p Principal, id int64, apply func(*domain.Holiday) error) (domain.Holiday, error) {
+	var h domain.Holiday
+	if err := RequirePermission(p, domain.PermHolidaysUpdate, domain.RoleAdmin); err != nil {
+		return h, err
+	}
+	c := &change{entity: "holiday", operation: "update", id: id}
+	err := s.mutate(ctx, p, c, func(r Repositories) error {
+		before, err := r.Holidays.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		c.before, h = before, before
+		if err := apply(&h); err != nil {
+			return err
+		}
+		h.ID = id
+		if err := validHoliday(h); err != nil {
+			return err
+		}
+		c.after = h
 		return r.Holidays.Update(ctx, h)
 	})
 	return h, err

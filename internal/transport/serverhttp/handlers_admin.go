@@ -1,6 +1,7 @@
 package serverhttp
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"io"
@@ -644,6 +645,85 @@ func (h *Handler) AdminSaveWindow(c *gin.Context) {
 	c.JSON(status, toWindow(w))
 }
 
+// AdminPatchWindow changes only the fields sent: they are decoded over the
+// stored window's JSON, then converted like a PUT body.
+func (h *Handler) AdminPatchWindow(c *gin.Context) {
+	id, body, ok := h.patchBody(c)
+	if !ok {
+		return
+	}
+	w, err := h.svc.Admin.PatchWindow(c.Request.Context(), principal(c), id, func(w *domain.TimeWindow) error {
+		dto := toWindow(*w)
+		if err := decodeStrict(body, &dto); err != nil {
+			return err
+		}
+		var err error
+		*w, err = dto.toDomain()
+		return err
+	})
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toWindow(w))
+}
+
+// AdminPatchHoliday is AdminPatchWindow for holidays.
+func (h *Handler) AdminPatchHoliday(c *gin.Context) {
+	id, body, ok := h.patchBody(c)
+	if !ok {
+		return
+	}
+	hol, err := h.svc.Admin.PatchHoliday(c.Request.Context(), principal(c), id, func(hol *domain.Holiday) error {
+		dto := toHoliday(*hol)
+		if err := decodeStrict(body, &dto); err != nil {
+			return err
+		}
+		var err error
+		*hol, err = dto.toDomain()
+		return err
+	})
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toHoliday(hol))
+}
+
+// patchBody reads a PATCH's path id and body; an empty object is refused.
+func (h *Handler) patchBody(c *gin.Context) (int64, []byte, bool) {
+	id, ok := pathID(c, "id")
+	if !ok {
+		return 0, nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+	var fields map[string]json.RawMessage
+	if err == nil {
+		err = json.Unmarshal(body, &fields)
+	}
+	if err != nil {
+		h.writeError(c, application.Invalid("body", "invalid JSON body"))
+		return 0, nil, false
+	}
+	delete(fields, "id")
+	if len(fields) == 0 {
+		h.writeError(c, application.Invalid("body", "no fields to change"))
+		return 0, nil, false
+	}
+	return id, body, true
+}
+
+// decodeStrict decodes body over v, refusing unknown fields, so a typo is
+// not silently ignored.
+func decodeStrict(body []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return application.Invalid("body", "invalid JSON body: "+err.Error())
+	}
+	return nil
+}
+
 func (h *Handler) AdminDeleteWindow(c *gin.Context) {
 	id, ok := pathID(c, "id")
 	if !ok {
@@ -674,13 +754,12 @@ func (h *Handler) AdminSaveHoliday(c *gin.Context) {
 	if !bindJSON(h, c, &in) {
 		return
 	}
-	d, perr := time.Parse("2006-01-02", in.Date)
-	if perr != nil {
-		h.writeError(c, application.Invalid("date", "date must be YYYY-MM-DD"))
+	in.ID = 0
+	hol, err := in.toDomain()
+	if err != nil {
+		h.writeError(c, err)
 		return
 	}
-	hol := domain.Holiday{Date: d, Title: in.Title, Environments: in.Environments}
-	var err error
 	status := http.StatusCreated
 	if c.Request.Method == http.MethodPut {
 		id, ok := pathID(c, "id")
@@ -914,10 +993,13 @@ func (h *Handler) AdminUpdateSettings(c *gin.Context) {
 // refused, so a typo is not silently ignored.
 func (h *Handler) AdminPatchSettings(c *gin.Context) {
 	var in settingsPatchDTO
-	dec := json.NewDecoder(c.Request.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&in); err != nil {
-		h.writeError(c, application.Invalid("body", "invalid JSON body: "+err.Error()))
+	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+	if err != nil {
+		h.writeError(c, application.Invalid("body", "invalid JSON body"))
+		return
+	}
+	if err := decodeStrict(body, &in); err != nil {
+		h.writeError(c, err)
 		return
 	}
 	s, err := h.svc.Admin.PatchSettings(c.Request.Context(), principal(c), in.toPatch())

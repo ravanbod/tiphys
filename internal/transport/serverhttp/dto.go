@@ -290,6 +290,7 @@ type containerDTO struct {
 	LastState     *string `json:"lastState"`
 	LastReason    *string `json:"lastReason"`
 	LastExitCode  *int32  `json:"lastExitCode"`
+	ExitCode      *int32  `json:"exitCode"`
 	LastStartedAt *string `json:"lastStartedAt"`
 	LastFinished  *string `json:"lastFinishedAt"`
 	MemoryLimit   *string `json:"memoryLimit"`
@@ -305,6 +306,7 @@ type podDTO struct {
 	CreatedAt        string         `json:"createdAt"`
 	LastTermination  *string        `json:"lastTermination"`
 	LastTerminatedAt *string        `json:"lastTerminatedAt"`
+	Job              *string        `json:"job"`
 	Containers       []containerDTO `json:"containers"`
 }
 
@@ -312,12 +314,31 @@ func toPod(p application.PodInfo) podDTO {
 	cs := make([]containerDTO, len(p.Containers))
 	for i, c := range p.Containers {
 		cs[i] = containerDTO{Name: c.Name, Image: c.Image, Ready: c.Ready, State: c.State, StateReason: c.StateReason,
-			RestartCount: c.RestartCount, LastState: strPtr(c.LastState), LastReason: strPtr(c.LastReason), LastExitCode: c.LastExitCode,
+			RestartCount: c.RestartCount, LastState: strPtr(c.LastState), LastReason: strPtr(c.LastReason), LastExitCode: c.LastExitCode, ExitCode: c.ExitCode,
 			LastStartedAt: timeStr(c.LastStarted), LastFinished: timeStr(c.LastFinished), MemoryLimit: strPtr(c.MemoryLimit), Init: c.Init}
 	}
 	return podDTO{Name: p.Name, Phase: p.Phase, Ready: fmt.Sprintf("%d/%d", p.ReadyCount, p.TotalCount), Restarts: p.Restarts,
 		Node: p.Node, CreatedAt: tstr(p.CreatedAt), LastTermination: strPtr(p.LastTermination),
-		LastTerminatedAt: timeStr(p.LastTerminatedAt), Containers: cs}
+		LastTerminatedAt: timeStr(p.LastTerminatedAt), Job: strPtr(p.Job), Containers: cs}
+}
+
+type podOwnerDTO struct {
+	Group string `json:"group"`
+	Kind  string `json:"kind"`
+	Name  string `json:"name"`
+}
+
+type otherPodDTO struct {
+	podDTO
+	Owner *podOwnerDTO `json:"owner"`
+}
+
+func toOtherPod(p application.OtherPod) otherPodDTO {
+	out := otherPodDTO{podDTO: toPod(p.PodInfo)}
+	if o := p.Owner; o != nil {
+		out.Owner = &podOwnerDTO{Group: o.Group, Kind: o.Kind, Name: o.Name}
+	}
+	return out
 }
 
 type eventDTO struct {
@@ -385,9 +406,12 @@ type jobDTO struct {
 	Status      string   `json:"status"`
 	Active      int32    `json:"active"`
 	Succeeded   int32    `json:"succeeded"`
+	Failed      int32    `json:"failed"`
 	Completions int32    `json:"completions"`
 	StartedAt   *string  `json:"startedAt"`
 	FinishedAt  *string  `json:"finishedAt"`
+	Reason      *string  `json:"reason"`
+	Message     *string  `json:"message"`
 	PodNames    []string `json:"podNames"`
 }
 
@@ -397,17 +421,22 @@ func toJob(j application.JobInfo) jobDTO {
 		pods = []string{}
 	}
 	return jobDTO{Name: j.Name, CronJob: j.CronJob, TriggeredBy: strPtr(j.TriggeredBy), Manual: j.Manual, Status: j.Status,
-		Active: j.Active, Succeeded: j.Succeeded, Completions: j.Completions, StartedAt: timeStr(j.StartedAt),
-		FinishedAt: timeStr(j.FinishedAt), PodNames: pods}
+		Active: j.Active, Succeeded: j.Succeeded, Failed: j.Failed, Completions: j.Completions, StartedAt: timeStr(j.StartedAt),
+		FinishedAt: timeStr(j.FinishedAt), Reason: strPtr(j.Reason), Message: strPtr(j.Message), PodNames: pods}
 }
 
 type cronJobDTO struct {
 	workloadDTO
-	LastScheduleAt    *string  `json:"lastScheduleAt"`
-	LastResult        *string  `json:"lastResult"`
-	ActiveJobs        int      `json:"activeJobs"`
-	ConcurrencyPolicy string   `json:"concurrencyPolicy"`
-	RecentJobs        []jobDTO `json:"recentJobs"`
+	LastScheduleAt             *string  `json:"lastScheduleAt"`
+	LastSuccessfulAt           *string  `json:"lastSuccessfulAt"`
+	NextScheduleAt             *string  `json:"nextScheduleAt"`
+	TimeZone                   *string  `json:"timeZone"`
+	SuccessfulJobsHistoryLimit int32    `json:"successfulJobsHistoryLimit"`
+	FailedJobsHistoryLimit     int32    `json:"failedJobsHistoryLimit"`
+	LastResult                 *string  `json:"lastResult"`
+	ActiveJobs                 int      `json:"activeJobs"`
+	ConcurrencyPolicy          string   `json:"concurrencyPolicy"`
+	RecentJobs                 []jobDTO `json:"recentJobs"`
 }
 
 func toCronJob(v application.CronJobView) cronJobDTO {
@@ -415,9 +444,11 @@ func toCronJob(v application.CronJobView) cronJobDTO {
 	for i, j := range v.CronJobInfo.RecentJobs {
 		jobs[i] = toJob(j)
 	}
-	return cronJobDTO{workloadDTO: toWorkload(v.WorkloadView), LastScheduleAt: timeStr(v.CronJobInfo.LastScheduleAt),
-		LastResult: strPtr(v.CronJobInfo.LastResult), ActiveJobs: v.CronJobInfo.ActiveJobs,
-		ConcurrencyPolicy: v.Info.ConcurrencyPolicy, RecentJobs: jobs}
+	c := v.CronJobInfo
+	return cronJobDTO{workloadDTO: toWorkload(v.WorkloadView), LastScheduleAt: timeStr(c.LastScheduleAt),
+		LastSuccessfulAt: timeStr(c.LastSuccessfulAt), NextScheduleAt: timeStr(c.NextScheduleAt), TimeZone: strPtr(c.TimeZone),
+		SuccessfulJobsHistoryLimit: c.SuccessfulJobsHistoryLimit, FailedJobsHistoryLimit: c.FailedJobsHistoryLimit,
+		LastResult: strPtr(c.LastResult), ActiveJobs: c.ActiveJobs, ConcurrencyPolicy: v.Info.ConcurrencyPolicy, RecentJobs: jobs}
 }
 
 // ---- scope / grants / requests ----
@@ -697,6 +728,14 @@ type holidayDTO struct {
 	Environments []string `json:"environments"`
 }
 
+func (d holidayDTO) toDomain() (domain.Holiday, error) {
+	date, err := time.Parse("2006-01-02", d.Date)
+	if err != nil {
+		return domain.Holiday{}, application.Invalid("date", "date must be YYYY-MM-DD")
+	}
+	return domain.Holiday{ID: d.ID, Date: date, Title: d.Title, Environments: d.Environments}, nil
+}
+
 func toHoliday(h domain.Holiday) holidayDTO {
 	envs := h.Environments
 	if envs == nil {
@@ -961,6 +1000,101 @@ func toArgoRollbackPlan(p application.ArgoRollbackPlan) argoRollbackPlanDTO {
 		Added: toArgoResourceRefs(p.Added), Kept: toArgoResourceRefs(p.Kept), Truncated: p.Truncated}
 }
 
+// syncAppDTO is the optional body of POST .../sync; left out, a plain sync
+// of the target revision.
+type syncAppDTO struct {
+	Revision    string               `json:"revision"`
+	Prune       bool                 `json:"prune"`
+	DryRun      bool                 `json:"dryRun"`
+	ApplyOnly   bool                 `json:"applyOnly"`
+	Force       bool                 `json:"force"`
+	SyncOptions []string             `json:"syncOptions"` // null: the app's own
+	Retry       *argoRetryDTO        `json:"retry"`       // null: the app's own
+	Resources   []argoResourceRefDTO `json:"resources"`   // empty: all
+}
+
+func (d syncAppDTO) options() application.ArgoSyncOptions {
+	o := application.ArgoSyncOptions{Revision: d.Revision, Prune: d.Prune, DryRun: d.DryRun, ApplyOnly: d.ApplyOnly, Force: d.Force,
+		SyncOptions: d.SyncOptions, Retry: d.Retry.toApp()}
+	for _, r := range d.Resources {
+		o.Resources = append(o.Resources, application.ArgoResourceRef{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name})
+	}
+	return o
+}
+
+// rollbackAppDTO is the optional body of POST .../history/{id}/rollback.
+type rollbackAppDTO struct {
+	Prune  bool `json:"prune"`
+	DryRun bool `json:"dryRun"`
+}
+
+type argoRetryDTO struct {
+	Limit   int64           `json:"limit"`
+	Backoff *argoBackoffDTO `json:"backoff"`
+}
+
+type argoBackoffDTO struct {
+	Duration    string `json:"duration"`
+	Factor      int64  `json:"factor"`
+	MaxDuration string `json:"maxDuration"`
+}
+
+func (d *argoRetryDTO) toApp() *application.ArgoRetry {
+	if d == nil {
+		return nil
+	}
+	out := &application.ArgoRetry{Limit: d.Limit}
+	if b := d.Backoff; b != nil {
+		out.Backoff = &application.ArgoBackoff{Duration: b.Duration, Factor: b.Factor, MaxDuration: b.MaxDuration}
+	}
+	return out
+}
+
+func toArgoRetry(r *application.ArgoRetry) *argoRetryDTO {
+	if r == nil {
+		return nil
+	}
+	out := &argoRetryDTO{Limit: r.Limit}
+	if b := r.Backoff; b != nil {
+		out.Backoff = &argoBackoffDTO{Duration: b.Duration, Factor: b.Factor, MaxDuration: b.MaxDuration}
+	}
+	return out
+}
+
+type argoPlanResourceDTO struct {
+	argoResourceDiffDTO
+	Prunable bool `json:"prunable"`
+}
+
+type argoSyncPlanDTO struct {
+	Revision       *string      `json:"revision"` // null for the target revision
+	TargetRevision string       `json:"targetRevision"`
+	AutoSync       bool         `json:"autoSync"`
+	Decision       decisionInfo `json:"decision"`
+	DecisionAction string       `json:"decisionAction"`
+	// DecisionNamespace is the namespace the decision is about.
+	DecisionNamespace  string                `json:"decisionNamespace"`
+	AdminOnlyResources []string              `json:"adminOnlyResources"`
+	Resources          []argoPlanResourceDTO `json:"resources"`
+	Truncated          bool                  `json:"truncated"`
+	Defaults           struct {
+		SyncOptions []string      `json:"syncOptions"`
+		Retry       *argoRetryDTO `json:"retry"`
+	} `json:"defaults"`
+}
+
+func toArgoSyncPlan(p application.ArgoSyncPlan) argoSyncPlanDTO {
+	out := argoSyncPlanDTO{Revision: strPtr(p.Revision), TargetRevision: p.TargetRevision, AutoSync: p.AutoSync,
+		Decision: toDecisionInfo(p.Decision), DecisionAction: string(p.DecisionAction), DecisionNamespace: p.DecisionAt.Namespace,
+		AdminOnlyResources: clusterResourceNames(p.AdminOnlyResources), Resources: make([]argoPlanResourceDTO, len(p.Resources)), Truncated: p.Truncated}
+	for i, r := range p.Resources {
+		out.Resources[i] = argoPlanResourceDTO{argoResourceDiffDTO: toArgoResourceDiff(r.ArgoResourceDiff), Prunable: r.Prunable}
+	}
+	out.Defaults.SyncOptions = orEmpty(p.SyncOptions)
+	out.Defaults.Retry = toArgoRetry(p.Retry)
+	return out
+}
+
 type argoResourceDiffDTO struct {
 	Group     string `json:"group"`
 	Kind      string `json:"kind"`
@@ -980,10 +1114,14 @@ type argoDiffDTO struct {
 func toArgoDiff(d application.ArgoDiff) argoDiffDTO {
 	out := argoDiffDTO{Resources: make([]argoResourceDiffDTO, len(d.Resources)), Truncated: d.Truncated}
 	for i, r := range d.Resources {
-		out.Resources[i] = argoResourceDiffDTO{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name, State: r.State,
-			Diff: r.Diff, Hidden: r.Hidden, Truncated: r.Truncated}
+		out.Resources[i] = toArgoResourceDiff(r)
 	}
 	return out
+}
+
+func toArgoResourceDiff(r application.ArgoResourceDiff) argoResourceDiffDTO {
+	return argoResourceDiffDTO{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name, State: r.State,
+		Diff: r.Diff, Hidden: r.Hidden, Truncated: r.Truncated}
 }
 
 // settingsPatchDTO is PATCH /admin/settings: only the fields sent change.

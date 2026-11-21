@@ -91,12 +91,56 @@ type applicationList struct {
 	} `json:"items"`
 }
 
-// syncPolicy is the part of spec.syncPolicy that decides whether the app
-// syncs automatically. Argo CD 3 can turn automated off with enabled: false.
+// syncPolicy is the part of spec.syncPolicy the portal reads: whether the
+// app syncs automatically (Argo CD 3 can turn automated off with enabled:
+// false), and the sync options and retry a manual sync starts from.
 type syncPolicy struct {
 	Automated *struct {
 		Enabled *bool `json:"enabled"`
 	} `json:"automated"`
+	SyncOptions []string       `json:"syncOptions"`
+	Retry       *retryStrategy `json:"retry"`
+}
+
+// retryStrategy is Argo CD's RetryStrategy.
+type retryStrategy struct {
+	Limit   int64    `json:"limit"`
+	Backoff *backoff `json:"backoff,omitempty"`
+}
+
+type backoff struct {
+	Duration    string `json:"duration,omitempty"`
+	Factor      *int64 `json:"factor,omitempty"`
+	MaxDuration string `json:"maxDuration,omitempty"`
+}
+
+func (r *retryStrategy) toApp() *application.ArgoRetry {
+	if r == nil {
+		return nil
+	}
+	out := &application.ArgoRetry{Limit: r.Limit}
+	if b := r.Backoff; b != nil {
+		out.Backoff = &application.ArgoBackoff{Duration: b.Duration, MaxDuration: b.MaxDuration}
+		if b.Factor != nil {
+			out.Backoff.Factor = *b.Factor
+		}
+	}
+	return out
+}
+
+func retryFromApp(r *application.ArgoRetry) *retryStrategy {
+	if r == nil {
+		return nil
+	}
+	out := &retryStrategy{Limit: r.Limit}
+	if b := r.Backoff; b != nil {
+		out.Backoff = &backoff{Duration: b.Duration, MaxDuration: b.MaxDuration}
+		if b.Factor > 0 {
+			f := b.Factor
+			out.Backoff.Factor = &f
+		}
+	}
+	return out
 }
 
 func (p *syncPolicy) automated() bool {
@@ -364,8 +408,9 @@ type initiatedBy struct {
 }
 
 type source struct {
-	RepoURL string `json:"repoURL"`
-	Chart   string `json:"chart"`
+	RepoURL        string `json:"repoURL"`
+	Chart          string `json:"chart"`
+	TargetRevision string `json:"targetRevision"`
 }
 
 func (s source) String() string {
@@ -405,6 +450,15 @@ func (c *HTTPClient) GetAppDetails(ctx context.Context, appNamespace, name strin
 	out := application.ArgoAppDetails{Health: st.Health.Status, HealthMessage: st.Health.Message,
 		SyncStatus: st.Sync.Status, SyncRevision: st.Sync.Revision,
 		AutoSync: d.Spec.SyncPolicy.automated(), MultiSource: len(d.Spec.Sources) > 0}
+	if src := d.Spec.Source; src != nil && !out.MultiSource {
+		out.TargetRevision = src.TargetRevision
+		if out.TargetRevision == "" {
+			out.TargetRevision = "HEAD" // Argo CD's default
+		}
+	}
+	if sp := d.Spec.SyncPolicy; sp != nil {
+		out.SyncOptions, out.Retry = sp.SyncOptions, sp.Retry.toApp()
+	}
 	for _, r := range st.Resources {
 		ref := application.ArgoResourceRef{Group: r.Group, Kind: r.Kind, Namespace: r.Namespace, Name: r.Name}
 		out.Resources = append(out.Resources, ref)
@@ -469,9 +523,31 @@ func (c *HTTPClient) ManagedResources(ctx context.Context, appNamespace, name st
 	for _, it := range list.Items {
 		out = append(out, application.ArgoManagedResource{Group: it.Group, Kind: it.Kind, Namespace: it.Namespace, Name: it.Name,
 			Live: state(it.NormalizedLiveState, it.LiveState), Desired: state(it.PredictedLiveState, it.TargetState),
-			Modified: it.Modified, Hook: it.Hook})
+			Modified: it.Modified, Hook: it.Hook, NoPrune: noPrune(it.LiveState)})
 	}
 	return out, nil
+}
+
+// noPrune reports whether a live object is annotated Prune=false in
+// argocd.argoproj.io/sync-options, so Argo CD never prunes it.
+func noPrune(live string) bool {
+	if live == "" || live == "null" {
+		return false
+	}
+	var obj struct {
+		Metadata struct {
+			Annotations map[string]string `json:"annotations"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal([]byte(live), &obj) != nil {
+		return false
+	}
+	for _, o := range strings.Split(obj.Metadata.Annotations["argocd.argoproj.io/sync-options"], ",") {
+		if strings.TrimSpace(o) == "Prune=false" {
+			return true
+		}
+	}
+	return false
 }
 
 // state returns the first present JSON state; Argo sends "null" or "" for none.
@@ -505,16 +581,40 @@ func (c *HTTPClient) RevisionMetadata(ctx context.Context, appNamespace, name, r
 // errInProgress is Argo's FailedPrecondition message for a second operation.
 const errInProgress = "another operation is already in progress"
 
-// SyncApplication starts a sync of the application to its target revision:
-// never prune, dry run or a chosen revision. The user is named in the
-// operation's info, since every call is made as the token's account.
-func (c *HTTPClient) SyncApplication(ctx context.Context, appNamespace, name, triggeredBy string) (application.ArgoOperation, error) {
+// SyncApplication starts a sync of the application with the options. The
+// user is named in the operation's info, since every call is made as the
+// token's account. Prune and dry run are always sent, so Argo CD's manual
+// sync defaults never apply; the strategy only when one is chosen, so a
+// plain sync stays Argo CD's default (hooks, no force).
+func (c *HTTPClient) SyncApplication(ctx context.Context, appNamespace, name, triggeredBy string, o application.ArgoSyncOptions) (application.ArgoOperation, error) {
 	body := map[string]any{
 		"name":         name,
 		"appNamespace": appNamespace,
-		"prune":        false,
-		"dryRun":       false,
+		"prune":        o.Prune,
+		"dryRun":       o.DryRun,
 		"infos":        []map[string]string{{"name": "Triggered by", "value": triggeredBy + " (tiphys)"}},
+	}
+	if o.Revision != "" {
+		body["revision"] = o.Revision
+	}
+	switch {
+	case o.ApplyOnly:
+		body["strategy"] = map[string]any{"apply": map[string]bool{"force": o.Force}}
+	case o.Force:
+		body["strategy"] = map[string]any{"hook": map[string]bool{"force": true}}
+	}
+	if o.SyncOptions != nil {
+		body["syncOptions"] = map[string][]string{"items": o.SyncOptions}
+	}
+	if o.Retry != nil {
+		body["retryStrategy"] = retryFromApp(o.Retry)
+	}
+	if len(o.Resources) > 0 {
+		rs := make([]map[string]string, len(o.Resources))
+		for i, r := range o.Resources {
+			rs[i] = map[string]string{"group": r.Group, "kind": r.Kind, "namespace": r.Namespace, "name": r.Name}
+		}
+		body["resources"] = rs
 	}
 	var app appState
 	err := c.do(ctx, http.MethodPost, "/api/v1/applications/"+url.PathEscape(name)+"/sync", nil, body, &app)
@@ -528,16 +628,16 @@ func (c *HTTPClient) SyncApplication(ctx context.Context, appNamespace, name, tr
 // that syncs automatically.
 const errAutoSync = "auto-sync is enabled"
 
-// RollbackApplication rolls the application back to a deploy of its history:
-// never prune or dry run. Argo CD's rollback request has no infos, so unlike
-// a sync the user is not named in Argo CD (the audit names them).
-func (c *HTTPClient) RollbackApplication(ctx context.Context, appNamespace, name string, id int64) (application.ArgoOperation, error) {
+// RollbackApplication rolls the application back to a deploy of its
+// history. Argo CD's rollback request has no infos, so unlike a sync the
+// user is not named in Argo CD (the audit names them).
+func (c *HTTPClient) RollbackApplication(ctx context.Context, appNamespace, name string, id int64, o application.ArgoRollbackOptions) (application.ArgoOperation, error) {
 	body := map[string]any{
 		"name":         name,
 		"appNamespace": appNamespace,
 		"id":           id,
-		"prune":        false,
-		"dryRun":       false,
+		"prune":        o.Prune,
+		"dryRun":       o.DryRun,
 	}
 	var app appState
 	err := c.do(ctx, http.MethodPost, "/api/v1/applications/"+url.PathEscape(name)+"/rollback", nil, body, &app)

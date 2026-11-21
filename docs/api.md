@@ -83,6 +83,8 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods` | `Pod[]` (needs `logs`) |
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/events` | `K8sEvent[]` (needs `logs`) |
 | GET | `/clusters/{c}/namespaces/{ns}/events` | `K8sEvent[]`: the newest 200 events of every object in the namespace, newest first. Needs `logs` on the whole namespace (a namespace or Argo project grant; a grant on single workloads gives 403, use the workload's `/events`). |
+| GET | `/clusters/{c}/namespaces/{ns}/pods` | `OtherPod[]`: the pods whose owner chain leads to no workload (an operator's pods such as CloudNativePG instances, bare pods, pods of a Job no CronJob owns), sorted by owner, then name. `interface OtherPod extends Pod { owner: { group: string; kind: string; name: string } \| null }` (`owner` is the pod's controller). Needs a grant in the namespace (403 otherwise, like `.../workloads`); without `logs` on the whole namespace the list is empty, since a grant on single workloads cannot cover these pods. |
+| GET | `/clusters/{c}/namespaces/{ns}/pods/{pod}/logs/download?…` | Like a workload pod's log download, for an `OtherPod`. Needs `logs` on the whole namespace; a workload's pod gives 403 `pod_in_workload` (read it as the workload's). Audited with the pod and no workload. |
 | GET | `/clusters/{c}/namespaces/{ns}/traffic` | `TrafficGraph`: how traffic from outside reaches the namespace's pods, like Argo CD's network view. Needs `logs` on the whole namespace (same rule as `/events`). `interface TrafficGraph { nodes: TrafficNode[]; edges: TrafficEdge[] }`, `interface TrafficNode { id: string; kind: string; namespace: string; name: string; details: string[]; ready: number; total: number; problem: string }` (`id` is `Kind/namespace/name`; `kind` is `Address` (no namespace), `Gateway`, `Waypoint` (an Istio ambient waypoint), `Ingress`, `HTTPRoute`, `GRPCRoute`, `Service`, a workload kind, `ReplicaSet`, `Job` or `Pod`; `ready`/`total` count running pods behind a Service or workload; `problem` is empty unless traffic may not get through; every Service of the namespace is a node; what no `Address`, `Gateway`, `Ingress` or Service whose details say `LoadBalancer` or `NodePort` leads to is reachable only inside the cluster), `interface TrafficEdge { from: string; to: string; labels: string[] }` (labels: host and path, route matches, listener). |
 | GET | `/clusters/{c}/namespaces/{ns}/access?kind=&name=` | `AccessGrant[]` ("Who has access" for developers): unexpired grants reaching the namespace, or the workload when `kind` (e.g. `Deployment`) and `name` are given. Same check as listing the namespace / opening the workload; 403 otherwise. `interface AccessGrant { id: number; holder: { kind: 'team' \| 'user'; id: number; name: string; members: string[] }; scope: ScopeView; actions: Action[]; expiresAt: string \| null }` (no note or author; `members` are a team's enabled members). Admins and auditors use `/admin/grants/covering`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps` | `NamespaceApp[]` — Argo CD applications deploying to the namespace (destination or any resource there), from the Argo cache (≤60 s old). Same check as listing the namespace; 403 otherwise. |
@@ -90,12 +92,13 @@ Path segment `{kind}` is lowercase plural: `deployments | statefulsets | daemons
 | POST | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/restart` | 202 `{ operationId }` (needs `restart`; not for CronJob) |
 | DELETE | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}` | 204. Deletes one pod of the workload for its controller to replace (needs `restart`; 422 for CronJob). 403 `pod_not_in_workload`; 409 `conflict` when the pod was replaced in between; 409 `pod_delete_unavailable` on a cluster without the chart's `tiphys-pod-delete-only` policy. Audited as `pod.delete` (started, then the outcome) with the pod. |
 | POST | `/clusters/{c}/namespaces/{ns}/cronjobs/{name}/run` | 202 `{ operationId, jobName }` (needs `run-job`); 409 `already_running` when `concurrencyPolicy: Forbid` and a job is active |
-| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync` | 202 `{ operationId }`. Syncs an Argo CD application that deploys to the namespace (404 otherwise) to its target revision, always without prune, dry run or a chosen revision; the user is named in the operation's info. Needs `sync` on **every** namespace the app deploys to (destination and resources) and a fresh Argo cache; an app with other cluster-scoped resources needs an admin (`app_scope`), unless their kinds are in `settings.argoSyncClusterKinds`; the `argo.sync` details then name them (`clusterResources`). 403 names the denying namespace in the audit event. 409 `already_running` when Argo CD has another operation running; 502 `argo_error` when Argo CD fails. Audited as `argo.sync` (started, then the outcome). |
+| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync` | Body `SyncAppInput` (optional; left out, a plain sync of the target revision with the app's own sync options and retry) → 202 `{ operationId }`. Syncs an Argo CD application that deploys to the namespace (404 otherwise) with the options of Argo CD's sync dialog; the user is named in the operation's info. Needs `sync` on **every** namespace the app deploys to (destination and resources) and a fresh Argo cache; an app with other cluster-scoped resources needs an admin (`app_scope`), unless their kinds are in `settings.argoSyncClusterKinds`; the `argo.sync` details then name them (`clusterResources`). A `revision` other than the target also needs `rollback`, both decided on the app plus the namespaces and cluster-scoped resources of the revision's manifests (as for a rollback plan); 409 `auto_sync_enabled` for it on an app that syncs automatically unless `dryRun`, 422 for a multi-source app. 422 for a sync option other than those of `SyncAppInput` and the app's own, two prune propagation policies, a resource not in the plan, a retry limit outside 0–10 or a backoff over 1h. 403 names the denying namespace in the audit event. 409 `already_running` when Argo CD has another operation running; 502 `argo_error` when Argo CD fails or refuses (e.g. Replace turned off on its API server, or `override` missing for another revision when `application.sync.requireOverridePrivilegeForRevisionSync` is on). Audited as `argo.sync` (started with `prune`, `dryRun`, `applyOnly`, `force`, `revision`/`targetRevision`, `syncOptions`, `retry`, `resources` and `toPrune` (≤ 200), then the outcome). |
+| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/sync-plan?revision=` | `ArgoSyncPlan`: what a sync would do. Needs `sync` on the app as it is now (a denial is audited). For the target revision (no or the same `revision`) the app's managed resources with their diffs, like `diff`, audited as `argo.diff` before Argo CD is asked; for another revision the revision's manifests against what the app manages now, without diffs, and the decision `POST .../sync` would make (not audited). 422 for a malformed revision or a multi-source app with one; 502 `argo_error` / `cluster_error`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/status` | `ArgoAppStatus`: health and sync (with messages), `status.conditions`, the resources Argo CD does not assess as Healthy (`unhealthy`, each with its health message) and the last operation with its per-resource results, read from Argo CD on each call. Same check as listing the namespace's apps (checked before the app is looked up, so 404 reveals nothing); 502 `argo_error`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history` | `ArgoDeploy[]`: the last 10 deploys of `status.history`, newest first, each with its commit (author, message) when Argo CD can describe the revision (Git, single source), `portalUser`/`portalAction` (`argo.sync` or `argo.rollback`) when the audit shows it was started through the portal (matched by the operation's `startedAt`; Argo CD's `initiatedBy` is then the token's account), and `rollbackBlocked`: `current`, `auto_sync`, `multi_source`, `source_changed` (the deploy's source differs from the app's current one but for `targetRevision`) or null. Same check as `status`. |
 | GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | `ArgoRollbackPlan`: what rolling back to deploy `id` would do. Reads the manifests of the app's current source at the deploy's revision from Argo CD (`applications, get`) and places them with the cluster's discovery (as `tiphys:user`): a namespaced object without a namespace goes to the destination, a kind the cluster does not serve counts as cluster-scoped. Needs `rollback` on the app as it is now (a denial is audited); the plan's own decision is not audited. 409 `auto_sync_enabled`; 422 for a deploy not in the history, the current one, a multi-source app or a changed source; 502 `argo_error` / `cluster_error`. |
-| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | 202 `{ operationId }`. Rolls the app back to deploy `id`, like Rollback in Argo CD, always without prune or dry run. Allowed only when the plan's decision is (`rollback` on every namespace of the app and of the revision, a fresh Argo cache, `app_scope` for cluster-scoped resources of either). Argo CD's rollback request carries no info, so the user is named only in the audit: `argo.rollback` (started, with `historyId`, `revision`, `namespaces`, `clusterResources`; then the outcome with `operationStartedAt`). Same errors as the plan, plus 409 `already_running`. Progress on `/operations/{id}/stream` like a sync. The app is then OutOfSync with Git until the next sync. |
-| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/diff` | `ArgoDiff`: what a sync would change, from Argo CD's managed resources (normalized live vs predicted state): `changed`, `missing` (only in Git) or `extra` (only in the cluster; never pruned), each with a unified YAML diff without `status`, managed fields and server-set metadata; hooks left out; Secrets listed with `hidden: true` and no content. At most 200 resources and 2,000 lines per diff. It shows manifests, so it needs what a sync needs (`sync` on every namespace of the app) and is audited as `argo.diff` before Argo CD is asked. |
+| POST | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/history/{id}/rollback` | Body `{ prune?: boolean; dryRun?: boolean }` (optional) → 202 `{ operationId }`. Rolls the app back to deploy `id`, like Rollback in Argo CD; with `prune` what the plan `kept` is deleted (but for what is annotated `Prune=false`). Allowed only when the plan's decision is (`rollback` on every namespace of the app and of the revision, a fresh Argo cache, `app_scope` for cluster-scoped resources of either). Argo CD's rollback request carries no info, so the user is named only in the audit: `argo.rollback` (started, with `historyId`, `revision`, `prune`, `dryRun`, `toPrune`, `namespaces`, `clusterResources`; then the outcome with `operationStartedAt`). Same errors as the plan, plus 409 `already_running`. Progress on `/operations/{id}/stream` like a sync. The app is then OutOfSync with Git until the next sync. |
+| GET | `/clusters/{c}/namespaces/{ns}/apps/{appNamespace}/{name}/diff` | `ArgoDiff`: what a sync would change, from Argo CD's managed resources (normalized live vs predicted state): `changed`, `missing` (only in Git) or `extra` (only in the cluster; pruned only by a sync that prunes), each with a unified YAML diff without `status`, managed fields and server-set metadata; hooks left out; Secrets listed with `hidden: true` and no content. At most 200 resources and 2,000 lines per diff. It shows manifests, so it needs what a sync needs (`sync` on every namespace of the app) and is audited as `argo.diff` before Argo CD is asked. |
 | GET | `/operations/{id}/stream` | Server-Sent Events for restart / run / sync progress (see below). Only the operation's owner or an admin. |
 | GET | `/live?ns={cluster}/{namespace}&ns=...` | Server-Sent Events: what changes in 1–10 namespaces (see below). `422` for a bad or missing `ns`, `429 rate_limited` over 8 open streams per user. |
 | GET | `/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/logs/download?container=&previous=&tailLines=&sinceSeconds=&timestamps=` | `text/plain` attachment, capped at 50 MB. Header `X-Tiphys-Truncated: true` when capped. Needs `logs`. |
@@ -134,12 +137,43 @@ interface ArgoResourceRef { group: string; kind: string; namespace: string; name
 
 interface ArgoRollbackPlan {
   id: number; revision: string;       // the deploy
-  decision: DecisionInfo;             // rollback on what the app manages now plus what the revision deploys (a rollback never prunes)
+  decision: DecisionInfo;             // rollback on what the app manages now plus what the revision deploys
   decisionNamespace: string;          // the namespace the decision is about (the one that denied, else the destination)
   adminOnlyResources: string[];       // like NamespaceApp.adminOnlyResources, for both; empty unless decision.reason is app_scope
   added: ArgoResourceRef[];           // in the revision, not managed now (hooks included)
-  kept: ArgoResourceRef[];            // managed now, not in the revision: they stay
+  kept: ArgoResourceRef[];            // managed now, not in the revision: they stay, unless the rollback prunes
   truncated: boolean;                 // more than 200 in either list
+}
+
+interface ArgoRetry { limit: number; backoff: { duration: string; factor: number; maxDuration: string } | null } // durations like "5s"
+
+interface SyncAppInput {              // every field optional
+  revision?: string;                  // another than the target needs rollback too (see POST .../sync)
+  prune?: boolean; dryRun?: boolean;
+  applyOnly?: boolean;                // the apply strategy: hooks are skipped
+  force?: boolean;
+  syncOptions?: string[];             // replaces the app's own: Validate=false, CreateNamespace=true, PruneLast=true, ApplyOutOfSyncOnly=true,
+                                      // RespectIgnoreDifferences=true, ServerSideApply=true, Replace=true, FailOnSharedResource=true,
+                                      // PrunePropagationPolicy=foreground|background|orphan, and any option the app sets itself
+  retry?: ArgoRetry;                  // replaces the app's own; limit 0 for none
+  resources?: ArgoResourceRef[];      // only these (from the plan), at most 500
+}
+
+interface ArgoSyncPlan {
+  revision: string | null;            // null for the target revision
+  targetRevision: string;             // spec.source.targetRevision ("HEAD" when unset; "" for multi-source)
+  autoSync: boolean;
+  decision: DecisionInfo;             // the target: sync on the app; another revision: sync and rollback on the app plus what it deploys
+  decisionAction: 'sync' | 'rollback';// what the decision is about
+  decisionNamespace: string;
+  adminOnlyResources: string[];       // empty unless decision.reason is app_scope
+  resources: (ArgoResourceRef & {
+    state: 'changed' | 'missing' | 'extra' | 'synced' | 'present'; // present: managed now and in the other revision (changes unknown)
+    diff: string; hidden: boolean; truncated: boolean;             // as in ArgoDiff; diffs only for the target revision
+    prunable: boolean;                // extra and not annotated Prune=false: a pruning sync deletes it
+  })[];                               // what changes first, hooks left out, at most 200
+  truncated: boolean;
+  defaults: { syncOptions: string[]; retry: ArgoRetry | null }; // the app's spec.syncPolicy
 }
 
 interface NamespaceSummary {
@@ -166,9 +200,11 @@ interface WorkloadDetail extends WorkloadSummary {
 interface Pod {
   name: string; phase: string; ready: string /* "2/2" */; restarts: number; node: string; createdAt: string;
   lastTermination: string | null; lastTerminatedAt: string | null;
+  job: string | null;   // the controlling Job, for a CronJob's pods
   containers: {
     name: string; image: string; ready: boolean; state: string; stateReason: string; restartCount: number;
     lastState: string | null; lastReason: string | null; lastExitCode: number | null;
+    exitCode: number | null;  // of the current state when terminated (a finished Job pod)
     lastStartedAt: string | null; lastFinishedAt: string | null; memoryLimit: string | null; init: boolean;
   }[];
 }
@@ -179,14 +215,22 @@ interface K8sEvent {
 }
 
 interface CronJobSummary extends WorkloadSummary {
-  lastScheduleAt: string | null; lastResult: 'succeeded' | 'failed' | 'running' | null;
+  lastScheduleAt: string | null; lastSuccessfulAt: string | null;
+  nextScheduleAt: string | null;  // null when suspended or the schedule or time zone cannot be read
+  timeZone: string | null;        // spec.timeZone; null = the controller's, and nextScheduleAt is computed in UTC
+  successfulJobsHistoryLimit: number; failedJobsHistoryLimit: number;  // Kubernetes defaults 3 and 1
+  lastResult: 'succeeded' | 'failed' | 'running' | null;
   activeJobs: number; concurrencyPolicy: string;
-  recentJobs: JobSummary[];
+  recentJobs: JobSummary[];       // newest first: every Job the cluster still keeps, at most 50
 }
 interface JobSummary {
   name: string; cronJob: string; triggeredBy: string | null; manual: boolean;
-  status: 'running' | 'succeeded' | 'failed'; active: number; succeeded: number; completions: number;
-  startedAt: string | null; finishedAt: string | null; podNames: string[];
+  status: 'running' | 'succeeded' | 'failed'; active: number; succeeded: number;
+  failed: number;       // failed attempts (pods)
+  completions: number;
+  startedAt: string | null; finishedAt: string | null;
+  reason: string | null; message: string | null;  // of the Failed condition, e.g. BackoffLimitExceeded
+  podNames: string[];   // the pods the Job controls, newest first (the latest attempt first)
 }
 ```
 
@@ -199,17 +243,17 @@ interface JobSummary {
 
 ### Live changes (SSE)
 
-`GET /live?ns=<cluster>/<namespace>` (repeated, 1–10) → `text/event-stream`. One stream per browser tab follows the namespaces the open page shows; the pages refetch their data when something changes, and notable changes become toasts. The server watches pods and events in each namespace as `tiphys:user` and attributes them to their workload through the owner chain; anything that belongs to no workload is dropped. Events from before the stream are not sent.
+`GET /live?ns=<cluster>/<namespace>` (repeated, 1–10) → `text/event-stream`. One stream per browser tab follows the namespaces the open page shows; the pages refetch their data when something changes, and notable changes become toasts. The server watches pods and events in each namespace as `tiphys:user` and attributes them to their workload through the owner chain; the changes of pods no workload owns (`OtherPod`) and their events come with an empty `kind` and `name`, other events are dropped. Events from before the stream are not sent.
 
 - `retry: 3000`, then `event: ready` — `{ namespaces: { cluster, namespace, error? }[] }`. `error` (`denied` | `invalid` | `not_found` | `cluster_error`) means that namespace is not followed (it needs a grant there, like `.../workloads`; a denial is audited). After a reconnect the client should refetch, since changes may have been missed.
-- `event: change` — a `LiveChange`, decided on its own against the current policy: with `logs` on the workload everything is sent; with only other actions on it, `workload` and the rollout changes (the counts the workload list shows) are sent and every other change becomes `{ type: 'workload' }` without details; without a grant on the workload nothing.
+- `event: change` — a `LiveChange`, decided on its own against the current policy: with `logs` on the workload everything is sent; with only other actions on it, `workload` and the rollout changes (the counts the workload list shows) are sent and every other change becomes `{ type: 'workload' }` without details; without a grant on the workload nothing. An `OtherPod`'s changes need `logs` on the whole namespace.
 - `event: end` — `{ reason: EndReason }` before the server closes the stream. It does so after 10 minutes (`max_duration`; the browser reconnects, which checks the login again), when the login session ends or the user is disabled.
 - A `: ping` comment every 25 s keeps proxies from closing the stream.
 
 ```ts
 interface LiveChange {
   cluster: string; namespace: string;
-  kind: WorkloadKind; name: string;   // the workload it belongs to
+  kind: WorkloadKind | ''; name: string;   // the workload it belongs to; empty for an OtherPod
   type: 'pod_added' | 'pod_removed' | 'pod_updated'   // phase, readiness, terminating
       | 'pod_restarted'                               // a container restarted
       | 'workload'                                    // something changed; status when the counts were read
@@ -228,7 +272,7 @@ A rollout is a new revision of the workload (Deployment revision, StatefulSet up
 
 Authenticated by the session cookie; the server checks `Origin` equals the portal's origin and the `csrf` query parameter equals the CSRF token (browsers cannot set headers on WebSockets): `?csrf=<csrfToken>`. Paths:
 
-- Logs: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/logs/stream?container=&previous=&follow=true&tailLines=100&sinceSeconds=&timestamps=`
+- Logs: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/logs/stream?container=&previous=&follow=true&tailLines=100&sinceSeconds=&timestamps=`; an `OtherPod`'s: `GET /api/v1/clusters/{c}/namespaces/{ns}/pods/{pod}/logs/stream?…` (needs `logs` on the whole namespace)
 - Exec: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/exec?container=&shell=/bin/sh&cols=80&rows=24` — `shell` is `/bin/sh` (default) or `/bin/bash`, which falls back to `/bin/sh` in containers without bash (the UI's default).
 - Debug: `GET /api/v1/clusters/{c}/namespaces/{ns}/workloads/{kind}/{name}/pods/{pod}/debug?container=&shell=/bin/sh&cols=80&rows=24` — exec in a new debug container (`DEBUG_IMAGE`) that shares `container`'s processes and the pod's network. Needs the `exec` action and is an exec session in every other way (recorded, re-evaluated, same limits). Registered only when `me.settings.debugEnabled`. The upgrade waits until the container runs (up to 45 s).
 - Live watch (admin/auditor, read-only): `GET /api/v1/sessions/{id}/watch`
@@ -430,8 +474,10 @@ interface DecisionExplain extends DecisionInfo { cluster: string; namespace: str
 | POST | `/admin/access-check` | `{ userId, cluster, namespace, workload?: {kind,name}, action, at?: string }` → `DecisionExplain` (the "access checker") |
 | GET / POST | `/admin/time-windows` | |
 | PUT / DELETE | `/admin/time-windows/{id}` | |
+| PATCH | `/admin/time-windows/{id}` | Changes only the fields sent (any of `TimeWindowView` but `id`; a list such as `actions` is replaced whole), e.g. `{ "enabled": false }` → `TimeWindowView`. The result is validated like a PUT. Unknown fields and an empty body are refused (422). Audited as an update with before and after. |
 | GET / POST | `/admin/holidays` | |
 | PUT / DELETE | `/admin/holidays/{id}` | |
+| PATCH | `/admin/holidays/{id}` | Like the time window PATCH, e.g. `{ "title": "New Year" }` → `HolidayView`. |
 | GET | `/admin/clusters` | `ClusterView[]` |
 | POST | `/admin/clusters` | Only when `CLUSTER_REGISTRATION_FROM_UI` is on (`me.settings.clusterRegistration`; otherwise 404). `{ name, environment?, kubeconfig: string }` — validates (version + privilege check), creates the cluster and writes the kubeconfig to `CREDENTIAL_DIR` (this mode needs `CREDENTIAL_STORE=dir`; the portal never writes Secrets). Returns `ClusterView`; 422 with `details.violations` if over-privileged. The token is never returned. Clusters are always also registered by Secrets annotated `tiphys/cluster: <name>` in the portal's namespace, which the portal watches; a new Secret appears in `GET /admin/clusters` within seconds. |
 | PUT | `/admin/clusters/{name}` | `{ environment }`. `409 conflict` when the cluster's Secret sets it (`tiphys/environment` annotation). |
@@ -459,10 +505,10 @@ Service accounts that change configuration from scripts and pipelines. An admin 
 | --- | --- | --- |
 | GET | `/admin/time-windows` | `time_windows:read` |
 | POST | `/admin/time-windows` | `time_windows:create` |
-| PUT | `/admin/time-windows/{id}` | `time_windows:update` |
+| PUT / PATCH | `/admin/time-windows/{id}` | `time_windows:update` (PATCH needs no read: it sends only the fields that change) |
 | DELETE | `/admin/time-windows/{id}` | `time_windows:delete` |
 | GET | `/admin/holidays` | `holidays:read` |
-| POST / PUT / DELETE | `/admin/holidays`, `/admin/holidays/{id}` | `holidays:create` / `:update` / `:delete` |
+| POST / PUT, PATCH / DELETE | `/admin/holidays`, `/admin/holidays/{id}` | `holidays:create` / `:update` / `:delete` |
 | GET | `/admin/settings` | `settings:read` (the webhook URL is masked) |
 | PATCH | `/admin/settings` | the write permission of every section the body touches: `settings.break_glass:write` (`breakGlassMode`, `breakGlassDefaultMinutes`, `breakGlassMaxMinutes`, `breakGlassRequestMaxAgeMinutes`), `settings.exec:write` (`execMaxSessionMinutes`, `execIdleTimeoutMinutes`), `settings.retention:write` (`retention*Days`), `settings.notifications:write` (`rocket`) |
 
@@ -471,4 +517,8 @@ A token without the permission gets `403 missing_permission`; a revoked, expired
 ```sh
 curl -X PATCH -H "Authorization: Bearer $TIPHYS_TOKEN" -H 'Content-Type: application/json' \
   -d '{"breakGlassMode":"approval"}' https://tiphys.example.com/api/v1/admin/settings
+
+# disable time window 39
+curl -X PATCH -H "Authorization: Bearer $TIPHYS_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"enabled":false}' https://tiphys.example.com/api/v1/admin/time-windows/39
 ```

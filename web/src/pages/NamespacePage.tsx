@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { ApiError } from '../api';
-import type { K8sEvent, NamespaceApp, TrafficGraph, WorkloadAction, WorkloadSummary } from '../api';
+import type { K8sEvent, NamespaceApp, OtherPod, TrafficGraph, WorkloadAction, WorkloadSummary } from '../api';
 import { ActionButton } from '../components/ActionButton';
 import { ArgoAppPanel } from '../components/ArgoAppPanel';
-import { ActionChips, EnvBadge, HealthChip, KindTag, SyncChip } from '../components/Badges';
+import { CronStatus } from '../components/CronJobsPanel';
+import { ActionChips, EnvBadge, HealthChip, KindTag, PhaseChip, SyncChip } from '../components/Badges';
 import { Bump } from '../components/Bump';
 import { Empty, ErrorBanner, Loading, Skeleton } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -20,12 +21,14 @@ import { useSetShellCtx } from '../context/shell';
 import { eventKey, eventSig, rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import type { AnimatedRow } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
+import { useCronJobs } from '../hooks/useCronJobs';
 import { useUrlState } from '../hooks/useUrlState';
 import type { ApiState } from '../hooks/useApi';
 import { useNow } from '../hooks/useNow';
 import { appSyncTarget, grantedOrClosed } from '../lib/decision';
-import { cronJobsUrl, logsUrl, workloadUrl } from '../lib/routes';
-import { fmtDateTime, fmtRelative } from '../lib/time';
+import { cronJobsUrl, logsUrl, otherPodLogsUrl, workloadUrl } from '../lib/routes';
+import { fmtAge, fmtDateTime, fmtRelative } from '../lib/time';
+import { filterOtherPods, groupByOwner, ownerKind } from '../lib/otherPods';
 import { inClusterNodes, trafficRules, withoutNodes } from '../lib/traffic';
 import { breakGlassKey } from '../lib/breakGlass';
 
@@ -58,11 +61,14 @@ export function NamespacePage() {
   else if (!opened.tabs.includes(tab)) setOpened({ key, tabs: [...opened.tabs, tab] });
   const events = useApi(() => api.namespaceEvents(cluster, ns), [cluster, ns, breakGlassKey(me)], { enabled: opened.tabs.includes('events') });
   const traffic = useApi(() => api.namespaceTraffic(cluster, ns), [cluster, ns, breakGlassKey(me)], { enabled: opened.tabs.includes('traffic') });
-  useLive({ cluster, namespace: ns }, (changes) => {
+  const live = useLive({ cluster, namespace: ns }, (changes) => {
     const all = changes.length === 0;
-    if (all || changes.some((c) => c.type !== 'event')) list.reload();
+    if (all || changes.some((c) => c.kind && c.type !== 'event')) list.reload();
+    if (all || changes.some((c) => !c.kind && c.type !== 'event')) others.reload();
     if (opened.tabs.includes('events') && (all || changes.some((c) => c.type === 'event' || c.type === 'pod_restarted'))) events.reload();
   });
+  // Pods no workload owns: listed only with logs on the whole namespace (else empty).
+  const others = useApi(() => api.otherPods(cluster, ns), [cluster, ns, breakGlassKey(me)], { poll: live ? undefined : 15_000 });
   const warnings = events.data?.filter((e) => e.type === 'Warning').length ?? 0;
   const problems = traffic.data?.nodes.filter((n) => n.problem).length ?? 0;
 
@@ -71,6 +77,8 @@ export function NamespacePage() {
   const shown = all.filter((w) => (!kind || w.kind === kind) && (!q || w.name.toLowerCase().includes(q.toLowerCase())));
   const rows = useAnimatedList(list.data ? shown : undefined, (w) => `${w.kind}/${w.name}`, (w) => `${w.ready}/${w.desired}|${w.suspended}`, `${key}|${kind}|${q}`);
   const hasCron = all.some((w) => w.kind === 'CronJob');
+  const crons = useCronJobs(cluster, ns, { enabled: hasCron });
+  const now = useNow(30_000);
 
   return (
     <>
@@ -123,7 +131,7 @@ export function NamespacePage() {
                         <tr key={rk} className={rowClass(anim)}>
                           <td><Link className="mono" to={workloadUrl(loc)}><b style={{ fontWeight: 500 }}>{w.name}</b></Link></td>
                           <td><KindTag kind={w.kind} /></td>
-                          <td className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : <><Bump value={`${w.ready}/${w.desired}`} /> ready</>}</td>
+                          <td className={w.kind === 'CronJob' ? undefined : 'mono muted'}>{w.kind === 'CronJob' ? <CronStatus w={w} cron={crons.data?.find((c) => c.name === w.name)} now={now} /> : <><Bump value={`${w.ready}/${w.desired}`} /> ready</>}</td>
                           <td><ActionChips actions={(Object.keys(w.access) as WorkloadAction[]).filter((a) => w.access[a].allowed)} /></td>
                           <td style={{ textAlign: 'right' }}>
                             <div className="row" style={{ justifyContent: 'flex-end', gap: 4 }}>
@@ -143,16 +151,75 @@ export function NamespacePage() {
               </div>
             </div>
           )}
+
+          {!kind && <OtherPods pods={others.data} q={q} cluster={cluster} ns={ns} live={live} />}
         </>
       )}
       {run && (
         <RunCronDialog
           cron={run}
           onClose={(changed) => { setRun(null); if (changed) list.reload(); }}
-          onViewRunning={() => navigate(cronJobsUrl(cluster, ns))}
+          onViewRunning={() => navigate(`${cronJobsUrl(cluster, ns)}?result=running&cron=${encodeURIComponent(run.name)}`)}
         />
       )}
     </>
+  );
+}
+
+/**
+ * The pods no workload owns (an operator's, such as CloudNativePG instances,
+ * or bare pods), grouped by their controller. Only their logs can be read:
+ * restart, exec and delete need a workload. Hidden when there are none or
+ * the viewer lacks logs on the whole namespace (the server then lists none).
+ * Live changes keep every field current; polling is the fallback.
+ */
+function OtherPods({ pods, q, cluster, ns, live }: { pods: OtherPod[] | undefined; q: string; cluster: string; ns: string; live: boolean }) {
+  const now = useNow(live ? 30_000 : 15_000);
+  const shown = filterOtherPods(pods ?? [], q);
+  const rows = useAnimatedList(pods ? shown : undefined, (p) => p.name, (p) => `${p.phase}|${p.ready}|${p.restarts}|${p.lastTermination}|${p.node}`, `${cluster}/${ns}|${q}`);
+  if (!pods?.length) return null;
+  const groups = groupByOwner(rows.map((r) => r.item));
+  const anim = new Map(rows.map((r) => [r.item.name, r.anim]));
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="hd">
+        Other pods
+        <small>· <Bump value={pods.length} /> · owned by no Deployment, StatefulSet, DaemonSet, Rollout or CronJob (e.g. an operator&apos;s) · logs only</small>
+      </div>
+      <div className="tbl-wrap">
+        <table className="tbl nowrap">
+          <thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Restarts</th><th>Age</th><th>Node</th><th>Last termination</th><th /></tr></thead>
+          <tbody>
+            {groups.length === 0 && <tr><td colSpan={8} className="empty">No other pods match this filter.</td></tr>}
+            {groups.map((g) => (
+              <Fragment key={g.key}>
+                <tr className="sub">
+                  <td colSpan={8}>
+                    <span className="row" style={{ gap: 8 }} title={g.owner ? `Controlled by ${g.owner.kind} ${g.owner.name}` : 'These pods have no controller: nothing recreates them.'}>
+                      <KindTag kind={ownerKind(g.owner)} />
+                      {g.owner && <b className="mono" style={{ fontWeight: 500 }}>{g.owner.name}</b>}
+                      <span className="mono muted"><Bump value={`${g.ready}/${g.pods.length}`} /> ready</span>
+                    </span>
+                  </td>
+                </tr>
+                {g.pods.map((p) => (
+                  <tr key={p.name} className={rowClass(anim.get(p.name) ?? '')}>
+                    <td className="mono"><Link className="mono" to={otherPodLogsUrl(cluster, ns, p.name)} style={{ paddingLeft: 12 }}>{p.name}</Link></td>
+                    <td><PhaseChip phase={p.phase} /></td>
+                    <td className="mono"><Bump value={p.ready} /></td>
+                    <td>{p.restarts > 0 ? <b><Bump value={p.restarts} /></b> : 0}</td>
+                    <td>{fmtAge(p.createdAt, now)}</td>
+                    <td className="mono">{p.node || '—'}</td>
+                    <td>{p.lastTermination ? <><span className="chip err">{p.lastTermination}</span> <span className="muted">{fmtRelative(p.lastTerminatedAt, now)}</span></> : <span className="muted">—</span>}</td>
+                    <td style={{ textAlign: 'right' }}><Link className="btn ghost sm" to={otherPodLogsUrl(cluster, ns, p.name)}>Logs</Link></td>
+                  </tr>
+                ))}
+              </Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

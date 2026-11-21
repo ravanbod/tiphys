@@ -67,7 +67,7 @@ func TestWatchNamespacePodChanges(t *testing.T) {
 	p := pod("api-1-a", ctrl("apps/v1", "ReplicaSet", "api-1"))
 	p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", Ready: true}}
 	r := newRig(t, rolledOut("1", 1), replicaSet("api-1", ctrl("apps/v1", "Deployment", "api")), p,
-		pod("bare", nil), // owned by no workload: never reported
+		pod("bare", nil), // owned by no workload: reported with a zero workload
 	)
 	ch := startWatch(t, r)
 
@@ -88,6 +88,9 @@ func TestWatchNamespacePodChanges(t *testing.T) {
 	bare.Status.Phase = corev1.PodRunning
 	if _, err := r.kube.CoreV1().Pods(testNS).UpdateStatus(ctx, bare, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	if c := next(t, ch); c.Type != application.ChangePodUpdated || c.Workload != (domain.WorkloadRef{}) || c.Pod != "bare" || c.Phase != "Running" {
+		t.Fatalf("other pod = %+v", c)
 	}
 	if _, err := r.kube.CoreV1().Pods(testNS).Create(ctx, pod("api-1-b", ctrl("apps/v1", "ReplicaSet", "api-1")), metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
@@ -193,7 +196,8 @@ func TestWatchNamespaceSeesLateStatus(t *testing.T) {
 
 func TestWatchNamespaceEvents(t *testing.T) {
 	ctx := context.Background()
-	r := newRig(t, replicaSet("api-1", ctrl("apps/v1", "Deployment", "api")), rolledOut("1", 1), pod("api-1-a", ctrl("apps/v1", "ReplicaSet", "api-1")))
+	r := newRig(t, replicaSet("api-1", ctrl("apps/v1", "Deployment", "api")), rolledOut("1", 1), pod("api-1-a", ctrl("apps/v1", "ReplicaSet", "api-1")),
+		pod("pg-1", ctrl("postgresql.cnpg.io/v1", "Cluster", "pg")))
 	ch := startWatch(t, r)
 
 	event := func(uid, typ, reason, apiVersion, kind, name string) {
@@ -225,6 +229,11 @@ func TestWatchNamespaceEvents(t *testing.T) {
 	event("e6", "Warning", "FailedCreate", "apps/v1", "ReplicaSet", "api-1")
 	if c := next(t, ch); c.Type != application.ChangeEvent || c.Workload != apiRef {
 		t.Fatalf("replicaset event = %+v", c)
+	}
+	event("e7", "Warning", "Unhealthy", "postgresql.cnpg.io/v1", "Cluster", "pg") // not a workload: dropped
+	event("e8", "Warning", "BackOff", "v1", "Pod", "pg-1")
+	if c := next(t, ch); c.Type != application.ChangeEvent || c.Workload != (domain.WorkloadRef{}) || c.Pod != "pg-1" {
+		t.Fatalf("other pod event = %+v", c)
 	}
 }
 

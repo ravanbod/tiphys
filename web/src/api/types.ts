@@ -190,7 +190,7 @@ export interface ArgoResourceRef { group: string; kind: string; namespace: strin
 export interface ArgoRollbackPlan {
   id: number;
   revision: string;
-  /** Covers what the app manages now and what the revision deploys (a rollback never prunes). */
+  /** Covers what the app manages now and what the revision deploys. */
   decision: DecisionInfo;
   /** The namespace the decision is about (the one that denied, else the destination). */
   decisionNamespace: string;
@@ -198,7 +198,7 @@ export interface ArgoRollbackPlan {
   adminOnlyResources: string[];
   /** In the revision, not managed now. */
   added: ArgoResourceRef[];
-  /** Managed now, not in the revision: they stay, since a rollback never prunes. */
+  /** Managed now, not in the revision: they stay, unless the rollback prunes. */
   kept: ArgoResourceRef[];
   truncated: boolean;
 }
@@ -207,7 +207,7 @@ export interface ArgoRollbackPlan {
 export interface ArgoDiff {
   resources: {
     group: string; kind: string; namespace: string; name: string;
-    /** changed: differs; missing: only in Git; extra: only in the cluster (never pruned by a sync). */
+    /** changed: differs; missing: only in Git; extra: only in the cluster (pruned only by a sync that prunes). */
     state: 'changed' | 'missing' | 'extra';
     /** Unified diff of the YAML, live → desired. */
     diff: string;
@@ -216,6 +216,68 @@ export interface ArgoDiff {
     truncated: boolean;
   }[];
   truncated: boolean;
+}
+
+/** Argo CD's retry strategy of a sync; durations like "5s". */
+export interface ArgoRetry {
+  limit: number;
+  backoff: { duration: string; factor: number; maxDuration: string } | null;
+}
+
+/**
+ * A resource of a sync plan. changed, missing (the sync creates it), extra
+ * (only in the cluster: a pruning sync deletes it when `prunable`), synced, or
+ * present (managed now and in the chosen revision; whether it changes is not known).
+ */
+export interface ArgoPlanResource extends ArgoResourceRef {
+  state: 'changed' | 'missing' | 'extra' | 'synced' | 'present';
+  /** Unified diff of the YAML, live → desired; only for the target revision. */
+  diff: string;
+  hidden: boolean;
+  truncated: boolean;
+  /** False when annotated Prune=false. */
+  prunable: boolean;
+}
+
+/** What a sync would do (GET .../sync-plan?revision=, needs sync on the app). */
+export interface ArgoSyncPlan {
+  /** The revision asked for; null for the target revision. */
+  revision: string | null;
+  targetRevision: string;
+  autoSync: boolean;
+  /** For another revision: sync and rollback on the app with what the revision deploys. */
+  decision: DecisionInfo;
+  /** The action the decision is about (rollback when that is what a sync to another revision lacks). */
+  decisionAction: 'sync' | 'rollback';
+  decisionNamespace: string;
+  adminOnlyResources: string[];
+  /** What changes first; at most 200. */
+  resources: ArgoPlanResource[];
+  truncated: boolean;
+  /** The app's own sync options and retry, which a sync starts from. */
+  defaults: { syncOptions: string[]; retry: ArgoRetry | null };
+}
+
+/** The body of POST .../sync; empty for a plain sync of the target revision. */
+export interface SyncAppInput {
+  revision?: string;
+  prune?: boolean;
+  dryRun?: boolean;
+  /** The apply strategy, which skips hooks. */
+  applyOnly?: boolean;
+  force?: boolean;
+  /** Replaces the app's own; left out, they apply. */
+  syncOptions?: string[];
+  /** Replaces the app's own (limit 0 for none); left out, it applies. */
+  retry?: ArgoRetry;
+  /** Only these; left out, all. */
+  resources?: ArgoResourceRef[];
+}
+
+/** The body of POST .../history/{id}/rollback. */
+export interface RollbackAppInput {
+  prune?: boolean;
+  dryRun?: boolean;
 }
 
 /** Progress events of an Argo CD sync operation. */
@@ -272,6 +334,8 @@ export interface PodContainer {
   lastState: string | null;
   lastReason: string | null;
   lastExitCode: number | null;
+  /** Of the current state when terminated, e.g. a finished Job pod. */
+  exitCode: number | null;
   lastStartedAt: string | null;
   lastFinishedAt: string | null;
   memoryLimit: string | null;
@@ -287,7 +351,25 @@ export interface Pod {
   createdAt: string;
   lastTermination: string | null;
   lastTerminatedAt: string | null;
+  /** The Job controlling the pod, for a CronJob's pods. */
+  job: string | null;
   containers: PodContainer[];
+}
+
+/** A controller owner reference. */
+export interface PodOwner {
+  group: string;
+  kind: string;
+  name: string;
+}
+
+/**
+ * A pod whose owner chain leads to no workload (an operator's pod such as a
+ * CloudNativePG instance, a bare pod). Listed only with logs on the whole
+ * namespace; owner is its controller, null when it has none.
+ */
+export interface OtherPod extends Pod {
+  owner: PodOwner | null;
 }
 
 export interface K8sEvent {
@@ -335,17 +417,31 @@ export interface JobSummary {
   status: 'running' | 'succeeded' | 'failed';
   active: number;
   succeeded: number;
+  /** Failed attempts (pods). */
+  failed: number;
   completions: number;
   startedAt: string | null;
   finishedAt: string | null;
+  /** Of the Failed condition, e.g. BackoffLimitExceeded. */
+  reason: string | null;
+  message: string | null;
+  /** Newest first: the latest attempt first. */
   podNames: string[];
 }
 
 export interface CronJobSummary extends WorkloadSummary {
   lastScheduleAt: string | null;
+  lastSuccessfulAt: string | null;
+  /** Null when suspended or the schedule cannot be read. */
+  nextScheduleAt: string | null;
+  /** spec.timeZone; null means the controller's, and nextScheduleAt is computed in UTC. */
+  timeZone: string | null;
+  successfulJobsHistoryLimit: number;
+  failedJobsHistoryLimit: number;
   lastResult: 'succeeded' | 'failed' | 'running' | null;
   activeJobs: number;
   concurrencyPolicy: string;
+  /** Newest first: every Job the cluster still keeps, at most 50. */
   recentJobs: JobSummary[];
 }
 
@@ -807,7 +903,8 @@ export interface LiveStatus {
 export interface LiveChange {
   cluster: string;
   namespace: string;
-  kind: WorkloadKind;
+  /** Empty (with name) for a pod no workload owns (OtherPod) and its events. */
+  kind: WorkloadKind | '';
   name: string;
   type: LiveChangeType;
   pod?: string;

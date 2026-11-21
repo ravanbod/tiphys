@@ -60,6 +60,8 @@ export function ExecPage() {
   const [sessionId, setSessionId] = useState('');
   const [end, setEnd] = useState<EndInfo | null>(null);
   const [endedAt, setEndedAt] = useState<number>(0);
+  // The end dialog covers the terminal; hiding it lets the user read and copy the last output.
+  const [endHidden, setEndHidden] = useState(false);
   const [live, setLive] = useState(false);
   const [bgId, setBgId] = useState<number | null>(null);
   const term = useRef<XTermHandle>(null);
@@ -84,6 +86,7 @@ export function ExecPage() {
     opened.current = false;
     everReady.current = false;
     setEnd(null);
+    setEndHidden(false);
     setWarning(null);
     setAttempt((a) => a + 1);
     setPhase('session');
@@ -184,6 +187,15 @@ export function ExecPage() {
         )}
         {!ended && <button type="button" className="btn tdark sm" onClick={disconnect}><Icon name="x" />Disconnect</button>}
       </div>
+      {ended && end && endHidden && (
+        <div className="termend" role="status">
+          <span className={`chip ${end.tone === 'neutral' ? '' : end.tone}`}>Session closed</span>
+          <span>{end.title}</span>
+          <span className="grow" />
+          <button type="button" className="btn tdark sm" onClick={() => setEndHidden(false)}>Details</button>
+          {end.canReconnect && <button type="button" className="btn tdark sm" onClick={() => { setPhase('connect'); setConnecting(false); }}><Icon name="restart" />Reconnect</button>}
+        </div>
+      )}
       {!ended && warning && (
         <div className="termwarn" role="alert">
           <Icon name="warn" />
@@ -193,14 +205,14 @@ export function ExecPage() {
         </div>
       )}
       <div style={{ flex: 1, minHeight: 0, position: 'relative', display: 'flex', flexDirection: 'column', background: '#0A0D12' }}>
-        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', opacity: ended ? 0.38 : 1 }} aria-hidden={ended}>
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', opacity: ended && !endHidden ? 0.38 : 1 }} aria-hidden={ended && !endHidden}>
           <XTerm
             key={attempt} ref={term} ariaLabel={`Shell in ${pod}`}
-            onReady={open} onData={(d) => handle.current?.sendBytes(d)} onResize={(cols, rows) => handle.current?.sendControl({ type: 'resize', cols, rows })}
+            onReady={open} onData={(d) => { if (!ended) handle.current?.sendBytes(d); }} onResize={(cols, rows) => handle.current?.sendControl({ type: 'resize', cols, rows })}
           />
         </div>
         {connecting && !live && !ended && <div className="termover">{debug ? `Starting a debug container in ${pod}…` : `Connecting to ${pod}…`}</div>}
-        {ended && end && (
+        {ended && end && !endHidden && (
           <div className="termover solid">
             <div className="dlg" style={{ width: 'min(520px, 100%)' }} role="alertdialog" aria-labelledby="end-title">
               <div className="hd" style={{ paddingTop: 20 }}>
@@ -217,6 +229,7 @@ export function ExecPage() {
               </div>
               <div className="ft">
                 <Link className="btn" to={workloadUrl(ref)}>Back to pods</Link>
+                <button type="button" className="btn" onClick={() => setEndHidden(true)}>View output</button>
                 {end.suggestBreakGlass && usesGrants && breakGlassOn(me) && !me.breakGlass && (
                   <button type="button" className="btn dng" onClick={() => bg.open({ action: 'exec', target: name, environment: data.environment })}>{breakGlassLabel(me)}</button>
                 )}

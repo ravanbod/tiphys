@@ -181,6 +181,22 @@ func TestListCronJobsFlagsManualJobs(t *testing.T) {
 	}
 }
 
+func TestListCronJobsNamesJobPodsNewestFirst(t *testing.T) {
+	owner := ctrl("batch/v1", "Job", "report-1")
+	older, newer := pod("report-1-zzzzz", owner), pod("report-1-aaaaa", owner)
+	older.CreationTimestamp = metav1.NewTime(time.Now().Add(-time.Minute))
+	newer.CreationTimestamp = metav1.NewTime(time.Now())
+	r := newRig(t, cronJob("report", batchv1.AllowConcurrent), job("report-1", ctrl("batch/v1", "CronJob", "report"), true),
+		older, newer, pod("report-1-stray", ctrl("v1", "Job", "report-1")), pod("other-1-xxxxx", ctrl("batch/v1", "Job", "other-1")))
+	got, err := r.ListCronJobs(context.Background(), actor, "c1", testNS)
+	if err != nil || len(got) != 1 || len(got[0].RecentJobs) != 1 {
+		t.Fatalf("got %+v, err %v", got, err)
+	}
+	if names := got[0].RecentJobs[0].PodNames; strings.Join(names, ",") != "report-1-aaaaa,report-1-zzzzz" {
+		t.Fatalf("pod names = %v", names)
+	}
+}
+
 func TestWatchJobRequiresCronJobOwnerAndEndsWhenFinished(t *testing.T) {
 	r := newRig(t, job("stray", nil, false), job("report-1", ctrl("batch/v1", "CronJob", "report"), false))
 	_, err := r.WatchJob(context.Background(), actor, "c1", testNS, "stray", 1e9)
@@ -206,5 +222,52 @@ func TestWatchJobRequiresCronJobOwnerAndEndsWhenFinished(t *testing.T) {
 	}
 	if last.Status != "succeeded" {
 		t.Fatalf("last = %+v", last)
+	}
+}
+
+func TestNextSchedule(t *testing.T) {
+	now := time.Date(2026, 11, 20, 10, 30, 0, 0, time.UTC)
+	for _, c := range []struct {
+		schedule, tz, want string
+	}{
+		{"0 3 * * *", "", "2026-11-21T03:00:00Z"},
+		{"*/15 * * * *", "", "2026-11-20T10:45:00Z"},
+		{"@daily", "", "2026-11-21T00:00:00Z"},
+		{"0 12 * * *", "Asia/Tehran", "2026-11-21T08:30:00Z"}, // 12:00 in Tehran (UTC+3:30) has passed
+		{"0 9 * * 1-5", "", "2026-11-23T09:00:00Z"},           // Friday 10:30 → Monday
+		{"not a schedule", "", ""},
+		{"0 3 * * *", "Mars/Olympus", ""},
+	} {
+		got := nextSchedule(c.schedule, c.tz, now)
+		if (got == nil) != (c.want == "") || (got != nil && got.UTC().Format(time.RFC3339) != c.want) {
+			t.Errorf("nextSchedule(%q, %q) = %v, want %q", c.schedule, c.tz, got, c.want)
+		}
+	}
+}
+
+func TestListCronJobsScheduleDetailsAndFailureReason(t *testing.T) {
+	cj := cronJob("report", batchv1.AllowConcurrent)
+	cj.Spec.TimeZone = ptr.To("Europe/Berlin")
+	cj.Spec.FailedJobsHistoryLimit = ptr.To(int32(5))
+	suspended := cronJob("paused", batchv1.AllowConcurrent)
+	suspended.Spec.Suspend = ptr.To(true)
+	failed := job("report-1", ctrl("batch/v1", "CronJob", "report"), false)
+	failed.Status.Failed = 3
+	failed.Status.Conditions = []batchv1.JobCondition{{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Reason: "BackoffLimitExceeded", Message: "Job has reached the specified backoff limit"}}
+	r := newRig(t, cj, suspended, failed)
+	got, err := r.ListCronJobs(context.Background(), actor, "c1", testNS)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %+v, err %v", got, err)
+	}
+	p, c := got[0], got[1] // sorted by name
+	if p.NextScheduleAt != nil {
+		t.Fatalf("a suspended CronJob has a next run: %v", p.NextScheduleAt)
+	}
+	if c.TimeZone != "Europe/Berlin" || c.NextScheduleAt == nil || c.SuccessfulJobsHistoryLimit != 3 || c.FailedJobsHistoryLimit != 5 {
+		t.Fatalf("cronjob = %+v", c)
+	}
+	j := c.RecentJobs[0]
+	if j.Status != "failed" || j.Failed != 3 || j.Reason != "BackoffLimitExceeded" || j.Message == "" {
+		t.Fatalf("job = %+v", j)
 	}
 }

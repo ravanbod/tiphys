@@ -4,10 +4,11 @@ import { api, kindFromSegment } from '../api';
 import type { K8sEvent, LiveChange, Pod, WorkloadDetail } from '../api';
 import { AccessHints } from '../components/AccessHints';
 import { ActionButton } from '../components/ActionButton';
-import { BreakGlassMark, EnvBadge, KindTag, PhaseChip } from '../components/Badges';
+import { BreakGlassMark, EnvBadge, JobStatusChip, KindTag, PhaseChip } from '../components/Badges';
 import { Bump } from '../components/Bump';
-import { CronJobsPanel } from '../components/CronJobsPanel';
+import { CronJobsPanel, ResultStrip, ScheduleText } from '../components/CronJobsPanel';
 import { ErrorBanner, Loading } from '../components/Feedback';
+import { JobsTable } from '../components/JobsTable';
 import { Icon } from '../components/Icon';
 import { DeletePodDialog, RestartDialog, RunCronDialog } from '../components/OperationDialogs';
 import { Crumbs } from '../components/PageHeader';
@@ -17,10 +18,12 @@ import { useLive } from '../context/live';
 import { useSetShellCtx } from '../context/shell';
 import { eventKey, eventSig, rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
+import { useCronJobs } from '../hooks/useCronJobs';
 import { useNow } from '../hooks/useNow';
 import { closesSoonLabel, explainDecision } from '../lib/decision';
 import { execUrl, logsUrl, namespaceUrl } from '../lib/routes';
-import { fmtAge, fmtRelative } from '../lib/time';
+import { jobRows } from '../lib/jobs';
+import { fmtAge, fmtDateTime, fmtRelative } from '../lib/time';
 import { ARGO_UI } from '../lib/features';
 import { breakGlassKey } from '../lib/breakGlass';
 
@@ -61,7 +64,8 @@ export function WorkloadDetailPage() {
   const [restart, setRestart] = useState(false);
   const [deletePod, setDeletePod] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
-  const [runs, setRuns] = useState(0); // remounts the CronJobs panel after a run
+  const cron = useCronJobs(cluster, ns, { only: name, enabled: kind === 'CronJob' });
+  const cj = cron.data?.find((c) => c.name === name);
   const navigate = useNavigate();
 
   const d = wl.data;
@@ -113,6 +117,24 @@ export function WorkloadDetailPage() {
         </div>
       </div>
 
+      {isCron && cj && (
+        <div className="row wrap" style={{ alignItems: 'stretch' }}>
+          <Stat label="Schedule" small><ScheduleText cron={cj} /></Stat>
+          <Stat label="Next run" small>
+            {cj.suspended ? <span className="chip warn">Suspended</span> : cj.nextScheduleAt ? <span title={fmtDateTime(cj.nextScheduleAt)}>{fmtRelative(cj.nextScheduleAt, now)}</span> : '—'}
+          </Stat>
+          <Stat label="Last result" small>
+            <span className="row" style={{ gap: 8, flexWrap: 'nowrap' }}>{cj.lastResult ? <JobStatusChip status={cj.lastResult} /> : '—'}<ResultStrip jobs={cj.recentJobs} /></span>
+          </Stat>
+          <Stat label="Last success" small>{cj.lastSuccessfulAt ? <span title={fmtDateTime(cj.lastSuccessfulAt)}>{fmtRelative(cj.lastSuccessfulAt, now)}</span> : 'Never'}</Stat>
+          <Stat label="Concurrency" small>{cj.concurrencyPolicy}</Stat>
+          <Stat label="History kept" small>
+            <span title="Kubernetes deletes older Jobs and their pods beyond these limits.">{cj.successfulJobsHistoryLimit} succeeded · {cj.failedJobsHistoryLimit} failed</span>
+          </Stat>
+          {d.images[0] && <Stat label="Image" mono small>{d.images[0]}</Stat>}
+        </div>
+      )}
+
       {!isCron && (
         <div className="row wrap">
           <Stat label="Ready"><Bump value={`${d.ready} / ${d.desired}`} /></Stat>
@@ -127,13 +149,19 @@ export function WorkloadDetailPage() {
         <div className="col grow" style={{ gap: 0, minWidth: 0 }}>
           <div className="tabs" role="tablist">
             {!isCron && <Link role="tab" aria-selected={tab === 'pods'} className={tab === 'pods' ? 'on' : undefined} to="?tab=pods" replace>Pods {pods.data && <span className="c"><Bump value={podList.length} /></span>}</Link>}
+            {isCron && <Link role="tab" aria-selected={tab === 'cronjobs'} className={tab === 'cronjobs' ? 'on' : undefined} to="?tab=cronjobs" replace>Job history {cj && <span className="c"><Bump value={cj.recentJobs.length} /></span>}</Link>}
             <Link role="tab" aria-selected={tab === 'events'} className={tab === 'events' ? 'on' : undefined} to="?tab=events" replace>Events</Link>
-            {isCron
-              ? <Link role="tab" aria-selected={tab === 'cronjobs'} className={tab === 'cronjobs' ? 'on' : undefined} to="?tab=cronjobs" replace>Job history</Link>
-              : d.cronJobCount > 0 && <Link role="tab" aria-selected={tab === 'cronjobs'} className={tab === 'cronjobs' ? 'on' : undefined} to="?tab=cronjobs" replace>CronJobs <span className="c">{d.cronJobCount}</span></Link>}
+            {!isCron && d.cronJobCount > 0 && <Link role="tab" aria-selected={tab === 'cronjobs'} className={tab === 'cronjobs' ? 'on' : undefined} to="?tab=cronjobs" replace>CronJobs <span className="c">{d.cronJobCount}</span></Link>}
           </div>
-          {tab === 'cronjobs' ? (
-            <div style={{ paddingTop: 12 }}><CronJobsPanel key={runs} cluster={cluster} namespace={ns} only={isCron ? name : undefined} /></div>
+          {tab === 'cronjobs' && isCron ? (
+            <div style={{ paddingTop: 12 }}>
+              {cron.error ? <ErrorBanner error={cron.error} onRetry={cron.reload} />
+                : !cron.data ? <Loading what="jobs" />
+                  : !cj ? <div className="card"><div className="empty">This CronJob was not found.</div></div>
+                    : <JobsTable cluster={cluster} namespace={ns} jobs={jobRows([cj])} highlight={sp.get('job')} />}
+            </div>
+          ) : tab === 'cronjobs' ? (
+            <div style={{ paddingTop: 12 }}><CronJobsPanel cluster={cluster} namespace={ns} /></div>
           ) : !logsOk ? (
             <div className="card" style={{ borderTop: 0, borderRadius: '0 0 8px 8px' }}>
               <div className="empty">
@@ -157,8 +185,8 @@ export function WorkloadDetailPage() {
       {running && (
         <RunCronDialog
           cron={d}
-          onClose={(changed) => { setRunning(false); if (changed) { wl.reload(); setRuns((n) => n + 1); } }}
-          onViewRunning={() => navigate('?tab=cronjobs', { replace: true })}
+          onClose={(changed) => { setRunning(false); if (changed) { wl.reload(); cron.reload(); } }}
+          onViewRunning={() => navigate('?tab=cronjobs&result=running', { replace: true })}
         />
       )}
       {restart && <RestartDialog wl={d} onClose={(changed) => { setRestart(false); if (changed) { wl.reload(); pods.reload(); } }} />}

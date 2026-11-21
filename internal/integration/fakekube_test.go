@@ -127,6 +127,35 @@ func (k *fakeKube) ListCronJobs(_ context.Context, _ application.KubeActor, _, n
 	return []application.CronJobInfo{{WorkloadInfo: application.WorkloadInfo{Ref: domain.WorkloadRef{Kind: domain.KindCronJob, Name: "reconcile"}, Namespace: ns, ConcurrencyPolicy: "Forbid"}}}, nil
 }
 
+// ListOtherPods: payments-api has a CloudNativePG instance and a bare pod.
+func (k *fakeKube) ListOtherPods(_ context.Context, a application.KubeActor, _, ns string) ([]application.OtherPod, error) {
+	k.record(a)
+	if ns != "payments-api" {
+		return nil, nil
+	}
+	pod := func(name string) application.PodInfo {
+		return application.PodInfo{Name: name, Phase: "Running", ReadyCount: 1, TotalCount: 1,
+			Containers: []application.ContainerInfo{{Name: "postgres", Ready: true, State: "running"}}}
+	}
+	return []application.OtherPod{
+		{PodInfo: pod("debug"), Owner: nil},
+		{PodInfo: pod("pg-main-1"), Owner: &application.PodOwner{Group: "postgresql.cnpg.io", Kind: "Cluster", Name: "pg-main"}},
+	}, nil
+}
+
+func (k *fakeKube) OtherPodLogs(ctx context.Context, a application.KubeActor, cluster, ns, pod string, _ application.LogOptions) (io.ReadCloser, error) {
+	others, _ := k.ListOtherPods(ctx, a, cluster, ns)
+	for _, o := range others {
+		if o.Name == pod {
+			return io.NopCloser(strings.NewReader("pg line\n")), nil
+		}
+	}
+	if pod == "payments-api-abc" {
+		return nil, application.ErrPodHasWorkload
+	}
+	return nil, application.ErrNotFound
+}
+
 func (k *fakeKube) Logs(_ context.Context, a application.KubeActor, w application.KubeWorkloadTarget, pod string, _ application.LogOptions) (io.ReadCloser, error) {
 	k.record(a)
 	if pod != k.podFor(w) {

@@ -1,7 +1,7 @@
 import type {
   AccessRequest, Action, ApiPermission, ApiTokenView, AppSummary, AuditEvent, BreakGlass, BreakGlassRequest, CronJobSummary, DecisionExplain, ExecSessionView,
-  GrantInput, GrantView, JobSummary, K8sEvent, Me, NamespaceApp, NamespaceSummary, Pod, Role, ScopeView, SettingsView,
-  ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, DecisionInfo, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
+  GrantInput, GrantView, JobSummary, K8sEvent, Me, NamespaceApp, NamespaceSummary, OtherPod, Pod, Role, ScopeView, SettingsView,
+  ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoSyncPlan, DecisionInfo, TrafficGraph, TrafficNode, WorkloadDetail, WorkloadKind, WorkloadSummary,
 } from '../api/types';
 import { kindFromSegment } from '../api/query';
 import { CSRF, DAY, HOUR, MIN, bgAt, currentUser, getDb, nextId, personaRole } from './db';
@@ -124,13 +124,13 @@ function podsFor(n: NsDef, w: WlDef): Pod[] {
     const two = w.name === 'payments-api';
     const container = (cn: string, restart = 0, isOom = false) => ({
       name: cn, image: `${w.name}:2026.10.17-4`, ready: !notReady, state: notReady ? 'Waiting' : 'Running', stateReason: notReady ? 'CrashLoopBackOff' : '',
-      restartCount: restart, lastState: isOom ? 'Terminated' : null, lastReason: isOom ? 'OOMKilled' : null, lastExitCode: isOom ? 137 : null,
+      restartCount: restart, lastState: isOom ? 'Terminated' : null, lastReason: isOom ? 'OOMKilled' : null, lastExitCode: isOom ? 137 : null, exitCode: null,
       lastStartedAt: isOom ? iso(now - 16 * HOUR) : null, lastFinishedAt: isOom ? iso(now - 2 * HOUR) : null, memoryLimit: isOom ? '512Mi' : '256Mi', init: false,
     });
     return {
       name, phase: notReady ? 'Running' : 'Running', ready: notReady ? `${two ? 1 : 0}/${two ? 2 : 1}` : `${two ? 2 : 1}/${two ? 2 : 1}`, restarts: oom ? 1 : notReady ? 14 : 0,
       node: ['node-a3', 'node-b1', 'node-a1'][i % 3], createdAt: iso(now - (3 * DAY + 12 * HOUR)),
-      lastTermination: oom ? 'OOMKilled' : null, lastTerminatedAt: oom ? iso(now - 2 * HOUR) : null,
+      lastTermination: oom ? 'OOMKilled' : null, lastTerminatedAt: oom ? iso(now - 2 * HOUR) : null, job: null,
       containers: [container('app', oom ? 1 : notReady ? 14 : 0, oom), ...(two ? [{ ...container('metrics-sidecar'), memoryLimit: '64Mi' }] : [])],
     };
   });
@@ -225,8 +225,12 @@ function cronSummary(u: MockUser, n: NsDef, w: WlDef): CronJobSummary {
   const jobs = jobsFor(n.cluster, n.namespace, w.name).sort((a, b) => Date.parse(b.startedAt ?? '') - Date.parse(a.startedAt ?? ''));
   const active = jobs.filter((j) => j.status === 'running').length;
   const lastResult = active ? 'running' : jobs[0]?.status ?? w.lastResult ?? null;
+  const lastOk = jobs.find((j) => j.status === 'succeeded');
   return {
     ...summary(u, n, w), lastScheduleAt: w.lastScheduleMinutesAgo !== undefined ? iso(Date.now() - w.lastScheduleMinutesAgo * MIN) : null,
+    lastSuccessfulAt: lastOk?.finishedAt ?? null,
+    nextScheduleAt: !w.suspended && w.nextRunMinutes !== undefined ? iso(Date.now() + w.nextRunMinutes * MIN) : null,
+    timeZone: w.timeZone ?? null, successfulJobsHistoryLimit: 3, failedJobsHistoryLimit: 1,
     lastResult, activeJobs: active, concurrencyPolicy: w.concurrencyPolicy ?? 'Allow', recentJobs: jobs,
   };
 }
@@ -352,7 +356,7 @@ on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/history', (c): ArgoDeplo
 function rollbackPlan(c: { user: MockUser; params: Record<string, string> }): ArgoRollbackPlan {
   const a = mockApp(c);
   const id = Number(c.params.id);
-  if (a.autoSync) throw new MockError(409, 'auto_sync_enabled', 'This application syncs automatically, so Argo CD does not roll it back. Turn off auto-sync in Git or Argo CD first.');
+  if (a.autoSync) throw new MockError(409, 'auto_sync_enabled', 'This application syncs automatically, so Argo CD neither rolls it back nor syncs it to another revision (but for a dry run). Turn off auto-sync in Git or Argo CD first.');
   if (id !== 2) throw invalid({ id: id === 3 ? 'This deploy is the one running now.' : "The application's source changed since this deploy, so the portal cannot check what it would deploy; use Argo CD." });
   const now = decideApp(c.user, a, c.params.ns, 'rollback');
   if (!now.allowed) throw denied(now);
@@ -375,31 +379,75 @@ on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/history/:id/rollback', 
   getDb().ops[id] = { id, kind: 'rollback', cluster: c.params.c, namespace: c.params.ns, name: c.params.app, owner: c.user.id, willFail: false };
   return { __status: 202, data: { operationId: id } };
 });
+/** What the mock's out-of-sync apps differ in. */
+function mockDiff(a: AppDef): ArgoDiff['resources'] {
+  if (a.sync === 'Synced') return [];
+  return [
+    { group: 'apps', kind: 'Deployment', namespace: a.namespace, name: a.name, state: 'changed', hidden: false, truncated: false,
+      diff: `--- live\n+++ desired\n@@ -12,7 +12,7 @@\n     spec:\n       containers:\n       - name: app\n-        image: ${a.name}:2026.10.17-4\n+        image: ${a.name}:2026.10.30-1\n         resources:\n           limits:\n             memory: 512Mi\n` },
+    { group: '', kind: 'ConfigMap', namespace: a.namespace, name: `${a.name}-config`, state: 'missing', hidden: false, truncated: false,
+      diff: `--- live\n+++ desired\n@@ -0,0 +1,6 @@\n+apiVersion: v1\n+data:\n+  FEATURE_X: "true"\n+kind: ConfigMap\n+metadata:\n+  name: ${a.name}-config\n` },
+    { group: '', kind: 'Secret', namespace: a.namespace, name: `${a.name}-db`, state: 'changed', hidden: true, truncated: false, diff: '' },
+    { group: '', kind: 'ConfigMap', namespace: a.namespace, name: `${a.name}-flags`, state: 'extra', hidden: false, truncated: false,
+      diff: `--- live\n+++ desired\n@@ -1,5 +0,0 @@\n-apiVersion: v1\n-data:\n-  OLD_FLAG: "1"\n-kind: ConfigMap\n-metadata:\n` },
+  ];
+}
 on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/diff', (c): ArgoDiff => {
   const a = mockApp(c);
   const info = decideApp(c.user, a, c.params.ns, 'sync');
   if (!info.allowed) throw denied(info);
-  if (a.sync === 'Synced') return { resources: [], truncated: false };
+  return { truncated: false, resources: mockDiff(a) };
+});
+/**
+ * The mock's sync plan: main is the target; another revision needs rollback
+ * too and drops the -flags ConfigMap, adding a -legacy one.
+ */
+function syncPlan(c: { user: MockUser; params: Record<string, string> }, revision: string): ArgoSyncPlan {
+  const a = mockApp(c);
+  const now = decideApp(c.user, a, c.params.ns, 'sync');
+  if (!now.allowed) throw denied(now);
+  if (!/^[A-Za-z0-9._/@^~*<>=+-]{1,255}$/.test(revision) && revision) throw invalid({ revision: 'invalid revision' });
+  const other = !!revision && revision !== 'main';
+  const res = (kind: string, name: string, state: ArgoSyncPlan['resources'][number]['state'], group = '', prunable = state === 'extra') =>
+    ({ group, kind, namespace: a.namespace, name, state, diff: '', hidden: false, truncated: false, prunable });
+  const base = {
+    targetRevision: 'main', autoSync: !!a.autoSync, decisionNamespace: a.namespace, adminOnlyResources: [], truncated: false,
+    defaults: { syncOptions: ['CreateNamespace=true'], retry: a.autoSync ? { limit: 5, backoff: { duration: '5s', factor: 2, maxDuration: '3m' } } : null },
+  };
+  if (!other) {
+    return {
+      ...base, revision: null, decision: now, decisionAction: 'sync',
+      resources: [
+        ...mockDiff(a).map((r) => ({ ...r, prunable: r.state === 'extra' })),
+        res('ConfigMap', `${a.name}-ca`, 'extra', '', false),
+        res('Service', a.name, 'synced'),
+        res('ServiceAccount', a.name, 'synced'),
+      ],
+    };
+  }
+  const rb = decideApp(c.user, a, c.params.ns, 'rollback');
   return {
-    truncated: false,
+    ...base, revision, decision: rb.allowed ? now : rb, decisionAction: rb.allowed ? 'sync' : 'rollback',
     resources: [
-      { group: 'apps', kind: 'Deployment', namespace: a.namespace, name: a.name, state: 'changed', hidden: false, truncated: false,
-        diff: `--- live\n+++ desired\n@@ -12,7 +12,7 @@\n     spec:\n       containers:\n       - name: app\n-        image: ${a.name}:2026.10.17-4\n+        image: ${a.name}:2026.10.30-1\n         resources:\n           limits:\n             memory: 512Mi\n` },
-      { group: '', kind: 'ConfigMap', namespace: a.namespace, name: `${a.name}-config`, state: 'missing', hidden: false, truncated: false,
-        diff: `--- live\n+++ desired\n@@ -0,0 +1,6 @@\n+apiVersion: v1\n+data:\n+  FEATURE_X: "true"\n+kind: ConfigMap\n+metadata:\n+  name: ${a.name}-config\n` },
-      { group: '', kind: 'Secret', namespace: a.namespace, name: `${a.name}-db`, state: 'changed', hidden: true, truncated: false, diff: '' },
+      res('ConfigMap', `${a.name}-legacy`, 'missing'),
+      res('ConfigMap', `${a.name}-flags`, 'extra'),
+      res('Deployment', a.name, 'present', 'apps'),
+      res('Service', a.name, 'present'),
+      res('ServiceAccount', a.name, 'present'),
     ],
   };
-});
+}
+on('GET', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/sync-plan', (c) => syncPlan(c, c.query.get('revision') ?? ''));
 on('POST', '/clusters/:c/namespaces/:ns/apps/:appNs/:app/sync', (c) => {
-  clusterGuard(c.params.c);
-  const { c: cluster, ns, app } = c.params;
-  const a = getDb().apps.find((x) => x.cluster === cluster && x.namespace === ns && x.name === app);
-  if (!a) throw notFound(`Application ${app} not found`);
-  const info = decideApp(c.user, a, ns, 'sync');
-  if (!info.allowed) throw denied(info);
+  const b = c.body as { revision?: string; dryRun?: boolean };
+  const plan = syncPlan(c, b.revision ?? '');
+  if (!plan.decision.allowed) throw denied(plan.decision);
+  if (plan.revision && plan.autoSync && !b.dryRun) {
+    throw new MockError(409, 'auto_sync_enabled', 'This application syncs automatically, so Argo CD neither rolls it back nor syncs it to another revision (but for a dry run). Turn off auto-sync in Git or Argo CD first.');
+  }
+  const a = mockApp(c);
   const id = opId();
-  getDb().ops[id] = { id, kind: 'sync', cluster, namespace: ns, name: app, owner: c.user.id, willFail: a.health === 'Degraded' };
+  getDb().ops[id] = { id, kind: 'sync', cluster: c.params.c, namespace: c.params.ns, name: c.params.app, owner: c.user.id, willFail: a.health === 'Degraded' && !b.dryRun };
   return { __status: 202, data: { operationId: id } };
 });
 on('GET', '/clusters/:c/namespaces/:ns/access', (c) => {
@@ -446,17 +494,57 @@ on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods', (c) => {
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   requireAction(c.user, ns, wl, 'logs');
   if (wl.kind === 'CronJob') {
-    return jobsFor(ns.cluster, ns.namespace, wl.name).flatMap((j) => j.podNames.map((pn) => ({
-      name: pn, phase: j.status === 'running' ? 'Running' : j.status === 'failed' ? 'Failed' : 'Succeeded', ready: '0/1', restarts: 0, node: 'node-a1', createdAt: j.startedAt ?? iso(Date.now()),
-      lastTermination: null, lastTerminatedAt: null,
-      containers: [{ name: 'job', image: `${wl.name}:latest`, ready: false, state: j.status === 'running' ? 'Running' : 'Terminated', stateReason: '', restartCount: 0, lastState: null, lastReason: null, lastExitCode: null, lastStartedAt: null, lastFinishedAt: null, memoryLimit: null, init: false }],
-    } as Pod)));
+    // The newest pod is the job's latest attempt; earlier attempts of a failed job failed too.
+    return jobsFor(ns.cluster, ns.namespace, wl.name).flatMap((j) => j.podNames.map((pn, i): Pod => {
+      const running = j.status === 'running' && i === 0;
+      const failed = j.status === 'failed' || i > 0;
+      return {
+        name: pn, phase: running ? 'Running' : failed ? 'Failed' : 'Succeeded', ready: running ? '1/1' : '0/1', restarts: 0, node: 'node-a1',
+        createdAt: iso(Date.parse(j.startedAt ?? iso(Date.now())) + (j.podNames.length - 1 - i) * 2 * MIN), lastTermination: null, lastTerminatedAt: null, job: j.name,
+        containers: [{ name: 'job', image: `${wl.name}:latest`, ready: running, state: running ? 'running' : 'terminated', stateReason: running ? '' : failed ? 'Error' : 'Completed',
+          restartCount: 0, lastState: null, lastReason: null, lastExitCode: null, exitCode: running ? null : failed ? 1 : 0, lastStartedAt: null, lastFinishedAt: null, memoryLimit: '256Mi', init: false }],
+      };
+    }));
   }
   return podsFor(ns, wl);
 });
 on('GET', '/clusters/:c/namespaces/:ns/workloads/:kind/:name/pods/:pod/logs/download', (c) => {
   const { ns, wl } = findWl(c.params.c, c.params.ns, c.params.kind, c.params.name);
   requireAction(c.user, ns, wl, 'logs');
+  const lines = Array.from({ length: 200 }, (_, i) => `${new Date(Date.now() - (200 - i) * 1000).toISOString()} INFO mock log line ${i} from ${c.params.pod}`);
+  return { __raw: lines.join('\n') + '\n', __type: 'text/plain' };
+});
+// The prod-1/payments-api namespace runs a CloudNativePG cluster and a bare pod.
+function otherPodsFor(n: NsDef): OtherPod[] {
+  if (n.cluster !== 'prod-1' || n.namespace !== 'payments-api') return [];
+  const now = Date.now();
+  const pod = (name: string, owner: OtherPod['owner'], container: string, over: Partial<OtherPod> = {}): OtherPod => ({
+    name, owner, phase: 'Running', ready: '1/1', restarts: 0, node: 'node-a2', createdAt: iso(now - 9 * DAY), lastTermination: null, lastTerminatedAt: null, job: null,
+    containers: [{ name: container, image: container === 'postgres' ? 'ghcr.io/cloudnative-pg/postgresql:16.4' : 'busybox:1.36', ready: over.ready !== '0/1', state: 'running', stateReason: '',
+      restartCount: over.restarts ?? 0, lastState: null, lastReason: null, lastExitCode: null, exitCode: null, lastStartedAt: null, lastFinishedAt: null, memoryLimit: '2Gi', init: false }],
+    ...over,
+  });
+  const pg = { group: 'postgresql.cnpg.io', kind: 'Cluster', name: 'payments-db' };
+  return [
+    pod('debug-shell', null, 'shell', { createdAt: iso(now - 2 * HOUR), node: 'node-b1' }),
+    pod('payments-db-1', pg, 'postgres'),
+    pod('payments-db-2', pg, 'postgres', { node: 'node-b1', restarts: 1, lastTermination: 'OOMKilled', lastTerminatedAt: iso(now - 5 * HOUR) }),
+    pod('payments-db-3', pg, 'postgres', { node: 'node-a3', ready: '0/1', createdAt: iso(now - 40 * MIN) }),
+  ];
+}
+function requireNsLogs(u: MockUser, n: NsDef) {
+  const info = decide(u, n.cluster, n.namespace, null, null, 'logs');
+  if (!info.allowed) throw denied(info);
+}
+on('GET', '/clusters/:c/namespaces/:ns/pods', (c) => {
+  clusterGuard(c.params.c);
+  const n = findNs(c.params.c, c.params.ns);
+  if (!nsActions(c.user, n.cluster, n.namespace).length) throw denied(decide(c.user, n.cluster, n.namespace, null, null, 'logs'));
+  return decide(c.user, n.cluster, n.namespace, null, null, 'logs').allowed ? otherPodsFor(n) : [];
+});
+on('GET', '/clusters/:c/namespaces/:ns/pods/:pod/logs/download', (c) => {
+  const n = findNs(c.params.c, c.params.ns);
+  requireNsLogs(c.user, n);
   const lines = Array.from({ length: 200 }, (_, i) => `${new Date(Date.now() - (200 - i) * 1000).toISOString()} INFO mock log line ${i} from ${c.params.pod}`);
   return { __raw: lines.join('\n') + '\n', __type: 'text/plain' };
 });
@@ -517,7 +605,7 @@ on('POST', '/clusters/:c/namespaces/:ns/cronjobs/:name/run', (c) => {
     throw new MockError(409, 'already_running', 'A run is already in progress for this CronJob.');
   }
   const jobName = `${wl.name}-manual-${Math.random().toString(36).slice(2, 7)}`;
-  jobs.unshift({ name: jobName, cronJob: wl.name, triggeredBy: c.user.displayName || c.user.username, manual: true, status: 'running', active: 1, succeeded: 0, completions: 1, startedAt: iso(Date.now()), finishedAt: null, podNames: [`${jobName}-p4x2k`] });
+  jobs.unshift({ name: jobName, cronJob: wl.name, triggeredBy: c.user.username, manual: true, status: 'running', active: 1, succeeded: 0, failed: 0, completions: 1, startedAt: iso(Date.now()), finishedAt: null, reason: null, message: null, podNames: [`${jobName}-p4x2k`] });
   const id = opId();
   d.ops[id] = { id, kind: 'run-job', cluster: ns.cluster, namespace: ns.namespace, name: wl.name, jobName, owner: c.user.id };
   return { __status: 202, data: { operationId: id, jobName } };

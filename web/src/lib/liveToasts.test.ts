@@ -24,6 +24,10 @@ describe('toastFor', () => {
     expect(toastFor(event('Normal', 'Pulled'))).toBeNull();
     for (const type of ['pod_added', 'pod_removed', 'pod_updated', 'workload'] as const) expect(toastFor({ ...at, type })).toBeNull();
   });
+  it('names an other pod and links to its namespace', () => {
+    const other = { ...restart('Error', 1), kind: '' as const, name: '', pod: 'pg-main-1', container: 'postgres' };
+    expect(toastFor(other)).toMatchObject({ title: 'pg-main-1 restarted', detail: 'pg-main-1 · postgres Error (exit 1)', to: '/c/prod-1/n/shop', key: 'prod-1/shop/Pod/pg-main-1:restart:Error' });
+  });
 });
 
 describe('addToast', () => {

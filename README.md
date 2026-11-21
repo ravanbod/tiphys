@@ -15,8 +15,9 @@ recorded and replayable.
   traffic graph from load balancers, Ingresses and Gateway API routes to
   Services and pods.
 - **Argo CD**: each application's health, sync state, conditions, last
-  operation and deploy history; a diff of what a sync would change; and a Sync
-  button (target revision only, never prune).
+  operation and deploy history; a sync plan of what a sync would change and
+  prune; Sync with Argo CD's options (prune, dry run, force, sync options,
+  retry, chosen resources or revision) and Rollback.
 - **Access control**: grants for teams or users on an Argo CD project, a
   namespace or single workloads; time windows, holidays and self-service
   break-glass; access requests with approval; admins from Keycloak groups.

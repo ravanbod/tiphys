@@ -16,12 +16,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 
+	"github.com/robfig/cron/v3"
+
 	"tiphys/internal/application"
 	"tiphys/internal/domain"
 )
 
 const (
-	recentJobsPerCronJob = 5
+	recentJobsPerCronJob = 50 // the history limits normally keep far fewer
 	maxNameLen           = 63
 	nameSuffixLen        = 5
 	nameAlphabet         = "abcdefghijklmnopqrstuvwxyz0123456789"
@@ -44,14 +46,30 @@ func (a *Access) ListCronJobs(ctx context.Context, actor application.KubeActor, 
 	if err != nil {
 		return nil, a.fail("list jobs", cluster, err)
 	}
+	pods, err := c.kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, a.fail("list pods", cluster, err)
+	}
+	podsOf := jobPods(pods.Items)
 	out := make([]application.CronJobInfo, 0, len(cjs.Items))
 	for i := range cjs.Items {
 		cj := &cjs.Items[i]
-		info := application.CronJobInfo{WorkloadInfo: cronJobInfo(cj), LastScheduleAt: timePtr(ptr.Deref(cj.Status.LastScheduleTime, metav1.Time{}))}
+		info := application.CronJobInfo{
+			WorkloadInfo:               cronJobInfo(cj),
+			LastScheduleAt:             timePtr(ptr.Deref(cj.Status.LastScheduleTime, metav1.Time{})),
+			LastSuccessfulAt:           timePtr(ptr.Deref(cj.Status.LastSuccessfulTime, metav1.Time{})),
+			TimeZone:                   ptr.Deref(cj.Spec.TimeZone, ""),
+			SuccessfulJobsHistoryLimit: ptr.Deref(cj.Spec.SuccessfulJobsHistoryLimit, 3),
+			FailedJobsHistoryLimit:     ptr.Deref(cj.Spec.FailedJobsHistoryLimit, 1),
+		}
+		if !info.Suspended {
+			info.NextScheduleAt = nextSchedule(cj.Spec.Schedule, info.TimeZone, a.clock.Now())
+		}
 		owned := jobsOf(jobs.Items, cj.Name)
 		sort.Slice(owned, func(i, j int) bool { return owned[i].CreationTimestamp.After(owned[j].CreationTimestamp.Time) })
 		for k := range owned {
 			ji := jobInfo(&owned[k])
+			ji.PodNames = podsOf[ji.Name]
 			if ji.Status == "running" {
 				info.ActiveJobs++
 			}
@@ -243,13 +261,54 @@ func (a *Access) jobSnapshot(ctx context.Context, c *clients, cluster, namespace
 	if err != nil {
 		return application.JobInfo{}, a.fail("list job pods", cluster, err)
 	}
-	for i := range pods.Items {
-		if controlledBy(&pods.Items[i], jobGK, name) {
-			info.PodNames = append(info.PodNames, pods.Items[i].Name)
+	info.PodNames = jobPods(pods.Items)[name]
+	return info, nil
+}
+
+// jobPods maps each Job name to the pods it controls, newest first, so the
+// first pod of a retried Job is its latest attempt.
+func jobPods(pods []corev1.Pod) map[string][]string {
+	sorted := make([]*corev1.Pod, 0, len(pods))
+	for i := range pods {
+		sorted = append(sorted, &pods[i])
+	}
+	sort.SliceStable(sorted, func(i, j int) bool {
+		a, b := sorted[i].CreationTimestamp, sorted[j].CreationTimestamp
+		if a.Equal(&b) {
+			return sorted[i].Name < sorted[j].Name
+		}
+		return a.After(b.Time)
+	})
+	out := map[string][]string{}
+	for _, p := range sorted {
+		if o := metav1.GetControllerOf(p); o != nil && controlledBy(p, jobGK, o.Name) {
+			out[o.Name] = append(out[o.Name], p.Name)
 		}
 	}
-	sort.Strings(info.PodNames)
-	return info, nil
+	return out
+}
+
+// nextSchedule is when the schedule fires next after now, read the way the
+// CronJob controller reads it (robfig/cron, standard fields and descriptors)
+// in timeZone, or in UTC when it is unset; nil when either is invalid.
+func nextSchedule(schedule, timeZone string, now time.Time) *time.Time {
+	loc := time.UTC
+	if timeZone != "" {
+		l, err := time.LoadLocation(timeZone)
+		if err != nil {
+			return nil
+		}
+		loc = l
+	}
+	s, err := cron.ParseStandard(schedule)
+	if err != nil {
+		return nil
+	}
+	next := s.Next(now.In(loc))
+	if next.IsZero() {
+		return nil
+	}
+	return &next
 }
 
 func sameJob(a, b application.JobInfo) bool {
@@ -293,6 +352,11 @@ func jobInfo(j *batchv1.Job) application.JobInfo {
 	}
 	if j.Status.CompletionTime != nil {
 		info.FinishedAt = timePtr(*j.Status.CompletionTime)
+	}
+	for _, c := range j.Status.Conditions {
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			info.Reason, info.Message = c.Reason, c.Message
+		}
 	}
 	if info.Status != "running" && info.FinishedAt == nil {
 		for _, c := range j.Status.Conditions {

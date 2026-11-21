@@ -356,12 +356,12 @@ type ArgoClient interface {
 	ListApplications(ctx context.Context) ([]domain.ArgoApp, error)
 	// ListProjects returns the names of all AppProjects.
 	ListProjects(ctx context.Context) ([]string, error)
-	// SyncApplication asks Argo CD to sync the app to its target revision,
-	// always without prune, dry run or a chosen revision, naming the portal
-	// user in the operation's info. It returns the operation state from
-	// before the sync, so the caller can tell the new operation apart.
-	// ErrSyncInProgress when an operation is already running.
-	SyncApplication(ctx context.Context, appNamespace, name, triggeredBy string) (ArgoOperation, error)
+	// SyncApplication asks Argo CD to sync the app with these options,
+	// naming the portal user in the operation's info. It returns the
+	// operation state from before the sync, so the caller can tell the new
+	// operation apart. ErrSyncInProgress when an operation is already
+	// running.
+	SyncApplication(ctx context.Context, appNamespace, name, triggeredBy string, o ArgoSyncOptions) (ArgoOperation, error)
 	// GetOperation returns the app's current operation state.
 	GetOperation(ctx context.Context, appNamespace, name string) (ArgoOperation, error)
 	// GetAppDetails returns the app's conditions, last operation and deploy
@@ -374,16 +374,53 @@ type ArgoClient interface {
 	// RevisionMetadata returns the commit behind a Git revision of the app.
 	RevisionMetadata(ctx context.Context, appNamespace, name, revision string) (ArgoRevision, error)
 	// RollbackApplication asks Argo CD to roll the app back to the deploy
-	// with this history ID, always without prune or dry run. Like
+	// with this history ID, with these options. Like
 	// SyncApplication it returns the operation state from before. Argo CD's
 	// rollback request carries no info, so the user is not named in Argo CD.
 	// ErrSyncInProgress when an operation is already running,
 	// ErrAutoSyncEnabled when the app syncs automatically.
-	RollbackApplication(ctx context.Context, appNamespace, name string, id int64) (ArgoOperation, error)
+	RollbackApplication(ctx context.Context, appNamespace, name string, id int64, o ArgoRollbackOptions) (ArgoOperation, error)
 	// Manifests returns the objects Argo CD generates for the app's current
 	// source at this revision (hooks included), as written in the source: a
 	// namespaced object without a namespace goes to the destination.
 	Manifests(ctx context.Context, appNamespace, name, revision string) ([]ArgoResourceRef, error)
+}
+
+// ArgoSyncOptions are what Argo CD's sync dialog offers. The zero value is
+// a plain sync of the target revision: hooks run, nothing is pruned, and
+// the app's own sync options and retry apply.
+type ArgoSyncOptions struct {
+	Revision  string // "" for the app's target revision
+	Prune     bool
+	DryRun    bool
+	ApplyOnly bool // the apply strategy, which skips hooks
+	Force     bool
+	// SyncOptions replace the app's spec.syncPolicy.syncOptions when not
+	// nil (empty turns them all off).
+	SyncOptions []string
+	Retry       *ArgoRetry        // nil for the app's own
+	Resources   []ArgoResourceRef // only these; empty for all
+}
+
+// ArgoRetry is Argo CD's retry strategy of a sync.
+type ArgoRetry struct {
+	Limit   int64
+	Backoff *ArgoBackoff
+}
+
+// ArgoBackoff is the wait between retries: Duration, multiplied by Factor
+// after each one, up to MaxDuration (durations as Argo CD writes them, e.g.
+// "5s").
+type ArgoBackoff struct {
+	Duration    string
+	Factor      int64
+	MaxDuration string
+}
+
+// ArgoRollbackOptions are what Argo CD's rollback accepts.
+type ArgoRollbackOptions struct {
+	Prune  bool
+	DryRun bool
 }
 
 // ArgoResourceRef names a resource of an application. Namespace is empty
@@ -391,6 +428,16 @@ type ArgoClient interface {
 // none).
 type ArgoResourceRef struct {
 	Group, Kind, Namespace, Name string
+}
+
+// String is "Kind.group/namespace/name", or "Kind.group/name" when
+// cluster-scoped, as the audit names resources.
+func (r ArgoResourceRef) String() string {
+	k := domain.ClusterResource{Group: r.Group, Kind: r.Kind}.KindKey()
+	if r.Namespace == "" {
+		return k + "/" + r.Name
+	}
+	return k + "/" + r.Namespace + "/" + r.Name
 }
 
 // ArgoAppDetails is an application's status beyond health and sync.
@@ -405,6 +452,12 @@ type ArgoAppDetails struct {
 	MultiSource           bool                 // spec.sources
 	Resources             []ArgoResourceRef    // status.resources
 	Unhealthy             []ArgoResourceHealth // status.resources with a health other than Healthy
+	// TargetRevision is spec.source.targetRevision ("HEAD" when unset);
+	// empty for multi-source apps.
+	TargetRevision string
+	// SyncOptions and Retry are the app's spec.syncPolicy ones.
+	SyncOptions []string
+	Retry       *ArgoRetry
 }
 
 // ArgoResourceHealth is a resource's health as Argo CD assesses it, e.g.
@@ -473,6 +526,9 @@ type ArgoManagedResource struct {
 	Live, Desired                []byte
 	Modified                     bool
 	Hook                         bool
+	// NoPrune: the live object is annotated Prune=false, so Argo CD never
+	// prunes it.
+	NoPrune bool
 }
 
 // ArgoOperation is an application's status.operationState.
@@ -532,6 +588,7 @@ type ContainerInfo struct {
 	LastState    string // terminated, ""
 	LastReason   string
 	LastExitCode *int32
+	ExitCode     *int32 // of the current state when terminated (a finished Job pod)
 	LastFinished *time.Time
 	LastStarted  *time.Time
 	MemoryLimit  string
@@ -548,7 +605,23 @@ type PodInfo struct {
 	CreatedAt        time.Time
 	LastTermination  string // e.g. "OOMKilled"
 	LastTerminatedAt *time.Time
+	Job              string // the controlling Job, for a CronJob's pods
 	Containers       []ContainerInfo
+}
+
+// OtherPod is a pod whose owner chain leads to none of the workload kinds,
+// e.g. a CloudNativePG instance or a bare pod. Owner is its controller, nil
+// when it has none.
+type OtherPod struct {
+	PodInfo
+	Owner *PodOwner
+}
+
+// PodOwner is a controller owner reference.
+type PodOwner struct {
+	Group string
+	Kind  string
+	Name  string
 }
 
 type EventInfo struct {
@@ -601,15 +674,22 @@ type JobInfo struct {
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
 	Status      string // running, succeeded, failed
-	PodNames    []string
+	Reason      string // of the Failed condition, e.g. BackoffLimitExceeded
+	Message     string
+	PodNames    []string // newest first
 }
 
 type CronJobInfo struct {
 	WorkloadInfo
-	LastScheduleAt *time.Time
-	LastResult     string // succeeded, failed, running, ""
-	ActiveJobs     int
-	RecentJobs     []JobInfo
+	LastScheduleAt             *time.Time
+	LastSuccessfulAt           *time.Time
+	NextScheduleAt             *time.Time // nil when suspended or the schedule cannot be parsed
+	TimeZone                   string     // spec.timeZone; "" means the controller's (next run is computed in UTC)
+	SuccessfulJobsHistoryLimit int32
+	FailedJobsHistoryLimit     int32
+	LastResult                 string // succeeded, failed, running, ""
+	ActiveJobs                 int
+	RecentJobs                 []JobInfo // newest first
 }
 
 // LogOptions are the validated options for Logs.
@@ -660,7 +740,8 @@ const (
 )
 
 // NamespaceChange is one change in a watched namespace, attributed to the
-// workload it belongs to.
+// workload it belongs to; Workload is zero for a pod no workload owns (an
+// OtherPod) and events about it.
 type NamespaceChange struct {
 	Workload  domain.WorkloadRef
 	Type      ChangeType
@@ -692,6 +773,7 @@ type ClusterProbe struct {
 var (
 	ErrProtectedNamespace   = errors.New("namespace is protected")
 	ErrPodNotInWorkload     = errors.New("pod does not belong to the workload")
+	ErrPodHasWorkload       = errors.New("pod belongs to a workload") // an other pod's verb on a workload's pod
 	ErrInvalidName          = errors.New("invalid name")
 	ErrClusterUnknown       = errors.New("cluster not registered")
 	ErrClusterUnusable      = errors.New("cluster is unreachable or over-privileged")
@@ -739,6 +821,11 @@ type ClusterAccess interface {
 	ListCronJobs(ctx context.Context, actor KubeActor, cluster, namespace string) ([]CronJobInfo, error)
 	// Logs verifies pod ownership and opens the log stream.
 	Logs(ctx context.Context, actor KubeActor, w KubeWorkloadTarget, pod string, opts LogOptions) (io.ReadCloser, error)
+	// ListOtherPods lists the namespace's pods that no workload owns.
+	ListOtherPods(ctx context.Context, actor KubeActor, cluster, namespace string) ([]OtherPod, error)
+	// OtherPodLogs opens the log stream of a pod that no workload owns; a
+	// workload's pod is refused (ErrPodHasWorkload).
+	OtherPodLogs(ctx context.Context, actor KubeActor, cluster, namespace, pod string, opts LogOptions) (io.ReadCloser, error)
 	Exec(ctx context.Context, actor KubeActor, w KubeWorkloadTarget, pod, container, shell string, cols, rows uint16) (ExecStream, error)
 	// Debug adds a debug (ephemeral) container to the pod, waits until it
 	// runs and opens a TTY shell in it. ErrDebugUnavailable when debug is not
@@ -763,8 +850,8 @@ type ClusterAccess interface {
 	// timeout passes; the channel is closed at the end.
 	WatchJob(ctx context.Context, actor KubeActor, cluster, namespace, job string, timeout time.Duration) (<-chan JobInfo, error)
 	// WatchNamespace streams what changes in the namespace's workloads (pods,
-	// rollouts, notable events) until ctx is done; the channel is closed at
-	// the end. Changes that belong to no workload are dropped.
+	// rollouts, notable events) and its other pods until ctx is done; the
+	// channel is closed at the end. Events about other objects are dropped.
 	WatchNamespace(ctx context.Context, actor KubeActor, cluster, namespace string) (<-chan NamespaceChange, error)
 	// ResourceScopes returns, from the cluster's discovery, whether each
 	// kind it serves is namespaced (true) or cluster-scoped (false). A kind

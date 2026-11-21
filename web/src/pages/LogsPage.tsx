@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { api, errorText, kindFromSegment, openStream, wsUrl, workloadPath } from '../api';
-import type { LogOptions, ServerControl } from '../api';
+import { api, errorText, kindFromSegment, openStream, podsPath, wsUrl } from '../api';
+import type { LogOptions, OtherPod, Pod, ServerControl } from '../api';
 import { EnvBadge } from '../components/Badges';
 import { ErrorBanner } from '../components/Feedback';
 import { Icon } from '../components/Icon';
@@ -15,9 +15,10 @@ import { useNow } from '../hooks/useNow';
 import { describeEnd } from '../lib/endReason';
 import type { LogLine } from '../lib/logs';
 import { LineSplitter, SINCE_OPTIONS, TAIL_OPTIONS, parseLogLine, shortTs, splitHighlight } from '../lib/logs';
-import { workloadUrl } from '../lib/routes';
+import { namespaceUrl, workloadUrl } from '../lib/routes';
+import { siblings } from '../lib/otherPods';
 import { explainDecision } from '../lib/decision';
-import { fmtCountdown, msUntil } from '../lib/time';
+import { fmtAge, fmtCountdown, msUntil } from '../lib/time';
 import { breakGlassKey } from '../lib/breakGlass';
 
 const MAX_LINES = 20000;
@@ -42,16 +43,28 @@ export function LogsPage() {
   const [sp, setSp] = useSearchParams();
   const { me, usesGrants } = useAuth();
   const now = useNow(1000);
+  // Without a workload in the path, the pod is one no workload owns (OtherPod).
+  const other = !kindSeg;
   const ref = useMemo(() => ({ cluster, namespace: ns, kind, name }), [cluster, ns, kind, name]);
-  const wl = useApi(() => api.workload(ref), [ref, breakGlassKey(me)]);
-  useSetShellCtx(wl.data ? cluster : undefined, wl.data?.environment);
+  const src = useMemo(() => (other ? { cluster, namespace: ns } : ref), [other, cluster, ns, ref]);
+  const wl = useApi(() => api.workload(ref), [ref, breakGlassKey(me)], { enabled: !other });
+  const nss = useApi(() => api.namespaces(), [breakGlassKey(me)], { enabled: other });
+  const env = other ? nss.data?.find((n) => n.cluster === cluster && n.namespace === ns)?.environment : wl.data?.environment;
+  useSetShellCtx(env ? cluster : undefined, env);
   // New pods (a rollout, a job run) appear in the picker as they start.
-  const live = useLive(ref, (changes) => {
-    if (changes.length === 0 || changes.some((c) => c.type !== 'event')) podsQ.reload();
+  const live = useLive(src, (changes) => {
+    if (changes.length === 0 || changes.some((c) => c.type !== 'event' && (!other || !c.kind))) podsQ.reload();
   });
-  const podsQ = useApi(() => api.pods(ref), [ref], { poll: live ? 60000 : 15000 });
-  const pods = podsQ.data ?? [];
+  const podsQ = useApi<Pod[]>(() => (other ? api.otherPods(cluster, ns) : api.pods(ref)), [src], { poll: live ? 60000 : 15000 });
+  // A CronJob's pods are its runs: newest first, so it opens on the latest.
+  // An other pod's picker has the pods of its owner (e.g. a database cluster's instances).
+  const pods = useMemo(() => {
+    const l = podsQ.data ?? [];
+    if (other) return siblings(l as OtherPod[], sp.get('pod'));
+    return kind === 'CronJob' ? [...l].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)) : l;
+  }, [podsQ.data, kind, other, sp]);
   const pod = sp.get('pod') || pods[0]?.name || '';
+  const owner = other ? (pods as OtherPod[]).find((p) => p.name === pod)?.owner : undefined;
   const podObj = pods.find((p) => p.name === pod);
   const containers = podObj ? podObj.containers.filter((c) => !c.init) : [];
   const container = sp.get('container') && containers.some((c) => c.name === sp.get('container')) ? (sp.get('container') as string) : containers[0]?.name ?? '';
@@ -97,7 +110,7 @@ export function LogsPage() {
     const dec = new TextDecoder();
     const split = new LineSplitter();
     const params = { container, previous: previous || undefined, follow: follow && !previous ? true : false, tailLines: tail, sinceSeconds: since || undefined, timestamps: timestamps || undefined };
-    const url = wsUrl(`${workloadPath(ref)}/pods/${encodeURIComponent(pod)}/logs/stream`, params);
+    const url = wsUrl(`${podsPath(src)}/${encodeURIComponent(pod)}/logs/stream`, params);
     let ended = false;
     const push = (raws: string[]) => {
       if (!raws.length) return;
@@ -128,6 +141,12 @@ export function LogsPage() {
         if (ended) return;
         if (!info.opened) {
           setStatus('error');
+          if (other) {
+            void api.otherPods(cluster, ns).then((l) => setMsg(l.some((p) => p.name === pod)
+              ? 'Could not open the log stream.'
+              : 'This pod is gone, or its logs need access to the whole namespace.')).catch((e) => setMsg(errorText(e)));
+            return;
+          }
           void api.workload(ref).then((w) => {
             const e = explainDecision(w.access.logs, { action: 'logs', target: name, canBreakGlass: usesGrants });
             setMsg(e ? e.text : 'Could not open the log stream.');
@@ -140,7 +159,7 @@ export function LogsPage() {
     });
     return () => { h.close(); if (raf.current) { cancelAnimationFrame(raf.current); raf.current = 0; } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ref, pod, container, previous, follow, tail, since, timestamps, attempt]);
+  }, [src, pod, container, previous, follow, tail, since, timestamps, attempt]);
 
   const all = lines.current;
   const qq = q.trim();
@@ -188,7 +207,7 @@ export function LogsPage() {
   const setParam = (k: string, v: string) => { const n = new URLSearchParams(sp); n.set(k, v); if (k === 'pod') n.delete('container'); setSp(n, { replace: true }); };
 
   const opts: LogOptions = { container, previous, tailLines: tail, sinceSeconds: since || undefined, timestamps };
-  const dlUrl = pod ? api.logDownloadUrl(ref, pod, opts) : '#';
+  const dlUrl = pod ? api.logDownloadUrl(src, pod, opts) : '#';
   const onDownload = async (e: React.MouseEvent) => {
     if (!MOCK) return; // real server: plain attachment link
     e.preventDefault();
@@ -201,7 +220,6 @@ export function LogsPage() {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
 
-  const env = wl.data?.environment;
   const left = closesAt ? msUntil(closesAt, now) : null;
   const decisionErr = podsQ.error;
 
@@ -210,8 +228,11 @@ export function LogsPage() {
       <div style={{ padding: '12px 20px 10px', display: 'flex', flexDirection: 'column', gap: 10, flex: 'none' }}>
         <div className="row wrap" style={{ gap: 12 }}>
           <Crumbs items={[
-            { label: cluster, to: '/' }, { label: ns, mono: true },
-            { label: name, to: workloadUrl(ref), mono: true }, { label: 'Logs' },
+            { label: cluster, to: '/' },
+            ...(other
+              ? [{ label: ns, to: namespaceUrl(cluster, ns), mono: true }, ...(owner ? [{ label: owner.name, mono: true }] : []), { label: pod, mono: true }]
+              : [{ label: ns, mono: true }, { label: name, to: workloadUrl(ref), mono: true }]),
+            { label: 'Logs' },
           ]} />
           {env && <EnvBadge env={env} />}
           {left !== null && left > 0 && left < 3600_000 && <span className="chip warn"><Icon name="clock" size={12} />Closes in {fmtCountdown(left)}</span>}
@@ -222,7 +243,7 @@ export function LogsPage() {
         <div className="row wrap" style={{ gap: 10 }}>
           <label className="row" style={{ gap: 6 }}><span className="muted">Pod</span>
             <Select label="Pod" mono style={{ minWidth: 230 }} value={pod} onChange={(v) => setParam('pod', v)}
-              options={pods.length === 0 ? [{ value: '', label: podsQ.loading ? 'Loading…' : 'No pods', disabled: true }] : pods.map((p) => ({ value: p.name, label: p.name }))} />
+              options={pods.length === 0 ? [{ value: '', label: podsQ.loading ? 'Loading…' : 'No pods', disabled: true }] : pods.map((p) => ({ value: p.name, label: p.name, hint: kind === 'CronJob' ? `${p.phase} · ${fmtAge(p.createdAt, now)}` : undefined }))} />
           </label>
           <label className="row" style={{ gap: 6 }}><span className="muted">Container</span>
             <Select label="Container" mono value={container} onChange={(v) => setParam('container', v)} options={containers.map((c) => ({ value: c.name, label: c.name }))} />
@@ -283,7 +304,7 @@ export function LogsPage() {
         </span>
         <span>{all.length.toLocaleString('en-US')} lines loaded</span>
         {(status === 'ended' || status === 'error') && <button type="button" className="linklike blue" onClick={() => setAttempt((a) => a + 1)}>Reconnect</button>}
-        {status === 'error' && <Link to={workloadUrl(ref)}>Back to workload</Link>}
+        {status === 'error' && (other ? <Link to={namespaceUrl(cluster, ns)}>Back to namespace</Link> : <Link to={workloadUrl(ref)}>Back to workload</Link>)}
         <span className="grow" />
         <span className="mono">{pod} / {container}</span>
         <span>Viewing logs is recorded in the audit log</span>

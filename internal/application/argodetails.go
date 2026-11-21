@@ -43,7 +43,7 @@ type ArgoHistoryEntry struct {
 type ArgoResourceDiff struct {
 	Group, Kind, Namespace, Name string
 	// State is changed (both sides differ), missing (only in Git) or extra
-	// (only in the cluster; a sync never prunes it).
+	// (only in the cluster; pruned only by a sync that prunes).
 	State     string
 	Diff      string // unified diff of the YAML, live → desired
 	Hidden    bool   // a Secret: its content is never shown
@@ -192,41 +192,55 @@ func diffResources(items []ArgoManagedResource) ArgoDiff {
 		if it.Hook {
 			continue
 		}
-		var st string
-		switch {
-		case it.Live == nil && it.Desired == nil:
-			continue
-		case it.Live == nil:
-			st = "missing"
-		case it.Desired == nil:
-			st = "extra"
-		case it.Modified:
-			st = "changed"
-		default:
-			continue
+		if st := managedState(it); st != "" && st != "synced" {
+			out.Resources = append(out.Resources, resourceDiff(it, st, true))
 		}
-		d := ArgoResourceDiff{Group: it.Group, Kind: it.Kind, Namespace: it.Namespace, Name: it.Name, State: st}
-		if it.Group == "" && it.Kind == "Secret" {
-			d.Hidden = true
-		} else {
-			d.Diff, d.Truncated = unifiedDiff(manifestYAML(it.Live), manifestYAML(it.Desired))
-		}
-		out.Resources = append(out.Resources, d)
 	}
-	sort.Slice(out.Resources, func(i, j int) bool {
-		a, b := out.Resources[i], out.Resources[j]
-		if a.Kind != b.Kind {
-			return a.Kind < b.Kind
-		}
-		if a.Namespace != b.Namespace {
-			return a.Namespace < b.Namespace
-		}
-		return a.Name < b.Name
-	})
+	sort.Slice(out.Resources, func(i, j int) bool { return lessResource(out.Resources[i], out.Resources[j]) })
 	if len(out.Resources) > maxDiffResources {
 		out.Resources, out.Truncated = out.Resources[:maxDiffResources], true
 	}
 	return out
+}
+
+// managedState is how a resource differs: missing (only in Git), extra
+// (only in the cluster), changed, synced, or "" when neither side has it.
+func managedState(it ArgoManagedResource) string {
+	switch {
+	case it.Live == nil && it.Desired == nil:
+		return ""
+	case it.Live == nil:
+		return "missing"
+	case it.Desired == nil:
+		return "extra"
+	case it.Modified:
+		return "changed"
+	}
+	return "synced"
+}
+
+// resourceDiff describes a resource in that state, with the YAML diff when
+// withDiff (never for a Secret).
+func resourceDiff(it ArgoManagedResource, st string, withDiff bool) ArgoResourceDiff {
+	d := ArgoResourceDiff{Group: it.Group, Kind: it.Kind, Namespace: it.Namespace, Name: it.Name, State: st}
+	switch {
+	case it.Group == "" && it.Kind == "Secret":
+		d.Hidden = true
+	case withDiff && st != "synced":
+		d.Diff, d.Truncated = unifiedDiff(manifestYAML(it.Live), manifestYAML(it.Desired))
+	}
+	return d
+}
+
+// lessResource orders resources by kind, namespace and name.
+func lessResource(a, b ArgoResourceDiff) bool {
+	if a.Kind != b.Kind {
+		return a.Kind < b.Kind
+	}
+	if a.Namespace != b.Namespace {
+		return a.Namespace < b.Namespace
+	}
+	return a.Name < b.Name
 }
 
 // manifestYAML renders a state as YAML without the fields that are noise in

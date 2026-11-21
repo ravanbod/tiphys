@@ -226,7 +226,7 @@ export function Watch() {
 
       <div className="wt-stage">
         {sessionActive ? (
-          <div className={ended ? 'wt-dim' : undefined} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          <div className={ended ? 'wt-term wt-dim' : 'wt-term'}>
             <XTerm ref={term} readOnly ariaLabel="Live session output (read-only)" />
           </div>
         ) : (

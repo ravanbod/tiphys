@@ -16,10 +16,12 @@ var tokenRoutes = map[string]bool{
 	"GET /api/v1/admin/time-windows":        true,
 	"POST /api/v1/admin/time-windows":       true,
 	"PUT /api/v1/admin/time-windows/:id":    true,
+	"PATCH /api/v1/admin/time-windows/:id":  true,
 	"DELETE /api/v1/admin/time-windows/:id": true,
 	"GET /api/v1/admin/holidays":            true,
 	"POST /api/v1/admin/holidays":           true,
 	"PUT /api/v1/admin/holidays/:id":        true,
+	"PATCH /api/v1/admin/holidays/:id":      true,
 	"DELETE /api/v1/admin/holidays/:id":     true,
 	"GET /api/v1/admin/settings":            true,
 	"PATCH /api/v1/admin/settings":          true,
@@ -79,9 +81,12 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	api.GET(ns+"/workloads/:kind/:name/pods/:pod/logs/download", user, h.DownloadLogs)
 	api.GET(ns+"/access", user, h.WhoHasAccess)
 	api.GET(ns+"/events", user, h.NamespaceEvents)
+	api.GET(ns+"/pods", user, h.OtherPods)
+	api.GET(ns+"/pods/:pod/logs/download", user, h.DownloadLogs)
 	api.GET(ns+"/traffic", user, h.NamespaceTraffic)
 	api.GET(ns+"/apps", user, h.NamespaceApps)
 	api.POST(ns+"/apps/:appNs/:app/sync", user, h.SyncApp)
+	api.GET(ns+"/apps/:appNs/:app/sync-plan", user, h.AppSyncPlan)
 	api.GET(ns+"/apps/:appNs/:app/status", user, h.AppStatus)
 	api.GET(ns+"/apps/:appNs/:app/history", user, h.AppHistory)
 	api.GET(ns+"/apps/:appNs/:app/diff", user, h.AppDiff)
@@ -98,6 +103,7 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 
 	// Streams: same session cookie, Origin and ?csrf= checked.
 	api.GET(ns+"/workloads/:kind/:name/pods/:pod/logs/stream", user, h.wsGuard(), h.LogsStream)
+	api.GET(ns+"/pods/:pod/logs/stream", user, h.wsGuard(), h.LogsStream)
 	api.GET(ns+"/workloads/:kind/:name/pods/:pod/exec", user, h.wsGuard(), h.ExecStream)
 	if h.opts.DebugEnabled {
 		api.GET(ns+"/workloads/:kind/:name/pods/:pod/debug", user, h.wsGuard(), h.DebugStream)
@@ -151,10 +157,12 @@ func NewRouter(h *Handler, logger *zap.Logger, ginMode string) *gin.Engine {
 	a.GET("/time-windows", h.AdminWindows)
 	a.POST("/time-windows", h.AdminSaveWindow)
 	a.PUT("/time-windows/:id", h.AdminSaveWindow)
+	a.PATCH("/time-windows/:id", h.AdminPatchWindow)
 	a.DELETE("/time-windows/:id", h.AdminDeleteWindow)
 	a.GET("/holidays", h.AdminHolidays)
 	a.POST("/holidays", h.AdminSaveHoliday)
 	a.PUT("/holidays/:id", h.AdminSaveHoliday)
+	a.PATCH("/holidays/:id", h.AdminPatchHoliday)
 	a.DELETE("/holidays/:id", h.AdminDeleteHoliday)
 	a.GET("/clusters", h.AdminClusters)
 	// Clusters are registered by creating a Secret annotated `tiphys/cluster`

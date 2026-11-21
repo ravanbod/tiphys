@@ -1,17 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { ApiError, api, errorText, watchOperation } from '../api';
-import type { ArgoDeploy, ArgoResourceRef, ArgoSyncProgress, DecisionInfo, JobSummary, NamespaceApp, OperationDone, Pod, RestartProgress, WorkloadSummary } from '../api';
+import type { ArgoDeploy, ArgoPlanResource, ArgoResourceRef, ArgoSyncProgress, DecisionInfo, JobSummary, NamespaceApp, OperationDone, Pod, RestartProgress, WorkloadSummary } from '../api';
 import { useAuth } from '../context/auth';
 import { breakGlassOn } from '../lib/breakGlass';
 import { appScopeNote, explainDecision } from '../lib/decision';
 import { useApi } from '../hooks/useApi';
 import { describeCron } from '../lib/cron';
+import { jobFailure } from '../lib/jobs';
+import { logsUrl } from '../lib/routes';
+import {
+  PRUNE_POLICIES, SYNC_OPTIONS, countsText, initialForm, otherOptions, planCounts, prunePolicy, refKey, retryValid, syncInput, toPrune, toggleOption, withPrunePolicy,
+} from '../lib/syncPlan';
+import type { PrunePolicy, SyncForm } from '../lib/syncPlan';
 import { fmtDateTime, fmtTime } from '../lib/time';
 import { BreakGlassMark, EnvBadge, JobStatusChip, KindTag, isProd } from './Badges';
-import { DiffList } from './DiffView';
+import { PlanList } from './DiffView';
 import { Skeleton } from './Feedback';
 import { Dialog } from './Dialog';
 import { Icon } from './Icon';
+import { Select } from './Select';
 
 function BgNote({ info }: { info: DecisionInfo | undefined }) {
   if (!info?.breakGlassId) return null;
@@ -220,13 +228,19 @@ export function DeletePodDialog({ wl, pod, onClose }: { wl: WorkloadSummary; pod
 }
 
 /**
- * Confirms and follows a sync of a whole Argo CD application. The portal
- * always syncs to the app's target revision without pruning; production
- * asks for the app's name, like a restart.
+ * Confirms and follows a sync of a whole Argo CD application with the
+ * options of Argo CD's sync dialog. The plan shows what the sync would do
+ * (what prune deletes included) and is loaded again for another revision,
+ * which needs rollback too; production asks for the app's name, like a
+ * restart, but for a dry run.
  */
 export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: NamespaceApp; cluster: string; namespace: string; onClose: (changed: boolean) => void }) {
-  const info = app.access.sync;
-  const prod = isProd(info.environment);
+  const { usesGrants, me } = useAuth();
+  const [revInput, setRevInput] = useState('');
+  const [revision, setRevision] = useState('');
+  const args = [cluster, namespace, app.appNamespace, app.name] as const;
+  const plan = useApi(() => api.appSyncPlan(...args, revision), [...args, revision]);
+  const [form, setForm] = useState<SyncForm | null>(null);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
@@ -235,16 +249,33 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
   const [done, setDone] = useState<OperationDone | null>(null);
   const stop = useRef<(() => void) | null>(null);
   useEffect(() => () => stop.current?.(), []);
-  const canGo = !prod || typed === app.name;
+  // The form starts from the app's own settings; another revision keeps the
+  // options but selects all its resources again.
+  useEffect(() => {
+    const p = plan.data;
+    if (p) setForm((f) => (f ? { ...f, selected: null } : initialForm(p)));
+  }, [plan.data]);
+
+  const p = plan.loading || plan.error ? undefined : plan.data;
+  const info = p?.decision ?? app.access.sync;
+  const prod = isProd(info.environment);
+  const set = (patch: Partial<SyncForm>) => setForm((f) => (f ? { ...f, ...patch } : f));
+  const pruned = p && form ? toPrune(p, form) : [];
+  const counts = p && form ? planCounts(p, form) : null;
+  const otherRev = !!p?.revision;
+  const autoSyncBlocked = !!p && otherRev && p.autoSync && !form?.dryRun;
+  const nothing = !!form && form.selected !== null && form.selected.length === 0;
+  const ready = !!p && !!form && p.decision.allowed && !autoSyncBlocked && !nothing && retryValid(form.retry);
+  const canGo = ready && (!prod || form?.dryRun || typed === app.name);
   const already = err instanceof ApiError && err.code === 'already_running';
-  const diff = useApi(() => api.appDiff(cluster, namespace, app.appNamespace, app.name), [cluster, namespace, app.appNamespace, app.name]);
+  const what = form?.dryRun ? 'Dry run' : 'Sync';
 
   async function go() {
-    if (!canGo || busy) return;
+    if (!canGo || busy || !p || !form) return;
     setBusy(true);
     setErr(null);
     try {
-      const { operationId } = await api.syncApp(cluster, namespace, app.appNamespace, app.name);
+      const { operationId } = await api.syncApp(...args, syncInput(p, form));
       setStarted(true);
       stop.current = watchOperation<ArgoSyncProgress>(operationId, {
         onProgress: setProg,
@@ -257,22 +288,37 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
     }
   }
 
-  const subtitle = <span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cluster} / {app.name}</span><EnvBadge env={info.environment} /></span>;
+  const subtitle = <span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cluster} / {app.name}{otherRev ? ` → ${shortRev(p!.revision!)}` : ''}</span><EnvBadge env={info.environment} /></span>;
   if (started) {
     return (
-      <ArgoProgressDialog what="Sync" verb="synced" name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />
+      <ArgoProgressDialog what={what} verb={form?.dryRun ? 'dry-run finished' : 'synced'} name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />
     );
   }
+  const denial = p && !p.decision.allowed
+    ? explainDecision(p.decision, { action: p.decisionAction, target: p.decisionNamespace === namespace ? app.name : `${app.name} (namespace ${p.decisionNamespace})`, canBreakGlass: usesGrants && breakGlassOn(me) })
+    : null;
+  const scope = p ? appScopeNote(p.decision, p.adminOnlyResources) : null;
+  const isSelected = (r: ArgoPlanResource) => !form || form.selected === null || form.selected.includes(refKey(r));
+  const toggle = (r: ArgoPlanResource) => {
+    if (!p || !form) return;
+    const all = form.selected ?? p.resources.map(refKey);
+    const k = refKey(r);
+    const next = all.includes(k) ? all.filter((x) => x !== k) : [...all, k];
+    set({ selected: next.length === p.resources.length ? null : next });
+  };
+  const applyRevision = () => setRevision(revInput.trim());
 
   return (
     <Dialog
-      width={720} onClose={() => onClose(false)} tone={info.breakGlassId ? 'bg' : prod ? 'prod' : undefined} title={`Sync ${app.name}?`}
-      subtitle="Applies the application's target revision from Git, like Sync in Argo CD. Nothing is pruned: resources removed from Git stay in the cluster."
+      width={780} onClose={() => onClose(false)} tone={info.breakGlassId ? 'bg' : prod ? 'prod' : undefined} title={`Sync ${app.name}?`}
+      subtitle={otherRev
+        ? 'Applies another revision than the target, like Sync to a revision in Argo CD. The application stays OutOfSync with its target until the next sync.'
+        : "Applies the application's target revision, like Sync in Argo CD."}
       footer={
         <>
           <button type="button" className="btn" onClick={() => onClose(false)}>Cancel</button>
           <button type="button" className={`btn act${canGo && !busy && !already ? '' : ' dis'}`} aria-disabled={!canGo || busy || already} onClick={() => void go()} data-autofocus={!prod || undefined}>
-            <Icon name="refresh" />Sync
+            <Icon name="refresh" />{form?.dryRun ? 'Dry run' : pruned.length ? `Sync and prune ${pruned.length}` : 'Sync'}
           </button>
         </>
       }
@@ -285,14 +331,62 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
         <dt>Cluster</dt><dd className="mono">{cluster}</dd>
         <dt>Environment</dt><dd><EnvBadge env={info.environment} /></dd>
       </dl>
+      <form className="row" style={{ gap: 8, alignItems: 'flex-end' }} onSubmit={(e) => { e.preventDefault(); applyRevision(); }}>
+        <label className="f grow">
+          <span>Revision <span className="hint">empty for the target{plan.data ? `: ${plan.data.targetRevision}` : ''}</span></span>
+          <input className="input mono" value={revInput} onChange={(e) => setRevInput(e.target.value)} placeholder={plan.data?.targetRevision || 'HEAD'}
+            aria-label="Revision" autoComplete="off" spellCheck={false} disabled={app.multiSource} />
+        </label>
+        <button type="submit" className={`btn${revInput.trim() === revision ? ' dis' : ''}`} aria-disabled={revInput.trim() === revision}>Show plan</button>
+      </form>
+      {form && <SyncOptionsForm form={form} set={set} />}
       <div className="col" style={{ gap: 6 }}>
-        <b>What changes{diff.data && ` (${diff.data.resources.length})`}</b>
-        {diff.error ? <span className="muted">The changes could not be loaded: {errorText(diff.error)}</span>
-          : !diff.data ? <Skeleton rows={2} />
-            : <div style={{ maxHeight: 280, overflow: 'auto' }}><DiffList diff={diff.data} /></div>}
+        <div className="row">
+          <b>What the {form?.dryRun ? 'dry run checks' : 'sync does'}</b>
+          {counts && <span className="muted">{countsText(counts, otherRev)}</span>}
+          <span className="grow" />
+          {p && form?.selected !== null && <button type="button" className="btn sm" onClick={() => set({ selected: null })}>Select all</button>}
+        </div>
+        {plan.error ? <div className="banner red" role="alert">{errText(plan.error)}</div>
+          : !p ? <Skeleton rows={2} />
+            : (
+              <>
+                {denial && (
+                  <div className="banner yel" role="alert">
+                    <Icon name="warn" />
+                    <span>
+                      {denial.text} {p.decisionAction === 'rollback' && 'Syncing to another revision than the target also needs rollback.'} {scope?.text}
+                      {scope && scope.shown.length > 0 && (
+                        <span className="row wrap" style={{ gap: 4, marginTop: 4 }}>
+                          {scope.shown.map((r) => <span key={r} className="tag mono">{r}</span>)}
+                          {scope.more > 0 && <span className="muted">and {scope.more} more</span>}
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                )}
+                {otherRev && <span className="muted">Argo CD shows changes against the target revision only, so this lists what the revision deploys and what it lacks.</span>}
+                {p.resources.length === 0 ? <div className="empty">The application has no resources.</div>
+                  : <div style={{ maxHeight: 280, overflow: 'auto' }}><PlanList resources={p.resources} prune={!!form?.prune} isSelected={isSelected} onToggle={toggle} /></div>}
+                {p.truncated && <span className="muted">Only the first 200 resources are listed.</span>}
+              </>
+            )}
       </div>
-      {prod && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
-      {prod && (
+      {pruned.length > 0 && (
+        <div className="banner red" role="status">
+          <Icon name="trash" />
+          <span>
+            {form?.dryRun ? 'A real sync would delete' : 'Deletes'} {pruned.length === 1 ? 'this resource' : `these ${pruned.length} resources`} from the cluster:
+            <span className="row wrap" style={{ gap: 4, marginTop: 4 }}>{pruned.map((r) => <span key={refKey(r)} className="tag mono">{refName(r)}</span>)}</span>
+          </span>
+        </div>
+      )}
+      {form && !form.dryRun && (form.force || form.options.includes('Replace=true')) && (
+        <div className="banner yel"><Icon name="warn" /><span>{form.force ? 'Force' : 'Replace'} may delete and recreate resources, which restarts their pods and drops their state.</span></div>
+      )}
+      {autoSyncBlocked && <div className="banner yel" role="alert"><Icon name="warn" /><span>This application syncs automatically, so Argo CD syncs it to another revision only as a dry run.</span></div>}
+      {prod && !form?.dryRun && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
+      {prod && !form?.dryRun && ready && (
         <label className="f">
           <span>Type <b className="mono" style={{ color: 'var(--tx)' }}>{app.name}</b> to confirm</span>
           <input className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type the application name to confirm" autoComplete="off" spellCheck={false} data-autofocus />
@@ -304,14 +398,67 @@ export function SyncAppDialog({ app, cluster, namespace, onClose }: { app: Names
   );
 }
 
+/** The options of Argo CD's sync dialog. */
+function SyncOptionsForm({ form, set }: { form: SyncForm; set: (patch: Partial<SyncForm>) => void }) {
+  const others = otherOptions(form.options);
+  const r = form.retry;
+  const setRetry = (patch: Partial<SyncForm['retry']>) => set({ retry: { ...r, ...patch }, retryTouched: true });
+  return (
+    <fieldset className="col" style={{ gap: 8, border: '1px solid var(--ln)', borderRadius: 6, padding: '8px 12px', margin: 0 }}>
+      <legend className="muted" style={{ padding: '0 4px' }}>Options</legend>
+      <div className="row wrap" style={{ gap: '6px 16px' }}>
+        <label className="chk"><input type="checkbox" checked={form.prune} onChange={(e) => set({ prune: e.target.checked })} /> Prune</label>
+        <label className="chk"><input type="checkbox" checked={form.dryRun} onChange={(e) => set({ dryRun: e.target.checked })} /> Dry run</label>
+        <label className="chk"><input type="checkbox" checked={form.applyOnly} onChange={(e) => set({ applyOnly: e.target.checked })} /> Apply only <span className="muted">(skip hooks)</span></label>
+        <label className="chk"><input type="checkbox" checked={form.force} onChange={(e) => set({ force: e.target.checked })} /> Force</label>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: '6px 16px' }}>
+        {SYNC_OPTIONS.map((o) => (
+          <label key={o.value} className="chk" title={o.hint}>
+            <input type="checkbox" checked={form.options.includes(o.value)} onChange={() => set({ options: toggleOption(form.options, o.value) })} /> {o.label}
+          </label>
+        ))}
+      </div>
+      <div className="row wrap" style={{ gap: '6px 16px' }}>
+        <span className="row" style={{ gap: 8 }}>
+          <span>Prune propagation</span>
+          <Select<PrunePolicy | ''> value={prunePolicy(form.options)} label="Prune propagation policy" onChange={(v) => set({ options: withPrunePolicy(form.options, v) })}
+            options={[{ value: '', label: 'default' }, ...PRUNE_POLICIES.map((v) => ({ value: v, label: v }))]} />
+        </span>
+        {others.length > 0 && (
+          <span className="row wrap" style={{ gap: 4 }}>
+            <span className="muted">The application's own:</span>
+            {others.map((o) => (
+              <label key={o} className="chk tag mono"><input type="checkbox" checked onChange={() => set({ options: toggleOption(form.options, o) })} />{o}</label>
+            ))}
+          </span>
+        )}
+      </div>
+      <div className="row wrap" style={{ gap: 8 }}>
+        <label className="chk"><input type="checkbox" checked={r.on} onChange={(e) => setRetry({ on: e.target.checked })} /> Retry</label>
+        {r.on && (
+          <>
+            <label className="row" style={{ gap: 4 }}>limit <input className="input mono" style={{ width: 56 }} type="number" min={1} max={10} value={r.limit} onChange={(e) => setRetry({ limit: Number(e.target.value) })} /></label>
+            <label className="row" style={{ gap: 4 }}>backoff <input className="input mono" style={{ width: 64 }} value={r.duration} onChange={(e) => setRetry({ duration: e.target.value.trim() })} /></label>
+            <label className="row" style={{ gap: 4 }}>× <input className="input mono" style={{ width: 48 }} type="number" min={1} max={10} value={r.factor} onChange={(e) => setRetry({ factor: Number(e.target.value) })} /></label>
+            <label className="row" style={{ gap: 4 }}>up to <input className="input mono" style={{ width: 64 }} value={r.maxDuration} onChange={(e) => setRetry({ maxDuration: e.target.value.trim() })} /></label>
+            {!retryValid(r) && <span className="muted" role="alert">Limit and factor 1–10, durations like 5s or 3m.</span>}
+          </>
+        )}
+      </div>
+    </fieldset>
+  );
+}
+
 /** Follows a sync or rollback of an Argo CD application until Argo CD reports it finished. */
 function ArgoProgressDialog({ what, verb, name, info, subtitle, prog, done, onClose }: {
-  what: 'Sync' | 'Rollback'; verb: string; name: string; info: DecisionInfo; subtitle: React.ReactNode;
+  what: 'Sync' | 'Rollback' | 'Dry run'; verb: string; name: string; info: DecisionInfo; subtitle: React.ReactNode;
   prog: ArgoSyncProgress | null; done: OperationDone | null; onClose: () => void;
 }) {
+  const running = { Sync: 'Syncing', Rollback: 'Rolling back', 'Dry run': 'Dry run of' }[what];
   return (
     <Dialog
-      onClose={onClose} tone={info.breakGlassId ? 'bg' : undefined} title={done ? `${what} of ${name}` : `${what === 'Sync' ? 'Syncing' : 'Rolling back'} ${name}`}
+      onClose={onClose} tone={info.breakGlassId ? 'bg' : undefined} title={done ? `${what} of ${name}` : `${running} ${name}`}
       subtitle={subtitle}
       footer={<button type="button" className="btn" data-autofocus onClick={onClose}>Close</button>}
     >
@@ -351,6 +498,8 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
   const info = plan.data?.decision ?? app.access.rollback;
   const prod = isProd(info.environment);
   const [typed, setTyped] = useState('');
+  const [prune, setPrune] = useState(false);
+  const [dryRun, setDryRun] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<unknown>(null);
   const [started, setStarted] = useState(false);
@@ -359,7 +508,8 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
   const stop = useRef<(() => void) | null>(null);
   useEffect(() => () => stop.current?.(), []);
   const allowed = !!plan.data?.decision.allowed;
-  const canGo = allowed && (!prod || typed === app.name);
+  const canGo = allowed && (!prod || dryRun || typed === app.name);
+  const pruned = prune ? plan.data?.kept ?? [] : [];
   const already = err instanceof ApiError && err.code === 'already_running';
   const rev = deploy.revision ? shortRev(deploy.revision) : `#${deploy.id}`;
 
@@ -368,7 +518,7 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
     setBusy(true);
     setErr(null);
     try {
-      const { operationId } = await api.rollbackApp(...args);
+      const { operationId } = await api.rollbackApp(...args, { prune, dryRun });
       setStarted(true);
       stop.current = watchOperation<ArgoSyncProgress>(operationId, {
         onProgress: setProg,
@@ -383,7 +533,7 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
 
   const subtitle = <span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cluster} / {app.name} → {rev}</span><EnvBadge env={info.environment} /></span>;
   if (started) {
-    return <ArgoProgressDialog what="Rollback" verb={`rolled back to ${rev}`} name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />;
+    return <ArgoProgressDialog what={dryRun ? 'Dry run' : 'Rollback'} verb={dryRun ? 'dry-run finished' : `rolled back to ${rev}`} name={app.name} info={info} subtitle={subtitle} prog={prog} done={done} onClose={() => onClose(true)} />;
   }
   const p = plan.data;
   const denial = p && !p.decision.allowed
@@ -394,12 +544,12 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
   return (
     <Dialog
       width={720} onClose={() => onClose(false)} tone={info.breakGlassId ? 'bg' : prod ? 'prod' : undefined} title={`Roll back ${app.name} to ${rev}?`}
-      subtitle="Applies the manifests of this earlier deploy, like Rollback in Argo CD. Nothing is pruned, and the application stays OutOfSync with Git until the next sync."
+      subtitle="Applies the manifests of this earlier deploy, like Rollback in Argo CD. The application stays OutOfSync with Git until the next sync."
       footer={
         <>
           <button type="button" className="btn" onClick={() => onClose(false)}>Cancel</button>
           <button type="button" className={`btn act${canGo && !busy && !already ? '' : ' dis'}`} aria-disabled={!canGo || busy || already} onClick={() => void go()} data-autofocus={!prod || undefined}>
-            <Icon name="restart" />Roll back
+            <Icon name="restart" />{dryRun ? 'Dry run' : pruned.length ? `Roll back and prune ${pruned.length}` : 'Roll back'}
           </button>
         </>
       }
@@ -413,6 +563,10 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
         <dt>Cluster</dt><dd className="mono">{cluster}</dd>
         <dt>Environment</dt><dd><EnvBadge env={info.environment} /></dd>
       </dl>
+      <div className="row" style={{ gap: 16 }}>
+        <label className="chk"><input type="checkbox" checked={prune} onChange={(e) => setPrune(e.target.checked)} /> Prune</label>
+        <label className="chk"><input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} /> Dry run</label>
+      </div>
       {plan.error ? <div className="banner red" role="alert">{errText(plan.error)}</div>
         : !p ? <Skeleton rows={2} />
           : (
@@ -438,15 +592,17 @@ export function RollbackAppDialog({ app, deploy, cluster, namespace, onClose }: 
               {p.kept.length > 0 && (
                 <>
                   <b>Not in this revision ({p.kept.length})</b>
-                  <span className="muted">They stay in the cluster, since a rollback never prunes.</span>
+                  {prune
+                    ? <span className="banner red" role="status"><Icon name="trash" />{dryRun ? 'A real rollback would delete them' : 'They are deleted from the cluster'}, but for those annotated Prune=false.</span>
+                    : <span className="muted">They stay in the cluster, since the rollback does not prune.</span>}
                   <ul className="mono" style={{ margin: 0, paddingLeft: 18, maxHeight: 140, overflow: 'auto' }}>{p.kept.map((r) => <li key={refName(r)}>{refName(r)}</li>)}</ul>
                 </>
               )}
               {p.truncated && <span className="muted">Only the first 200 of each are listed.</span>}
             </div>
           )}
-      {prod && allowed && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
-      {prod && allowed && (
+      {prod && allowed && !dryRun && <div className="banner prod"><Icon name="warn" /><span>This changes production and is recorded in the audit log.</span></div>}
+      {prod && allowed && !dryRun && (
         <label className="f">
           <span>Type <b className="mono" style={{ color: 'var(--tx)' }}>{app.name}</b> to confirm</span>
           <input className="input mono" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type the application name to confirm" autoComplete="off" spellCheck={false} data-autofocus />
@@ -495,18 +651,28 @@ export function RunCronDialog({ cron, onClose, onViewRunning }: { cron: Workload
   }
 
   if (started) {
+    // The latest attempt's logs, as soon as its pod exists.
+    const pod = job?.podNames[0];
+    const failed = !!done && done.outcome !== 'succeeded';
+    const logsTo = pod && cron.access.logs.allowed ? logsUrl({ cluster: cron.cluster, namespace: cron.namespace, kind: 'CronJob', name: cron.name }, pod) : null;
     return (
       <Dialog
         onClose={() => onClose(true)} tone={info?.breakGlassId ? 'bg' : undefined} title={done ? `Run of ${cron.name}` : `Running ${cron.name}`}
         subtitle={<span className="row"><span className="mono" style={{ color: 'var(--tx)' }}>{cron.cluster} / {cron.namespace}</span><EnvBadge env={cron.environment} /></span>}
-        footer={<button type="button" className="btn" data-autofocus onClick={() => onClose(true)}>Close</button>}
+        footer={
+          <>
+            {logsTo && <Link className={`btn${failed ? ' act' : ''}`} to={logsTo} onClick={() => onClose(true)}><Icon name="list" />{done ? 'View logs' : 'Follow logs'}</Link>}
+            <button type="button" className="btn" data-autofocus onClick={() => onClose(true)}>Close</button>
+          </>
+        }
       >
         <div aria-live="polite" className="col">
           {job && (
             <dl className="kv" style={{ gridTemplateColumns: '90px 1fr' }}>
               <dt>Job</dt><dd className="mono">{job.name}</dd>
               <dt>Status</dt><dd><JobStatusChip status={job.status} /></dd>
-              <dt>Pods</dt><dd className="mono">{job.succeeded}/{job.completions} done · {job.active} active</dd>
+              <dt>Pods</dt><dd className="mono">{job.succeeded}/{job.completions} done · {job.active} active{job.failed > 0 ? ` · ${job.failed} failed` : ''}</dd>
+              {jobFailure(job) && (<><dt>Reason</dt><dd title={job.message ?? undefined}>{jobFailure(job)}</dd></>)}
             </dl>
           )}
           {!job && !done && <span className="muted">Waiting for the Job to start…</span>}

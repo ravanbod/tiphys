@@ -42,7 +42,9 @@ create, update and delete on Secrets in its own namespace (SecretStore).
 5. For verbs that name a pod: re-reads the pod and walks its owner chain
    (Pod -> ReplicaSet -> Deployment/Rollout, Pod -> StatefulSet,
    Pod -> DaemonSet, Pod -> Job -> CronJob; group and kind are compared, not only
-   the name). Mismatch: `ErrPodNotInWorkload`.
+   the name). Mismatch: `ErrPodNotInWorkload`. `OtherPodLogs` instead checks
+   that the chain leads to no workload (`ErrPodHasWorkload` otherwise); a
+   missing ReplicaSet or Job leads to none.
 
 Label and field selectors are never built from workload contents. Pod and event
 lists are filtered in memory by owner chain (Service selectors for the traffic

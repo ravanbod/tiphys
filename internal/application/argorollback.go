@@ -18,7 +18,7 @@ const maxRollbackResources = 200
 // would do, and whether the principal may do it. The decision covers the
 // namespaces and cluster-scoped resources the app manages now together with
 // those of the deploy's revision, since a rollback applies the revision's
-// manifests and never prunes.
+// manifests (and prunes only what the app manages now).
 type ArgoRollbackPlan struct {
 	Deploy     ArgoDeploy
 	Decision   domain.Decision
@@ -27,8 +27,8 @@ type ArgoRollbackPlan struct {
 	// rollback to admins; set only when that is why it is denied.
 	AdminOnlyResources []domain.ClusterResource
 	// Added are the revision's resources the app does not manage now; Kept
-	// are the ones it manages now that the revision lacks: they stay, since a
-	// rollback never prunes.
+	// are the ones it manages now that the revision lacks: they stay, unless
+	// the rollback prunes.
 	Added, Kept []ArgoResourceRef
 	Truncated   bool // Added or Kept had more than maxRollbackResources
 
@@ -37,8 +37,8 @@ type ArgoRollbackPlan struct {
 
 // Rollback starts a rollback of the application (see
 // ArgoClient.RollbackApplication).
-func (s *ArgoService) Rollback(ctx context.Context, appNamespace, name string, id int64) (ArgoOperation, error) {
-	return s.client.RollbackApplication(ctx, appNamespace, name, id)
+func (s *ArgoService) Rollback(ctx context.Context, appNamespace, name string, id int64, o ArgoRollbackOptions) (ArgoOperation, error) {
+	return s.client.RollbackApplication(ctx, appNamespace, name, id, o)
 }
 
 // Manifests returns the objects the app's source generates at a revision.
@@ -69,7 +69,7 @@ func (s *WorkloadService) AppRollbackPlan(ctx context.Context, p Principal, clus
 // deploys of a source other than the current one are refused. Like sync, it
 // does not run if its "started" audit event cannot be written, and is then
 // followed until Argo CD reports the operation finished.
-func (s *WorkloadService) RollbackApp(ctx context.Context, p Principal, cluster, ns, appNamespace, name string, id int64) (OperationStarted, error) {
+func (s *WorkloadService) RollbackApp(ctx context.Context, p Principal, cluster, ns, appNamespace, name string, id int64, o ArgoRollbackOptions) (OperationStarted, error) {
 	app, err := s.appFor(ctx, p, cluster, ns, appNamespace, name)
 	if err != nil {
 		return OperationStarted{}, err
@@ -98,7 +98,10 @@ func (s *WorkloadService) RollbackApp(ctx context.Context, p Principal, cluster,
 	e.BreakGlassID = d.BreakGlassID
 	e.Result = domain.ResultAllowed
 	e.Details = map[string]any{"app": app.Name, "appNamespace": app.AppNamespace, "project": app.Project, "namespaces": namespaces,
-		"historyId": plan.Deploy.ID, "revision": plan.Deploy.Revision}
+		"historyId": plan.Deploy.ID, "revision": plan.Deploy.Revision, "prune": o.Prune, "dryRun": o.DryRun}
+	if o.Prune && len(plan.Kept) > 0 {
+		e.Details["toPrune"] = refNames(plan.Kept)
+	}
 	if rs := plan.app.ForeignClusterResources(); len(rs) > 0 {
 		names := make([]string, len(rs))
 		for i, r := range rs {
@@ -112,7 +115,7 @@ func (s *WorkloadService) RollbackApp(ctx context.Context, p Principal, cluster,
 		return OperationStarted{}, fmt.Errorf("audit event could not be written, rollback not run: %w", err)
 	}
 
-	prev, err := s.argo.Rollback(ctx, app.AppNamespace, app.Name, plan.Deploy.ID)
+	prev, err := s.argo.Rollback(ctx, app.AppNamespace, app.Name, plan.Deploy.ID, o)
 	if err != nil {
 		details := map[string]any{"app": app.Name, "outcome": "failed"}
 		switch {
@@ -127,7 +130,7 @@ func (s *WorkloadService) RollbackApp(ctx context.Context, p Principal, cluster,
 		return OperationStarted{}, &ArgoError{Err: err}
 	}
 	op := s.ops.Create(p.User.ID, s.clock.Now())
-	go s.followArgoOperation(op, app, prev, started, "Rollback")
+	go s.followArgoOperation(op, app, prev, started, orText(dryRunText(o.DryRun), "Rollback"))
 	return OperationStarted{OperationID: op.ID}, nil
 }
 
@@ -159,16 +162,11 @@ func (s *WorkloadService) rollbackPlan(ctx context.Context, p Principal, app dom
 	if dep.Revision == "" || !dep.SameSource {
 		return ArgoRollbackPlan{}, Invalid("id", "The application's source changed since this deploy, so the portal cannot check what it would deploy; use Argo CD.")
 	}
-	objs, err := s.argo.Manifests(ctx, app.AppNamespace, app.Name, dep.Revision)
+	resolved, withRevision, err := s.revisionResources(ctx, p, app, dep.Revision, breakGlassID)
 	if err != nil {
-		return ArgoRollbackPlan{}, &ArgoError{Err: err}
+		return ArgoRollbackPlan{}, err
 	}
-	scopes, err := s.kube.ResourceScopes(ctx, p.KubeActor(breakGlassID), app.Cluster)
-	if err != nil {
-		return ArgoRollbackPlan{}, s.kubeErr(app.Cluster, err)
-	}
-	resolved, namespaces, clusterResources := resolveManifests(objs, scopes, app.Namespace)
-	plan := ArgoRollbackPlan{Deploy: dep, app: app.Including(namespaces, clusterResources)}
+	plan := ArgoRollbackPlan{Deploy: dep, app: withRevision}
 	plan.Decision, plan.DecisionAt = s.access.DecideApp(p, plan.app, domain.ActionRollback)
 	if plan.Decision.Reason == domain.ReasonAppScope {
 		plan.AdminOnlyResources = s.access.AdminOnlyResources(plan.app)
@@ -181,6 +179,32 @@ func (s *WorkloadService) rollbackPlan(ctx context.Context, p Principal, app dom
 		}
 	}
 	return plan, nil
+}
+
+// revisionResources reads the objects of the app's current source at a
+// revision, placed as the cluster would place them (resolveManifests), and
+// returns them with the app widened to their namespaces and cluster-scoped
+// resources, so DecideApp covers what the revision deploys too.
+func (s *WorkloadService) revisionResources(ctx context.Context, p Principal, app domain.ArgoApp, revision string, breakGlassID *int64) ([]ArgoResourceRef, domain.ArgoApp, error) {
+	objs, err := s.argo.Manifests(ctx, app.AppNamespace, app.Name, revision)
+	if err != nil {
+		return nil, domain.ArgoApp{}, &ArgoError{Err: err}
+	}
+	scopes, err := s.kube.ResourceScopes(ctx, p.KubeActor(breakGlassID), app.Cluster)
+	if err != nil {
+		return nil, domain.ArgoApp{}, s.kubeErr(app.Cluster, err)
+	}
+	resolved, namespaces, clusterResources := resolveManifests(objs, scopes, app.Namespace)
+	return resolved, app.Including(namespaces, clusterResources), nil
+}
+
+// refNames names resources for the audit (ArgoResourceRef.String).
+func refNames(rs []ArgoResourceRef) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.String()
+	}
+	return out
 }
 
 // resolveManifests places each object as the cluster would: a namespaced

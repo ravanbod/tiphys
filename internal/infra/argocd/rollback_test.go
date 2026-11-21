@@ -10,11 +10,11 @@ import (
 	"tiphys/internal/application"
 )
 
-func TestRollbackApplicationSendsOnlyFixedOptions(t *testing.T) {
+func TestRollbackApplication(t *testing.T) {
 	var body map[string]any
 	var uri string
 	c := syncServer(t, http.StatusOK, finishedApp, &body, &uri)
-	prev, err := c.RollbackApplication(context.Background(), "argocd", "payments-api", 7)
+	prev, err := c.RollbackApplication(context.Background(), "argocd", "payments-api", 7, application.ArgoRollbackOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,12 @@ func TestRollbackApplicationSendsOnlyFixedOptions(t *testing.T) {
 	if !prev.StartedAt.Equal(time.Date(2026, 10, 30, 9, 0, 0, 0, time.UTC)) {
 		t.Fatalf("prev = %+v", prev)
 	}
+	if _, err := c.RollbackApplication(context.Background(), "argocd", "payments-api", 7, application.ArgoRollbackOptions{Prune: true, DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if body["prune"] != true || body["dryRun"] != true {
+		t.Fatalf("body = %v", body)
+	}
 }
 
 func TestRollbackApplicationRefusals(t *testing.T) {
@@ -38,7 +44,7 @@ func TestRollbackApplicationRefusals(t *testing.T) {
 		var body map[string]any
 		var uri string
 		c := syncServer(t, http.StatusBadRequest, `{"code":9,"message":"`+msg+`"}`, &body, &uri)
-		if _, err := c.RollbackApplication(context.Background(), "argocd", "payments-api", 1); !errors.Is(err, want) {
+		if _, err := c.RollbackApplication(context.Background(), "argocd", "payments-api", 1, application.ArgoRollbackOptions{}); !errors.Is(err, want) {
 			t.Fatalf("%s: err = %v", msg, err)
 		}
 	}

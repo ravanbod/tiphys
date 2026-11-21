@@ -98,7 +98,7 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrSyncInProgress):
 		abort(c, http.StatusConflict, "already_running", "Another operation on this application is already in progress in Argo CD.", nil)
 	case errors.Is(err, application.ErrAutoSyncEnabled):
-		abort(c, http.StatusConflict, "auto_sync_enabled", "This application syncs automatically, so Argo CD does not roll it back. Turn off auto-sync in Git or Argo CD first.", nil)
+		abort(c, http.StatusConflict, "auto_sync_enabled", "This application syncs automatically, so Argo CD neither rolls it back nor syncs it to another revision (but for a dry run). Turn off auto-sync in Git or Argo CD first.", nil)
 	case errors.Is(err, application.ErrPodDeleteUnavailable):
 		abort(c, http.StatusConflict, "pod_delete_unavailable", "Deleting pods is not set up on this cluster: its connector chart lacks the tiphys-pod-delete-only policy.", nil)
 	case errors.Is(err, application.ErrLastAdmin):
@@ -110,6 +110,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
 	case errors.Is(err, application.ErrProtectedNamespace):
 		abort(c, http.StatusForbidden, "denied", denialText[domain.ReasonProtectedNamespace],
 			map[string]any{"decision": decisionInfo{Reason: string(domain.ReasonProtectedNamespace), GrantIDs: []int64{}}})
+	case errors.Is(err, application.ErrPodHasWorkload):
+		abort(c, http.StatusForbidden, "pod_in_workload", "A workload owns this pod: open its logs on the workload's page.", nil)
 	case errors.Is(err, application.ErrPodNotInWorkload):
 		abort(c, http.StatusForbidden, "pod_not_in_workload", "The pod does not belong to this workload.", nil)
 	case errors.Is(err, application.ErrInvalidName):

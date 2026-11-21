@@ -128,8 +128,12 @@ func (s *WorkloadService) Live(ctx context.Context, p Principal, targets []domai
 // liveView is what the principal may see of a change: everything with logs
 // on the workload (like Pods and Events); with only other actions, the
 // replica counts the workload list and page show and otherwise only that
-// the workload changed; nothing without a grant on it.
+// the workload changed; nothing without a grant on it. A change of an other
+// pod (zero workload) needs logs on the namespace, like OtherPods.
 func (s *WorkloadService) liveView(p Principal, t domain.ClusterNS, c NamespaceChange) (NamespaceChange, bool) {
+	if c.Workload.Name == "" {
+		return c, s.access.Decide(p, nsTarget(t.Cluster, t.Namespace), domain.ActionLogs).Allowed
+	}
 	wt := wlTarget(t.Cluster, t.Namespace, c.Workload)
 	if s.access.Decide(p, wt, domain.ActionLogs).Allowed {
 		return c, true

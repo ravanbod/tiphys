@@ -111,6 +111,12 @@ Details live in `spec.md` and `docs/`; these are the rules easy to break.
   (`WorkloadDetail.podDelete`, `ClusterAccess.PodDeleteReady`) and refused
   (`ErrPodDeleteUnavailable`) on clusters lacking the chart's
   `tiphys-pod-delete-only` policy (VAP or Kyverno).
+- **Other pods** (`ListOtherPods`, `OtherPodLogs`, `WorkloadService.OtherPods`):
+  pods whose owner chain leads to no workload kind (CloudNativePG instances,
+  bare pods). Logs only, decided on the namespace target (no workload), so a
+  `workloads` grant never covers them; the list is empty without it. The
+  namespace watch sends their changes with a zero workload (`liveView`: logs
+  on the namespace).
 - **Debug** is exec in an ephemeral container (`DEBUG_IMAGE`,
   `kubeaccess.Debug`), authorized and recorded as exec and never removed. Off
   without `DEBUG_IMAGE` or on clusters lacking the chart's `tiphys-debug-only`
@@ -150,8 +156,13 @@ Details live in `spec.md` and `docs/`; these are the rules easy to break.
 - **Argo CD sync and rollback** are separate actions (not on `workloads`
   scopes). `domain.DecideApp` needs the action on every namespace the app
   touches and a fresh cache; cluster-scoped resources are admin only except
-  `Settings.ArgoSyncClusterKinds` (`domain.CheckSyncClusterKind`). Never prune,
-  dry run or pick a revision on sync. Rollback refuses auto-sync apps (409) and
+  `Settings.ArgoSyncClusterKinds` (`domain.CheckSyncClusterKind`). Sync takes
+  Argo CD's dialog options (`ArgoSyncOptions`, checked by `ArgoSyncPlan.check`:
+  the dialog's sync options or the app's own, only the app's resources); a
+  revision other than the target needs `sync` and `rollback` on the app plus
+  the revision's resources (`syncPlan`, like rollback). The sync plan
+  (`AppSyncPlan`) is what the dialog shows, prunes included; the target's is
+  audited as `argo.diff`. Rollback refuses auto-sync apps (409) and
   other sources (422) and decides on the app plus the revision
   (`ArgoApp.Including`). Diffs are audited; Secret contents are never shown.
 - **Argo UI** stays off (`ARGO_UI = false`, `web/src/lib/features.ts`) except
@@ -176,7 +187,9 @@ Details live in `spec.md` and `docs/`; these are the rules easy to break.
   role-less `User` named `token:<name>`, so `RequireRole` always refuses it;
   services that tokens may call use `RequirePermission`. The router lets a
   token reach only `tokenRoutes` (time windows, holidays, settings GET and
-  `PATCH`) and skips CSRF for it. Tokens never manage tokens.
+  `PATCH`) and skips CSRF for it. Tokens never manage tokens. `PATCH` on a
+  window or holiday decodes the body over the stored row's JSON
+  (`AdminService.PatchWindow`/`PatchHoliday`, in the transaction).
 - All env vars are documented in `.env.example`.
 
 ## Testing

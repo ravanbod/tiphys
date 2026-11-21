@@ -23,6 +23,10 @@ export function execUrl(w: WlLoc, pod?: string, container?: string, debug = fals
   const s = p.toString();
   return `${workloadUrl(w)}/exec${s ? `?${s}` : ''}`;
 }
+/** The logs of a pod no workload owns (OtherPod). */
+export function otherPodLogsUrl(cluster: string, ns: string, pod: string): string {
+  return `/c/${e(cluster)}/n/${e(ns)}/pods/logs?${new URLSearchParams({ pod })}`;
+}
 export function namespaceUrl(cluster: string, ns: string): string {
   return `/c/${e(cluster)}/n/${e(ns)}`;
 }

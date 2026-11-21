@@ -46,3 +46,12 @@ describe('curl example', () => {
     ALL_PERMISSIONS.filter((p) => readOf(p) !== p).forEach((p) => expect(curlExample([readOf(p), p], origin), p).toContain('-X'));
   });
 });
+
+describe('curl example for updates', () => {
+  it('patches a single field', () => {
+    const ex = curlExample(['time_windows:read', 'time_windows:update'], 'https://t');
+    expect(ex).toContain('-X PATCH');
+    expect(ex).toContain(`-d '{"enabled":false}'`);
+    expect(ex).toContain('https://t/api/v1/admin/time-windows/{id}');
+  });
+});

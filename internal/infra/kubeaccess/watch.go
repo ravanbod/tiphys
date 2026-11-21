@@ -69,7 +69,8 @@ type workloadState struct {
 
 // WatchNamespace lists the namespace's pods, then watches pods and events
 // and turns them into changes of the workloads that own them (resolved
-// through the owner chain, like podBelongs). Pod changes make the owning
+// through the owner chain, like podBelongs), or with a zero workload for
+// pods no workload owns (ListOtherPods) and their events. Pod changes make the owning
 // workload's status be read again at the next tick, which detects rollouts
 // (a new revision) and polls them until complete. The status is read at
 // every tick for podFollowFor after a pod change, since the controller
@@ -469,10 +470,12 @@ func (w *nsWatch) send(ctx context.Context, ch application.NamespaceChange) {
 
 // podOwner resolves a pod's workload like podBelongs: Pod -> StatefulSet or
 // DaemonSet, Pod -> ReplicaSet -> Deployment or Rollout, Pod -> Job -> CronJob.
-func (w *nsWatch) podOwner(ctx context.Context, p *corev1.Pod) (domain.WorkloadRef, bool) {
+// The workload is zero for a pod no workload owns; resolved is false when
+// an intermediate owner could not be read (tried again at the next change).
+func (w *nsWatch) podOwner(ctx context.Context, p *corev1.Pod) (ref domain.WorkloadRef, resolved bool) {
 	o := metav1.GetControllerOf(p)
 	if o == nil {
-		return domain.WorkloadRef{}, false
+		return domain.WorkloadRef{}, true
 	}
 	switch o.Kind {
 	case replicaSetGK.Kind:
@@ -480,11 +483,12 @@ func (w *nsWatch) podOwner(ctx context.Context, p *corev1.Pod) (domain.WorkloadR
 	case jobGK.Kind:
 		return w.via(ctx, jobGK, o.APIVersion, o.Name, domain.KindCronJob)
 	}
-	return directRef(o.APIVersion, o.Kind, o.Name, domain.KindStatefulSet, domain.KindDaemonSet)
+	ref, _ = directRef(o.APIVersion, o.Kind, o.Name, domain.KindStatefulSet, domain.KindDaemonSet)
+	return ref, true
 }
 
-// eventOwner resolves the workload an event is about: a known pod's, a
-// ReplicaSet's or Job's owner, or the workload itself.
+// eventOwner resolves the workload an event is about: a known pod's (zero
+// for an other pod), a ReplicaSet's or Job's owner, or the workload itself.
 func (w *nsWatch) eventOwner(ctx context.Context, e *corev1.Event) (domain.WorkloadRef, bool) {
 	o := e.InvolvedObject
 	switch o.Kind {
@@ -492,23 +496,26 @@ func (w *nsWatch) eventOwner(ctx context.Context, e *corev1.Event) (domain.Workl
 		p, ok := w.pods[o.Name]
 		return p.workload, ok
 	case replicaSetGK.Kind:
-		return w.via(ctx, replicaSetGK, o.APIVersion, o.Name, domain.KindDeployment, domain.KindRollout)
+		ref, _ := w.via(ctx, replicaSetGK, o.APIVersion, o.Name, domain.KindDeployment, domain.KindRollout)
+		return ref, ref.Name != ""
 	case jobGK.Kind:
-		return w.via(ctx, jobGK, o.APIVersion, o.Name, domain.KindCronJob)
+		ref, _ := w.via(ctx, jobGK, o.APIVersion, o.Name, domain.KindCronJob)
+		return ref, ref.Name != ""
 	}
 	return directRef(o.APIVersion, o.Kind, o.Name, domain.AllWorkloadKinds...)
 }
 
 // via resolves a ReplicaSet or Job to the workload controlling it (one of
-// kinds), reading it once and remembering the answer.
-func (w *nsWatch) via(ctx context.Context, gk schema.GroupKind, apiVersion, name string, kinds ...domain.WorkloadKind) (domain.WorkloadRef, bool) {
+// kinds; zero for none), reading it once and remembering the answer.
+// resolved is false when it could not be read.
+func (w *nsWatch) via(ctx context.Context, gk schema.GroupKind, apiVersion, name string, kinds ...domain.WorkloadKind) (ref domain.WorkloadRef, resolved bool) {
 	gv, err := schema.ParseGroupVersion(apiVersion)
 	if err != nil || gv.Group != gk.Group || validObjectName(gk.Kind, name) != nil {
-		return domain.WorkloadRef{}, false
+		return domain.WorkloadRef{}, true
 	}
 	key := gk.Kind + "/" + name
 	if ref, ok := w.owners[key]; ok {
-		return ref, ref.Name != ""
+		return ref, true
 	}
 	gctx, cancel := callCtx(ctx)
 	defer cancel()
@@ -527,7 +534,6 @@ func (w *nsWatch) via(ctx context.Context, gk schema.GroupKind, apiVersion, name
 	if err = w.a.fail("get "+gk.Kind, w.cluster, err); err != nil && !errors.Is(err, application.ErrNotFound) {
 		return domain.WorkloadRef{}, false // not remembered: read again next time
 	}
-	var ref domain.WorkloadRef
 	if owner != nil {
 		ref, _ = directRef(owner.APIVersion, owner.Kind, owner.Name, kinds...)
 	}
@@ -535,7 +541,7 @@ func (w *nsWatch) via(ctx context.Context, gk schema.GroupKind, apiVersion, name
 		clear(w.owners)
 	}
 	w.owners[key] = ref
-	return ref, ref.Name != ""
+	return ref, true
 }
 
 // directRef is the workload an owner reference or involved object names,

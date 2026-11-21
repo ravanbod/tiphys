@@ -306,16 +306,18 @@ export function AuditLog() {
 
   // Filter suggestions: best effort, the page works without them.
   const users = useApi(() => api.users(), []);
+  const tokens = useApi(() => api.apiTokens(), []);
   const clusters = useApi(() => api.clusters(), []);
   const suggest: Suggest = useMemo(() => {
     const cl = clusters.data ?? [];
     const envs = Array.from(new Set(cl.map((c) => c.environment).filter((x): x is string => !!x)));
     return {
-      users: (users.data ?? []).map((u) => u.username),
+      // A token's events carry the username token:<name>.
+      users: [...(users.data ?? []).map((u) => u.username), ...(tokens.data ?? []).map((t) => `token:${t.name}`)],
       clusters: cl.map((c) => c.name),
       envs,
     };
-  }, [users.data, clusters.data]);
+  }, [users.data, tokens.data, clusters.data]);
 
   const visible = pages.items;
 

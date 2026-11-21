@@ -24,6 +24,8 @@ export interface WlDef {
   concurrencyPolicy?: string;
   lastResult?: 'succeeded' | 'failed' | 'running' | null;
   lastScheduleMinutesAgo?: number;
+  nextRunMinutes?: number;
+  timeZone?: string;
   // Set by the mock live stream: restarts of the first pod, a new pod during a rollout, newer events.
   liveRestarts?: number;
   liveSurge?: boolean;
@@ -164,9 +166,9 @@ function seed(): Db {
   const dep = (name: string, desired: number, ready = desired, extra: Partial<WlDef> = {}): WlDef => ({ kind: 'Deployment', name, desired, ready, strategy: 'RollingUpdate', images: [`${name}:2026.10.17-4`], ...extra });
   const cron = (name: string, schedule: string, extra: Partial<WlDef> = {}): WlDef => ({ kind: 'CronJob', name, desired: 0, ready: 0, schedule, concurrencyPolicy: 'Forbid', lastResult: 'succeeded', ...extra });
   const payCrons = [
-    cron('reconcile-ledger', '*/15 * * * *', { lastScheduleMinutesAgo: 11 }),
-    cron('daily-settlement', '0 2 * * *', { lastScheduleMinutesAgo: 660, concurrencyPolicy: 'Allow' }),
-    cron('expire-pending-charges', '0 */6 * * *', { lastResult: 'running', lastScheduleMinutesAgo: 101 }),
+    cron('reconcile-ledger', '*/15 * * * *', { lastScheduleMinutesAgo: 11, nextRunMinutes: 4 }),
+    cron('daily-settlement', '0 2 * * 1-5', { lastScheduleMinutesAgo: 660, nextRunMinutes: 780, concurrencyPolicy: 'Allow', timeZone: 'Europe/Berlin' }),
+    cron('expire-pending-charges', '0 */6 * * *', { lastResult: 'running', lastScheduleMinutesAgo: 101, nextRunMinutes: 259 }),
     cron('archive-reports', '0 3 * * 0', { suspended: true, lastResult: 'failed', lastScheduleMinutesAgo: 3 * 24 * 60 }),
   ];
   const namespaces: NsDef[] = [
@@ -182,7 +184,7 @@ function seed(): Db {
     { cluster: 'staging-1', namespace: 'payments-api', workloads: [
       dep('payments-api', 3), dep('payments-gateway', 2),
       { kind: 'Rollout', name: 'payments-canary', desired: 4, ready: 4, strategy: 'Canary', images: ['payments-api:2026.10.18-1'] },
-      cron('reconcile-ledger', '*/15 * * * *', { lastScheduleMinutesAgo: 6 }),
+      cron('reconcile-ledger', '*/15 * * * *', { lastScheduleMinutesAgo: 6, nextRunMinutes: 9 }),
     ] },
     { cluster: 'staging-1', namespace: 'notifications-worker', workloads: [dep('notifications-worker', 1)] },
     { cluster: 'staging-1', namespace: 'search-indexer', workloads: [{ kind: 'StatefulSet', name: 'search-indexer', desired: 2, ready: 2, strategy: 'RollingUpdate', images: ['indexer:5.0'] }, dep('search-indexer-ui', 1)] },
@@ -317,15 +319,25 @@ function seed(): Db {
   audit.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
 
   // recent jobs per cronjob
-  const mkJob = (cronJob: string, name: string, minAgo: number, status: JobSummary['status'], manual: boolean, by: string | null, finishedMin?: number): JobSummary => ({
-    name, cronJob, triggeredBy: by, manual, status, active: status === 'running' ? 1 : 0, succeeded: status === 'succeeded' ? 1 : 0, completions: 1,
-    startedAt: iso(now - minAgo * MIN), finishedAt: status === 'running' ? null : iso(now - (finishedMin ?? minAgo - 1) * MIN), podNames: [`${name}-x7k2p`],
+  const mkJob = (cronJob: string, name: string, minAgo: number, status: JobSummary['status'], manual: boolean, by: string | null, finishedMin?: number, extra: Partial<JobSummary> = {}): JobSummary => ({
+    name, cronJob, triggeredBy: by, manual, status, active: status === 'running' ? 1 : 0, succeeded: status === 'succeeded' ? 1 : 0, failed: 0, completions: 1,
+    startedAt: iso(now - minAgo * MIN), finishedAt: status === 'running' ? null : iso(now - (finishedMin ?? minAgo - 1) * MIN), reason: null, message: null,
+    podNames: [`${name}-x7k2p`], ...extra,
   });
+  const backoff = { reason: 'BackoffLimitExceeded', message: 'Job has reached the specified backoff limit' };
   const jobs: Record<string, JobSummary[]> = {
-    'prod-1/payments-api/reconcile-ledger': [mkJob('reconcile-ledger', 'reconcile-ledger-29341530', 11, 'succeeded', false, null)],
-    'prod-1/payments-api/daily-settlement': [mkJob('daily-settlement', 'daily-settlement-29341080', 660, 'succeeded', false, null)],
+    'prod-1/payments-api/reconcile-ledger': [
+      mkJob('reconcile-ledger', 'reconcile-ledger-29341530', 11, 'succeeded', false, null, 9),
+      mkJob('reconcile-ledger', 'reconcile-ledger-29341515', 26, 'succeeded', false, null, 24),
+      mkJob('reconcile-ledger', 'reconcile-ledger-manual-q2v8n', 40, 'failed', true, 'nima.karimi', 33, { failed: 3, ...backoff, podNames: ['reconcile-ledger-manual-q2v8n-m4c7d', 'reconcile-ledger-manual-q2v8n-j8w2k', 'reconcile-ledger-manual-q2v8n-b5t9x'] }),
+      mkJob('reconcile-ledger', 'reconcile-ledger-29341500', 41, 'succeeded', false, null, 39, { podNames: [] }),
+    ],
+    'prod-1/payments-api/daily-settlement': [
+      mkJob('daily-settlement', 'daily-settlement-29341080', 660, 'succeeded', false, null, 642),
+      mkJob('daily-settlement', 'daily-settlement-29339640', 660 + 24 * 60, 'succeeded', false, null, 640 + 24 * 60),
+    ],
     'prod-1/payments-api/expire-pending-charges': [mkJob('expire-pending-charges', 'expire-pending-charges-29340720', 101, 'running', false, null)],
-    'prod-1/payments-api/archive-reports': [mkJob('archive-reports', 'archive-reports-29338400', 3 * 24 * 60, 'failed', false, null)],
+    'prod-1/payments-api/archive-reports': [mkJob('archive-reports', 'archive-reports-29338400', 3 * 24 * 60, 'failed', false, null, 3 * 24 * 60 - 20, { failed: 1, reason: 'DeadlineExceeded', message: 'Job was active longer than specified deadline' })],
     'staging-1/payments-api/reconcile-ledger': [mkJob('reconcile-ledger', 'reconcile-ledger-29341535', 6, 'succeeded', false, null)],
   };
 

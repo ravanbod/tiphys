@@ -122,6 +122,9 @@ func podInfo(p *corev1.Pod) application.PodInfo {
 	if p.DeletionTimestamp != nil {
 		info.Phase = "Terminating"
 	}
+	if o := metav1.GetControllerOf(p); o != nil && controlledBy(p, jobGK, o.Name) {
+		info.Job = o.Name
+	}
 	limits, images := map[string]string{}, map[string]string{}
 	for _, c := range append(append([]corev1.Container{}, p.Spec.InitContainers...), p.Spec.Containers...) {
 		images[c.Name] = c.Image
@@ -174,6 +177,8 @@ func containerInfo(s corev1.ContainerStatus, init bool) application.ContainerInf
 		ci.State = "running"
 	case s.State.Terminated != nil:
 		ci.State, ci.StateReason = "terminated", s.State.Terminated.Reason
+		code := s.State.Terminated.ExitCode
+		ci.ExitCode = &code
 	case s.State.Waiting != nil:
 		ci.State, ci.StateReason = "waiting", s.State.Waiting.Reason
 	}

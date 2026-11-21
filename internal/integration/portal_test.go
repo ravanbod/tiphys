@@ -742,6 +742,54 @@ func TestNamespaceEvents(t *testing.T) {
 	}
 }
 
+func TestOtherPods(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	const path = "/api/v1/clusters/prod-1/namespaces/payments-api/pods"
+
+	// The team's project grant covers the whole namespace.
+	status, l := dev.list(path)
+	if status != 200 || len(l) != 2 || l[0]["name"] != "debug" || l[0]["owner"] != nil {
+		t.Fatalf("other pods: %d %v", status, l)
+	}
+	if o, _ := l[1]["owner"].(map[string]any); o["kind"] != "Cluster" || o["group"] != "postgresql.cnpg.io" || o["name"] != "pg-main" || l[1]["ready"] != "1/1" {
+		t.Fatalf("cnpg pod: %v", l[1])
+	}
+	status, _, raw := dev.get(path + "/pg-main-1/logs/download?container=postgres")
+	if status != 200 || string(raw) != "pg line\n" {
+		t.Fatalf("download: %d %q", status, raw)
+	}
+	evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventLogsDownload})
+	if len(evs) != 1 || evs[0].Pod != "pg-main-1" || evs[0].WorkloadKind != "" || evs[0].Namespace != "payments-api" || evs[0].Container != "postgres" {
+		t.Fatalf("audit = %+v", evs)
+	}
+	// A workload's pod is read as the workload's.
+	if status, m, _ := dev.get(path + "/payments-api-abc/logs/download?container=app"); status != 403 || errCode(m) != "pod_in_workload" {
+		t.Fatalf("workload pod: %d %v", status, m)
+	}
+	if status, _, _ := dev.get("/api/v1/clusters/prod-1/namespaces/search-api/pods"); status != 403 {
+		t.Fatalf("namespace without grant: %d", status)
+	}
+
+	// A grant on single workloads lists none and opens none.
+	status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+		"holder": map[string]any{"kind": "user", "id": e.otherID},
+		"scope": map[string]any{"kind": "workloads", "cluster": "prod-1", "namespace": "payments-api",
+			"workloads": []map[string]any{{"kind": "Deployment", "name": "payments-api"}}},
+		"actions": []string{"logs"}})
+	if status != 201 && status != 200 {
+		t.Fatalf("create workload grant: %d %v", status, m)
+	}
+	arash := e.login(e.otherID)
+	if status, l := arash.list(path); status != 200 || len(l) != 0 {
+		t.Fatalf("workload grant lists other pods: %d %v", status, l)
+	}
+	if status, _, _ := arash.get(path + "/pg-main-1/logs/download?container=postgres"); status != 403 {
+		t.Fatalf("workload grant reads other pod logs: %d", status)
+	}
+}
+
 func TestNamespaceTraffic(t *testing.T) {
 	e := newEnv(t)
 	admin := e.login(e.adminID)
@@ -1030,8 +1078,12 @@ func TestAppDetails(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("diff: %d %v", status, m)
 	}
-	res := m["resources"].([]any)
-	dep, sec := res[0].(map[string]any), res[1].(map[string]any)
+	res := map[string]map[string]any{}
+	for _, r := range m["resources"].([]any) {
+		r := r.(map[string]any)
+		res[r["kind"].(string)+"/"+r["name"].(string)] = r
+	}
+	dep, sec := res["Deployment/payments-api"], res["Secret/db"]
 	if dep["kind"] != "Deployment" || dep["state"] != "changed" || !strings.Contains(dep["diff"].(string), "+  replicas: 3") {
 		t.Fatalf("deployment diff: %v", dep)
 	}
@@ -1041,6 +1093,159 @@ func TestAppDetails(t *testing.T) {
 	evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoDiff})
 	if len(evs) != 1 || evs[0].Username != "sara" || evs[0].Details["app"] != "payments-api" {
 		t.Fatalf("diff audit: %v", evs)
+	}
+}
+
+func TestSyncPlanAndOptions(t *testing.T) {
+	e := newEnv(t)
+	admin := e.login(e.adminID)
+	dev := e.login(e.devID)
+	const app = "/api/v1/clusters/prod-1/namespaces/payments-api/apps/argocd/payments-api"
+	grant := func(actions ...string) {
+		t.Helper()
+		status, m, _ := admin.do("POST", "/api/v1/admin/grants", map[string]any{
+			"holder": map[string]any{"kind": "team", "id": e.teamID},
+			"scope":  map[string]any{"kind": "namespace", "cluster": "prod-1", "namespace": "payments-api"}, "actions": actions})
+		if status != 201 && status != 200 {
+			t.Fatalf("grant %v: %d %v", actions, status, m)
+		}
+	}
+	byName := func(m map[string]any) map[string]map[string]any {
+		out := map[string]map[string]any{}
+		for _, r := range m["resources"].([]any) {
+			r := r.(map[string]any)
+			out[r["kind"].(string)+"/"+r["name"].(string)] = r
+		}
+		return out
+	}
+	syncEvents := func() []domain.AuditEvent {
+		evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoSync, Result: domain.ResultAllowed})
+		return evs
+	}
+
+	if status, m, _ := dev.get(app + "/sync-plan"); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("plan without sync: %d %v", status, m)
+	}
+	grant("sync")
+
+	// The plan of the target revision: what changes first, with diffs, and
+	// what a prune would delete (not what is annotated Prune=false).
+	status, m, _ := dev.get(app + "/sync-plan")
+	if status != 200 || m["revision"] != nil || m["targetRevision"] != "main" || m["decision"].(map[string]any)["allowed"] != true ||
+		fmt.Sprint(m["defaults"].(map[string]any)["syncOptions"]) != "[CreateNamespace=true SkipDryRunOnMissingResource=true]" {
+		t.Fatalf("plan: %d %v", status, m)
+	}
+	res := byName(m)
+	if len(res) != 5 || res["Deployment/payments-api"]["state"] != "changed" || res["Deployment/payments-api"]["diff"] == "" ||
+		res["Secret/db"]["hidden"] != true || res["Service/payments-api"]["state"] != "synced" ||
+		res["ConfigMap/legacy"]["state"] != "extra" || res["ConfigMap/legacy"]["prunable"] != true ||
+		res["ConfigMap/keep-me"]["prunable"] != false {
+		t.Fatalf("plan resources: %v", res)
+	}
+	if last := m["resources"].([]any)[4].(map[string]any); last["state"] != "synced" {
+		t.Fatalf("synced resources come last: %v", m["resources"])
+	}
+	if evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoDiff}); len(evs) != 1 {
+		t.Fatalf("the plan is audited as argo.diff: %v", evs)
+	}
+
+	// Options the dialog does not offer, and resources the app lacks, are
+	// refused before Argo CD is asked.
+	legacy := map[string]any{"group": "", "kind": "ConfigMap", "namespace": "payments-api", "name": "legacy"}
+	for name, body := range map[string]map[string]any{
+		"unknown option":   {"syncOptions": []string{"Delete=false"}},
+		"two policies":     {"syncOptions": []string{"PrunePropagationPolicy=orphan", "PrunePropagationPolicy=foreground"}},
+		"retry limit":      {"retry": map[string]any{"limit": 11}},
+		"retry duration":   {"retry": map[string]any{"limit": 2, "backoff": map[string]any{"duration": "2h"}}},
+		"foreign resource": {"resources": []any{map[string]any{"kind": "ConfigMap", "namespace": "monitoring", "name": "x"}}},
+		"bad revision":     {"revision": "main; rm"},
+	} {
+		if status, m, _ := dev.do("POST", app+"/sync", body); status != 422 || errCode(m) != "invalid" {
+			t.Fatalf("%s: %d %v", name, status, m)
+		}
+	}
+	if n := len(e.argoAPI.syncCalls()); n != 0 {
+		t.Fatalf("refused syncs reached Argo CD: %d", n)
+	}
+
+	// A pruning sync of chosen resources with the app's own option kept.
+	status, m, _ = dev.do("POST", app+"/sync", map[string]any{
+		"prune": true, "force": true, "syncOptions": []string{"SkipDryRunOnMissingResource=true", "PruneLast=true"},
+		"retry":     map[string]any{"limit": 2, "backoff": map[string]any{"duration": "5s", "factor": 2, "maxDuration": "3m"}},
+		"resources": []any{legacy, map[string]any{"group": "apps", "kind": "Deployment", "namespace": "payments-api", "name": "payments-api"}},
+	})
+	if status != 202 {
+		t.Fatalf("sync with options: %d %v", status, m)
+	}
+	o := e.argoAPI.lastSyncOptions()
+	if !o.Prune || !o.Force || o.ApplyOnly || o.DryRun || o.Revision != "" || len(o.Resources) != 2 ||
+		fmt.Sprint(o.SyncOptions) != "[SkipDryRunOnMissingResource=true PruneLast=true]" || o.Retry == nil || o.Retry.Backoff.Factor != 2 {
+		t.Fatalf("argo options: %+v", o)
+	}
+	evs := syncEvents()
+	if len(evs) != 1 || evs[0].Details["prune"] != true || fmt.Sprint(evs[0].Details["toPrune"]) != "[ConfigMap/payments-api/legacy]" ||
+		fmt.Sprint(evs[0].Details["resources"]) != "[ConfigMap/payments-api/legacy Deployment.apps/payments-api/payments-api]" {
+		t.Fatalf("sync audit: %v", evs)
+	}
+	waitFor(t, 5*time.Second, "sync finished", func() bool {
+		evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoSync, Result: domain.ResultSucceeded})
+		return len(evs) == 1
+	})
+
+	// The target revision named is a plain sync.
+	if status, m, _ := dev.get(app + "/sync-plan?revision=main"); status != 200 || m["revision"] != nil {
+		t.Fatalf("plan of the target revision: %d %v", status, m)
+	}
+
+	// Another revision needs rollback too, decided with what it deploys; its
+	// plan compares the revision's objects with what the app manages now.
+	status, m, _ = dev.get(app + "/sync-plan?revision=old111")
+	if status != 200 || m["revision"] != "old111" || m["decision"].(map[string]any)["allowed"] != false || m["decisionAction"] != "rollback" {
+		t.Fatalf("plan of another revision without rollback: %d %v", status, m)
+	}
+	res = byName(m)
+	if res["Deployment/payments-api"]["state"] != "present" || res["ConfigMap/old-config"]["state"] != "missing" ||
+		res["ConfigMap/legacy"]["state"] != "extra" || res["ConfigMap/keep-me"]["prunable"] != false || res["Deployment/payments-api"]["diff"] != "" {
+		t.Fatalf("revision plan resources: %v", res)
+	}
+	if status, m, _ := dev.do("POST", app+"/sync", map[string]any{"revision": "old111"}); status != 403 || errCode(m) != "denied" {
+		t.Fatalf("sync to another revision without rollback: %d %v", status, m)
+	}
+	grant("rollback")
+	if status, m, _ := dev.get(app + "/sync-plan?revision=old111"); status != 200 || m["decision"].(map[string]any)["allowed"] != true {
+		t.Fatalf("plan with rollback: %d %v", status, m)
+	}
+	status, m, _ = dev.do("POST", app+"/sync", map[string]any{"revision": "old111", "resources": []any{legacy}})
+	if status != 202 {
+		t.Fatalf("sync to another revision: %d %v", status, m)
+	}
+	if o := e.argoAPI.lastSyncOptions(); o.Revision != "old111" || o.Prune {
+		t.Fatalf("argo options: %+v", o)
+	}
+	if evs := syncEvents(); evs[0].Details["revision"] != "old111" || evs[0].Details["targetRevision"] != "main" || evs[0].Details["toPrune"] != nil {
+		t.Fatalf("revision sync audit: %v", evs[0].Details)
+	}
+	waitFor(t, 5*time.Second, "revision sync finished", func() bool {
+		evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoSync, Result: domain.ResultSucceeded})
+		return len(evs) == 2
+	})
+
+	// Argo CD syncs an app that syncs automatically to another revision only
+	// as a dry run.
+	e.argoAPI.mu.Lock()
+	e.argoAPI.autoSync = true
+	e.argoAPI.mu.Unlock()
+	if status, m, _ := dev.do("POST", app+"/sync", map[string]any{"revision": "old111"}); status != 409 || errCode(m) != "auto_sync_enabled" {
+		t.Fatalf("auto-sync app to another revision: %d %v", status, m)
+	}
+	if status, m, _ := dev.do("POST", app+"/sync", map[string]any{"revision": "old111", "dryRun": true}); status != 202 {
+		t.Fatalf("dry run of an auto-sync app: %d %v", status, m)
+	}
+	if o := e.argoAPI.lastSyncOptions(); !o.DryRun || o.Revision != "old111" {
+		t.Fatalf("argo dry run options: %+v", o)
+	}
+	if status, _, raw := dev.get("/api/v1/operations/" + m["operationId"].(string) + "/stream"); status != 200 || !strings.Contains(string(raw), "succeeded") {
+		t.Fatalf("dry run stream: %d %s", status, raw)
 	}
 }
 
@@ -1138,7 +1343,7 @@ func TestRollbackApp(t *testing.T) {
 	}
 	setManifests(deployment)
 
-	status, m, _ = dev.do("POST", rollback, nil)
+	status, m, _ = dev.do("POST", rollback, map[string]any{"prune": true})
 	if status != 202 || m["operationId"] == nil {
 		t.Fatalf("rollback: %d %v", status, m)
 	}
@@ -1155,8 +1360,12 @@ func TestRollbackApp(t *testing.T) {
 		t.Fatalf("argo rollbacks: %v", calls)
 	}
 	evs, _ := e.store.Repos().Audit.List(context.Background(), application.AuditFilter{EventType: domain.EventArgoRollback, Result: domain.ResultAllowed})
-	if len(evs) != 1 || evs[0].Username != "sara" || evs[0].Details["revision"] != "old111" || evs[0].Details["historyId"] != float64(1) {
+	if len(evs) != 1 || evs[0].Username != "sara" || evs[0].Details["revision"] != "old111" || evs[0].Details["historyId"] != float64(1) ||
+		evs[0].Details["prune"] != true || fmt.Sprint(evs[0].Details["toPrune"]) != "[Service/payments-api/payments-api]" {
 		t.Fatalf("rollback started audit: %v", evs)
+	}
+	if o := e.argoAPI.rollbackOptions(); len(o) != 1 || !o[0].Prune || o[0].DryRun {
+		t.Fatalf("argo rollback options: %+v", o)
 	}
 	status, _, raw := dev.get("/api/v1/operations/" + m["operationId"].(string) + "/stream")
 	if status != 200 || !strings.Contains(string(raw), "event:done") || !strings.Contains(string(raw), "succeeded") {

@@ -4,6 +4,7 @@ import { api } from '../api';
 import type { AppSummary, NamespaceSummary } from '../api';
 import { ActionChips, EnvBadge, HealthChip, KindTag, SyncChip } from '../components/Badges';
 import { Bump } from '../components/Bump';
+import { CronStatus } from '../components/CronJobsPanel';
 import { ErrorBanner, Loading } from '../components/Feedback';
 import { Icon } from '../components/Icon';
 import { PageHeader } from '../components/PageHeader';
@@ -13,6 +14,8 @@ import { useAuth } from '../context/auth';
 import { useLive } from '../context/live';
 import { rowClass, useAnimatedList } from '../hooks/useAnimatedList';
 import { useApi } from '../hooks/useApi';
+import { useCronJobs } from '../hooks/useCronJobs';
+import { useNow } from '../hooks/useNow';
 import { starKey, useStars } from '../hooks/useStars';
 import { useLocalStorage } from '../hooks/useLocalStorage';
 import { useUrlState } from '../hooks/useUrlState';
@@ -26,9 +29,11 @@ function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace
   const { me } = useAuth();
   const list = useApi(() => api.workloads(cluster, namespace), [cluster, namespace, breakGlassKey(me)]);
   useLive({ cluster, namespace }, (changes) => {
-    if (changes.length === 0 || changes.some((c) => c.type !== 'event')) list.reload();
+    if (changes.length === 0 || changes.some((c) => c.kind && c.type !== 'event')) list.reload();
   });
   const rows = useAnimatedList(list.data, (w) => `${w.kind}/${w.name}`, (w) => `${w.ready}/${w.desired}|${w.suspended}`, `${cluster}/${namespace}`);
+  const crons = useCronJobs(cluster, namespace, { enabled: !!list.data?.some((w) => w.kind === 'CronJob') });
+  const now = useNow(30000);
   if (list.loading && !list.data) {
     return <tr className="sub"><td /><td colSpan={cols - 1}><div className="skel" style={{ width: 240 }} /></td></tr>;
   }
@@ -51,7 +56,7 @@ function WorkloadRows({ cluster, namespace, cols }: { cluster: string; namespace
           <tr className={rowClass(anim, 'sub')} key={key}>
             <td />
             <td colSpan={2}><span className="row" style={{ paddingLeft: 24 }}><KindTag kind={w.kind} /><span className="mono">{w.name}</span></span></td>
-            <td colSpan={Math.max(1, cols - 5)}><span className="mono muted">{w.kind === 'CronJob' ? (w.suspended ? 'suspended' : w.schedule) : <><Bump value={`${w.ready}/${w.desired}`} /> ready</>}</span></td>
+            <td colSpan={Math.max(1, cols - 5)}>{w.kind === 'CronJob' ? <CronStatus w={w} cron={crons.data?.find((c) => c.name === w.name)} now={now} /> : <span className="mono muted"><Bump value={`${w.ready}/${w.desired}`} /> ready</span>}</td>
             <td colSpan={2} style={{ textAlign: 'right' }}>
               <Link className="btn ghost sm" to={logsUrl(loc)}>Logs</Link>
               <Link className="btn ghost sm" to={workloadUrl(loc)}>Open</Link>

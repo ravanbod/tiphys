@@ -1,6 +1,8 @@
 package serverhttp
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -208,12 +210,27 @@ func (h *Handler) NamespaceApps(c *gin.Context) {
 }
 
 func (h *Handler) SyncApp(c *gin.Context) {
-	op, err := h.svc.Workloads.SyncApp(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"))
+	var in syncAppDTO
+	if !bindOptionalJSON(h, c, &in) {
+		return
+	}
+	op, err := h.svc.Workloads.SyncApp(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), in.options())
 	if err != nil {
 		h.writeError(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"operationId": op.OperationID})
+}
+
+// AppSyncPlan shows what a sync of the app (to ?revision=, else its target)
+// would do.
+func (h *Handler) AppSyncPlan(c *gin.Context) {
+	plan, err := h.svc.Workloads.AppSyncPlan(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), c.Query("revision"))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, toArgoSyncPlan(plan))
 }
 
 func (h *Handler) AppStatus(c *gin.Context) {
@@ -266,7 +283,12 @@ func (h *Handler) RollbackApp(c *gin.Context) {
 	if !ok {
 		return
 	}
-	op, err := h.svc.Workloads.RollbackApp(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), id)
+	var in rollbackAppDTO
+	if !bindOptionalJSON(h, c, &in) {
+		return
+	}
+	op, err := h.svc.Workloads.RollbackApp(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"), c.Param("appNs"), c.Param("app"), id,
+		application.ArgoRollbackOptions{Prune: in.Prune, DryRun: in.DryRun})
 	if err != nil {
 		h.writeError(c, err)
 		return
@@ -356,6 +378,19 @@ func (h *Handler) NamespaceEvents(c *gin.Context) {
 	c.JSON(http.StatusOK, out)
 }
 
+func (h *Handler) OtherPods(c *gin.Context) {
+	pods, err := h.svc.Workloads.OtherPods(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"))
+	if err != nil {
+		h.writeError(c, err)
+		return
+	}
+	out := make([]otherPodDTO, len(pods))
+	for i, p := range pods {
+		out[i] = toOtherPod(p)
+	}
+	c.JSON(http.StatusOK, out)
+}
+
 func (h *Handler) NamespaceTraffic(c *gin.Context) {
 	g, err := h.svc.Workloads.NamespaceTraffic(c.Request.Context(), principal(c), c.Param("cluster"), c.Param("ns"))
 	if err != nil {
@@ -424,10 +459,15 @@ func queryInt64(c *gin.Context, name string) int64 {
 }
 
 // logRequest builds a LogRequest from the path and query.
+// logRequest reads a log request for a workload's pod, or for an other pod
+// on the routes without a workload.
 func (h *Handler) logRequest(c *gin.Context, follow bool) (application.LogRequest, bool) {
-	ref, ok := h.workloadRef(c)
-	if !ok {
-		return application.LogRequest{}, false
+	var ref domain.WorkloadRef
+	if c.Param("kind") != "" {
+		var ok bool
+		if ref, ok = h.workloadRef(c); !ok {
+			return application.LogRequest{}, false
+		}
 	}
 	return application.LogRequest{
 		Cluster: c.Param("cluster"), Namespace: c.Param("ns"), Workload: ref, Pod: c.Param("pod"),
@@ -789,6 +829,15 @@ func (h *Handler) CreateRequest(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, toRequest(r))
+}
+
+// bindOptionalJSON is bindJSON for a body that may be left out.
+func bindOptionalJSON(h *Handler, c *gin.Context, v any) bool {
+	if err := c.ShouldBindJSON(v); err != nil && !errors.Is(err, io.EOF) {
+		h.writeError(c, application.Invalid("body", "invalid JSON body"))
+		return false
+	}
+	return true
 }
 
 func pathID(c *gin.Context, name string) (int64, bool) {

@@ -77,7 +77,9 @@ type fakeArgo struct {
 	mu        sync.Mutex
 	busy      bool
 	syncs     []string // "appNamespace/name by user"
+	syncOpts  []application.ArgoSyncOptions
 	rollbacks []string // "appNamespace/name to id"
+	rbOpts    []application.ArgoRollbackOptions
 	runs      int
 	autoSync  bool
 	// manifests are the objects of each revision (old111 by default: the
@@ -89,7 +91,7 @@ type fakeArgo struct {
 // the current deploy (ID 2) records it.
 var firstRunStartedAt = time.Date(2026, 10, 30, 9, 0, 1, 0, time.UTC)
 
-func (f *fakeArgo) RollbackApplication(_ context.Context, appNamespace, name string, id int64) (application.ArgoOperation, error) {
+func (f *fakeArgo) RollbackApplication(_ context.Context, appNamespace, name string, id int64, o application.ArgoRollbackOptions) (application.ArgoOperation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch {
@@ -99,6 +101,7 @@ func (f *fakeArgo) RollbackApplication(_ context.Context, appNamespace, name str
 		return application.ArgoOperation{}, application.ErrAutoSyncEnabled
 	}
 	f.rollbacks = append(f.rollbacks, fmt.Sprintf("%s/%s to %d", appNamespace, name, id))
+	f.rbOpts = append(f.rbOpts, o)
 	prev := f.operation()
 	f.runs++
 	return prev, nil
@@ -127,13 +130,14 @@ func (f *fakeArgo) ListProjects(context.Context) ([]string, error) {
 	return []string{"payments", "search"}, nil
 }
 
-func (f *fakeArgo) SyncApplication(_ context.Context, appNamespace, name, triggeredBy string) (application.ArgoOperation, error) {
+func (f *fakeArgo) SyncApplication(_ context.Context, appNamespace, name, triggeredBy string, o application.ArgoSyncOptions) (application.ArgoOperation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.busy {
 		return application.ArgoOperation{}, application.ErrSyncInProgress
 	}
 	f.syncs = append(f.syncs, appNamespace+"/"+name+" by "+triggeredBy)
+	f.syncOpts = append(f.syncOpts, o)
 	prev := f.operation()
 	f.runs++
 	return prev, nil
@@ -159,6 +163,7 @@ func (f *fakeArgo) GetAppDetails(context.Context, string, string) (application.A
 	defer f.mu.Unlock()
 	started := firstRunStartedAt
 	return application.ArgoAppDetails{Health: "Healthy", SyncStatus: "OutOfSync", SyncRevision: "abc123", AutoSync: f.autoSync,
+		TargetRevision: "main", SyncOptions: []string{"CreateNamespace=true", "SkipDryRunOnMissingResource=true"},
 		Resources: []application.ArgoResourceRef{{Group: "apps", Kind: "Deployment", Namespace: "payments-api", Name: "payments-api"},
 			{Kind: "Service", Namespace: "payments-api", Name: "payments-api"}},
 		Conditions: []application.ArgoCondition{{Type: "SyncError", Message: "one or more objects failed to apply"}},
@@ -175,6 +180,9 @@ func (f *fakeArgo) ManagedResources(context.Context, string, string) ([]applicat
 			Live: []byte(`{"spec":{"replicas":2}}`), Desired: []byte(`{"spec":{"replicas":3}}`)},
 		{Kind: "Secret", Namespace: "payments-api", Name: "db", Modified: true,
 			Live: []byte(`{"data":{"password":"b2xk"}}`), Desired: []byte(`{"data":{"password":"bmV3"}}`)},
+		{Kind: "Service", Namespace: "payments-api", Name: "payments-api", Live: []byte(`{}`), Desired: []byte(`{}`)},
+		{Kind: "ConfigMap", Namespace: "payments-api", Name: "legacy", Live: []byte(`{"data":{"a":"1"}}`)},
+		{Kind: "ConfigMap", Namespace: "payments-api", Name: "keep-me", Live: []byte(`{}`), NoPrune: true},
 	}, nil
 }
 
@@ -183,6 +191,18 @@ func (f *fakeArgo) RevisionMetadata(_ context.Context, _, _, revision string) (a
 		return application.ArgoRevision{}, errors.New("not a git revision")
 	}
 	return application.ArgoRevision{Author: "Sara <sara@example.com>", Message: "Bump replicas"}, nil
+}
+
+func (f *fakeArgo) rollbackOptions() []application.ArgoRollbackOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]application.ArgoRollbackOptions(nil), f.rbOpts...)
+}
+
+func (f *fakeArgo) lastSyncOptions() application.ArgoSyncOptions {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.syncOpts[len(f.syncOpts)-1]
 }
 
 func (f *fakeArgo) syncCalls() []string {

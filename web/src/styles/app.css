@@ -151,6 +151,7 @@ button.btn[disabled]{opacity:.55;cursor:not-allowed}
 .execbg{flex:1;min-height:0;background:var(--bg)}
 .termwarn{background:#3A2F0E;color:#F2D98D;display:flex;align-items:center;gap:10px;padding:8px 16px;font-size:12.5px;flex:none;border-bottom:1px solid #5A4814}
 .termwarn .mono{color:#F2D98D}
+.termend{background:#121821;color:#D5DDE8;display:flex;align-items:center;gap:10px;padding:8px 16px;font-size:12.5px;flex:none;border-bottom:1px solid #243041}
 .termover{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;color:#8C97A8;font:13px 'IBM Plex Mono',monospace;pointer-events:none}
 .termover.solid{pointer-events:auto;background:transparent}
 .dark .termover.solid{background:rgba(13,17,23,.0)}

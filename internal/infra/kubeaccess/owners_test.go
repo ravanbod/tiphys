@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
@@ -128,5 +129,21 @@ func TestListPodsFiltersByOwnerChain(t *testing.T) {
 	}
 	if got := names(target(domain.KindCronJob, "report")); len(got) != 1 || got[0] != "report-1-p" {
 		t.Fatalf("cronjob pods = %v", got)
+	}
+	pods, err := r.ListPods(context.Background(), actor, target(domain.KindCronJob, "report"))
+	if err != nil || pods[0].Job != "report-1" {
+		t.Fatalf("cronjob pod job = %+v, err %v", pods, err)
+	}
+}
+
+func TestPodInfoExitCodeOfTerminatedContainer(t *testing.T) {
+	p := pod("report-1-p", ctrl("batch/v1", "Job", "report-1"))
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "app", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, Reason: "Error"}}}}
+	info := podInfo(p)
+	if info.Job != "report-1" || info.Containers[0].ExitCode == nil || *info.Containers[0].ExitCode != 2 || info.Containers[0].StateReason != "Error" {
+		t.Fatalf("pod = %+v", info)
+	}
+	if podInfo(pod("web-abc-1", ctrl("apps/v1", "ReplicaSet", "web-abc"))).Job != "" {
+		t.Fatal("a ReplicaSet pod names a Job")
 	}
 }

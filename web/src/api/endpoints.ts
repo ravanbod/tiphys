@@ -1,12 +1,12 @@
 import { del, get, patch, post, put, request, requestText } from './client';
 import { kindSegment, qs, seg } from './query';
 import type {
-  AccessCheckInput, AccessGrant, ApiTokenInput, ApiTokenView, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
+  AccessCheckInput, AccessGrant, ApiTokenInput, ApiTokenView, AccessRequest, Action, AdminOverview, AppSummary, ArgoAppStatus, ArgoDeploy, ArgoDiff, ArgoRollbackPlan, ArgoStatus, ArgoSyncPlan, AuditFilters, AuditPage, BreakGlass, BreakGlassRequest,
   CatalogCluster, CatalogWorkload, ClusterView, CreateAccessRequest, CreateAccessRequestBatch, CronJobSummary, DecisionExplain,
   EnvironmentOverride, EnvironmentOverrideInput, ExecSessionDetail, ExecSessionView, GrantFilters, GrantInput,
-  GrantView, HolidayInput, HolidayView, K8sEvent, ManagedTeamView, Me, MyAccess, NamespaceApp, NamespaceSummary, Pod, SessionFilters, TrafficGraph,
+  GrantView, HolidayInput, HolidayView, K8sEvent, ManagedTeamView, Me, MyAccess, NamespaceApp, NamespaceSummary, OtherPod, Pod, SessionFilters, TrafficGraph,
   SettingsView, TeamMember, TeamView, TimeWindowInput, TimeWindowView, UserView, WorkloadDetail, WorkloadKind, WorkloadSummary,
-  Role,
+  Role, RollbackAppInput, SyncAppInput,
 } from './types';
 
 export interface WorkloadRef {
@@ -18,6 +18,11 @@ export interface WorkloadRef {
 
 export function workloadPath(r: WorkloadRef): string {
   return `/clusters/${seg(r.cluster)}/namespaces/${seg(r.namespace)}/workloads/${kindSegment(r.kind)}/${seg(r.name)}`;
+}
+
+/** The pods of a workload, or with a namespace only the pods no workload owns (OtherPod). */
+export function podsPath(r: WorkloadRef | { cluster: string; namespace: string }): string {
+  return 'kind' in r ? `${workloadPath(r)}/pods` : `/clusters/${seg(r.cluster)}/namespaces/${seg(r.namespace)}/pods`;
 }
 
 export interface LogOptions {
@@ -48,6 +53,7 @@ export const api = {
   workload: (r: WorkloadRef) => get<WorkloadDetail>(workloadPath(r)),
   pods: (r: WorkloadRef) => get<Pod[]>(`${workloadPath(r)}/pods`),
   events: (r: WorkloadRef) => get<K8sEvent[]>(`${workloadPath(r)}/events`),
+  otherPods: (cluster: string, ns: string) => get<OtherPod[]>(podsPath({ cluster, namespace: ns })),
   namespaceEvents: (cluster: string, ns: string) =>
     get<K8sEvent[]>(`/clusters/${seg(cluster)}/namespaces/${seg(ns)}/events`),
   namespaceTraffic: (cluster: string, ns: string) =>
@@ -62,12 +68,14 @@ export const api = {
     get<ArgoDeploy[]>(`${appPath(cluster, ns, appNamespace, name)}/history`),
   appDiff: (cluster: string, ns: string, appNamespace: string, name: string) =>
     get<ArgoDiff>(`${appPath(cluster, ns, appNamespace, name)}/diff`),
-  syncApp: (cluster: string, ns: string, appNamespace: string, name: string) =>
-    post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/sync`),
+  appSyncPlan: (cluster: string, ns: string, appNamespace: string, name: string, revision?: string) =>
+    get<ArgoSyncPlan>(`${appPath(cluster, ns, appNamespace, name)}/sync-plan${qs({ revision: revision || undefined })}`),
+  syncApp: (cluster: string, ns: string, appNamespace: string, name: string, input: SyncAppInput = {}) =>
+    post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/sync`, input),
   appRollbackPlan: (cluster: string, ns: string, appNamespace: string, name: string, id: number) =>
     get<ArgoRollbackPlan>(`${appPath(cluster, ns, appNamespace, name)}/history/${id}/rollback`),
-  rollbackApp: (cluster: string, ns: string, appNamespace: string, name: string, id: number) =>
-    post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/history/${id}/rollback`),
+  rollbackApp: (cluster: string, ns: string, appNamespace: string, name: string, id: number, input: RollbackAppInput = {}) =>
+    post<{ operationId: string }>(`${appPath(cluster, ns, appNamespace, name)}/history/${id}/rollback`, input),
   cronJobs: (cluster: string, ns: string) =>
     get<CronJobSummary[]>(`/clusters/${seg(cluster)}/namespaces/${seg(ns)}/cronjobs`),
   restart: (r: WorkloadRef) => post<{ operationId: string }>(`${workloadPath(r)}/restart`),
@@ -76,8 +84,9 @@ export const api = {
     post<{ operationId: string; jobName: string }>(
       `/clusters/${seg(cluster)}/namespaces/${seg(ns)}/cronjobs/${seg(name)}/run`,
     ),
-  logDownloadUrl: (r: WorkloadRef, pod: string, o: LogOptions) =>
-    `/api/v1${workloadPath(r)}/pods/${seg(pod)}/logs/download${qs({
+  /** r without a kind: a pod no workload owns. */
+  logDownloadUrl: (r: WorkloadRef | { cluster: string; namespace: string }, pod: string, o: LogOptions) =>
+    `/api/v1${podsPath(r)}/${seg(pod)}/logs/download${qs({
       container: o.container,
       previous: o.previous || undefined,
       tailLines: o.tailLines,

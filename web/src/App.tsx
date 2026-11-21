@@ -90,6 +90,7 @@ export function App() {
                 </Route>
                 <Route element={<BareShell />}>
                   <Route path="c/:cluster/n/:ns/w/:kind/:name/logs" element={<Only roles={WORK}><LogsPage /></Only>} />
+                  <Route path="c/:cluster/n/:ns/pods/logs" element={<Only roles={WORK}><LogsPage /></Only>} />
                   <Route path="c/:cluster/n/:ns/w/:kind/:name/exec" element={<Only roles={WORK}><ExecPage /></Only>} />
                   <Route path="sessions/:id" element={<Only roles={READ_CONFIG}><Replay /></Only>} />
                   <Route path="sessions/:id/watch" element={<Only roles={READ_CONFIG}><Watch /></Only>} />

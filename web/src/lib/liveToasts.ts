@@ -1,5 +1,5 @@
 import type { LiveChange } from '../api';
-import { workloadUrl } from './routes';
+import { namespaceUrl, workloadUrl } from './routes';
 
 /** A toast about live changes. Repeats of the same kind of change on a workload share one toast. */
 export interface LiveToast {
@@ -33,8 +33,11 @@ const clip = (s: string, n = 160) => (s.length > n ? `${s.slice(0, n - 1)}…` :
 
 /** The toast a change deserves, or null when it only refreshes the page. */
 export function toastFor(c: LiveChange): ToastContent | null {
-  const base = `${c.cluster}/${c.namespace}/${c.kind}/${c.name}`;
-  const to = workloadUrl({ cluster: c.cluster, namespace: c.namespace, kind: c.kind, name: c.name });
+  // Without a kind the change is about a pod no workload owns, shown on the namespace page.
+  const other = !c.kind;
+  const label = other ? c.pod ?? '' : c.name;
+  const base = other ? `${c.cluster}/${c.namespace}/Pod/${label}` : `${c.cluster}/${c.namespace}/${c.kind}/${label}`;
+  const to = other ? namespaceUrl(c.cluster, c.namespace) : workloadUrl({ cluster: c.cluster, namespace: c.namespace, kind: c.kind, name: c.name });
   const st = c.status;
   switch (c.type) {
     case 'pod_restarted': {
@@ -42,24 +45,24 @@ export function toastFor(c: LiveChange): ToastContent | null {
       const bad = BAD_EXIT.has(c.reason ?? '') || (c.exitCode ?? 0) !== 0;
       return {
         key: `${base}:restart:${c.reason ?? ''}`, to, tone: bad ? 'err' : 'info',
-        title: `${c.name} restarted`, detail: `${c.pod} · ${c.container}${c.reason ? ` ${c.reason}` : ''}${exit}`,
+        title: `${label} restarted`, detail: `${c.pod} · ${c.container}${c.reason ? ` ${c.reason}` : ''}${exit}`,
       };
     }
     case 'rollout_started':
-      return { key: `${base}:rollout`, to, tone: 'info', replace: true, title: `${c.name} is rolling out`, detail: st ? `${st.updated}/${st.desired} updated` : '' };
+      return { key: `${base}:rollout`, to, tone: 'info', replace: true, title: `${label} is rolling out`, detail: st ? `${st.updated}/${st.desired} updated` : '' };
     case 'rollout_complete':
-      return { key: `${base}:rollout`, to, tone: 'ok', replace: true, title: `${c.name} rolled out`, detail: st ? `${st.ready}/${st.desired} ready` : '' };
+      return { key: `${base}:rollout`, to, tone: 'ok', replace: true, title: `${label} rolled out`, detail: st ? `${st.ready}/${st.desired} ready` : '' };
     case 'rollout_failed':
-      return { key: `${base}:rollout`, to, tone: 'err', replace: true, title: `${c.name} rollout failed`, detail: clip(st?.message ?? '') };
+      return { key: `${base}:rollout`, to, tone: 'err', replace: true, title: `${label} rollout failed`, detail: clip(st?.message ?? '') };
     case 'event': {
       const e = c.event;
       if (!e) return null;
       if (e.type === 'Warning') {
         if (!TOAST_WARNINGS.has(e.reason)) return null;
-        return { key: `${base}:event:${e.reason}`, to, tone: 'err', title: `${c.name}: ${e.reason}`, detail: clip(e.message) };
+        return { key: `${base}:event:${e.reason}`, to, tone: 'err', title: `${label}: ${e.reason}`, detail: clip(e.message) };
       }
-      if (e.reason === 'SuccessfulCreate') return { key: `${base}:job`, to, tone: 'info', replace: true, title: `${c.name} started a job`, detail: clip(e.message) };
-      if (e.reason === 'Completed') return { key: `${base}:job`, to, tone: 'ok', replace: true, title: `${c.name} job completed`, detail: clip(e.message) };
+      if (e.reason === 'SuccessfulCreate') return { key: `${base}:job`, to, tone: 'info', replace: true, title: `${label} started a job`, detail: clip(e.message) };
+      if (e.reason === 'Completed') return { key: `${base}:job`, to, tone: 'ok', replace: true, title: `${label} job completed`, detail: clip(e.message) };
       return null;
     }
   }

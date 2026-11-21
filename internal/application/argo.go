@@ -147,8 +147,8 @@ func (s *ArgoService) AppsFor(cluster, namespace string) []domain.ArgoApp {
 }
 
 // Sync starts a sync of the application (see ArgoClient.SyncApplication).
-func (s *ArgoService) Sync(ctx context.Context, appNamespace, name, triggeredBy string) (ArgoOperation, error) {
-	return s.client.SyncApplication(ctx, appNamespace, name, triggeredBy)
+func (s *ArgoService) Sync(ctx context.Context, appNamespace, name, triggeredBy string, o ArgoSyncOptions) (ArgoOperation, error) {
+	return s.client.SyncApplication(ctx, appNamespace, name, triggeredBy, o)
 }
 
 // Operation returns the application's current operation state.

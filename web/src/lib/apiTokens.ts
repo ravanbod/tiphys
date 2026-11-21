@@ -82,11 +82,6 @@ export function expiryFrom(days: number | null, now: number): string | null {
   return days === null ? null : new Date(now + days * 24 * 3600 * 1000).toISOString();
 }
 
-const EXAMPLE_WINDOW = {
-  name: 'Release freeze', scopeKind: 'environment', scopeValue: 'prod', actions: ['exec', 'restart'], daysOfWeek: [5],
-  startTime: '00:00', endTime: '00:00', timezone: 'Asia/Tehran', effect: 'deny_inside', enabled: true,
-};
-
 /** A sample body per write, in the order the curl example prefers them. */
 const WRITE_EXAMPLES: { perm: ApiPermission; method: string; path: string; body?: unknown }[] = [
   { perm: 'settings.break_glass:write', method: 'PATCH', path: '/admin/settings', body: { breakGlassMode: 'approval' } },
@@ -94,9 +89,13 @@ const WRITE_EXAMPLES: { perm: ApiPermission; method: string; path: string; body?
   { perm: 'settings.retention:write', method: 'PATCH', path: '/admin/settings', body: { retentionAuditDays: 365 } },
   { perm: 'settings.notifications:write', method: 'PATCH', path: '/admin/settings', body: { rocket: { events: { admin_changes: true } } } },
   { perm: 'holidays:create', method: 'POST', path: '/admin/holidays', body: { date: '2026-12-31', title: 'New Year freeze', environments: ['prod'] } },
-  { perm: 'time_windows:create', method: 'POST', path: '/admin/time-windows', body: EXAMPLE_WINDOW },
-  { perm: 'holidays:update', method: 'PUT', path: '/admin/holidays/{id}', body: { date: '2026-12-31', title: 'New Year freeze', environments: [] } },
-  { perm: 'time_windows:update', method: 'PUT', path: '/admin/time-windows/{id}', body: { ...EXAMPLE_WINDOW, enabled: false } },
+  {
+    perm: 'time_windows:create', method: 'POST', path: '/admin/time-windows',
+    body: { name: 'Release freeze', scopeKind: 'environment', scopeValue: 'prod', actions: ['exec', 'restart'], daysOfWeek: [5],
+      startTime: '00:00', endTime: '00:00', timezone: 'Asia/Tehran', effect: 'deny_inside', enabled: true },
+  },
+  { perm: 'time_windows:update', method: 'PATCH', path: '/admin/time-windows/{id}', body: { enabled: false } },
+  { perm: 'holidays:update', method: 'PATCH', path: '/admin/holidays/{id}', body: { title: 'New Year freeze' } },
   { perm: 'time_windows:delete', method: 'DELETE', path: '/admin/time-windows/{id}' },
   { perm: 'holidays:delete', method: 'DELETE', path: '/admin/holidays/{id}' },
 ];

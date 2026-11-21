@@ -219,10 +219,13 @@ function logLine(i: number, withTs: boolean, at: number): string {
 class LogSocket extends FakeSocket {
   protected boot() {
     const { path, q } = parse(this.url);
-    const m = /^\/clusters\/([^/]+)\/namespaces\/([^/]+)\/workloads\/([^/]+)\/([^/]+)\/pods\/([^/]+)\/logs\/stream$/.exec(path);
+    // A workload's pod, or (without workloads/kind/name) a pod no workload owns.
+    const m = /^\/clusters\/([^/]+)\/namespaces\/([^/]+)(?:\/workloads\/([^/]+)\/([^/]+))?\/pods\/([^/]+)\/logs\/stream$/.exec(path);
     if (!m || q.get('csrf') !== CSRF) return this.failHandshake();
-    const [, cluster, ns, kindSeg, name] = m.map(decodeURIComponent);
-    const info = decide(currentUser(), cluster, ns, kindFromSegment(kindSeg) as never, name, 'logs');
+    const [, cluster, ns, kindSeg, name] = m.map((x) => (x === undefined ? undefined : decodeURIComponent(x)));
+    const info = kindSeg
+      ? decide(currentUser(), cluster!, ns!, kindFromSegment(kindSeg) as never, name!, 'logs')
+      : decide(currentUser(), cluster!, ns!, null, null, 'logs');
     this.open();
     if (!info.allowed) return this.endAndClose('denied', `Logs were refused: ${info.reason.replace('_', ' ')}.`);
     const now = Date.now();
@@ -367,7 +370,8 @@ class FakeEventSource {
         if (!job) return;
         if (tick >= 6) {
           const fail = op.name === 'archive-reports';
-          Object.assign(job, { status: fail ? 'failed' : 'succeeded', active: 0, succeeded: fail ? 0 : 1, finishedAt: iso(Date.now()) });
+          Object.assign(job, { status: fail ? 'failed' : 'succeeded', active: 0, succeeded: fail ? 0 : 1, failed: fail ? 1 : 0, finishedAt: iso(Date.now()),
+            ...(fail ? { reason: 'BackoffLimitExceeded', message: 'Job has reached the specified backoff limit' } : {}) });
           this.emit('progress', { ...job });
           this.emit('done', { outcome: fail ? 'failed' : 'succeeded', message: fail ? 'BackoffLimitExceeded: Job has reached the specified backoff limit' : `Job ${job.name} completed.` });
           this.close();

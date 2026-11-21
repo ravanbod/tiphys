@@ -127,8 +127,15 @@ func TestLiveChanges(t *testing.T) {
 	if st, _ := ev.data["status"].(map[string]any); ev.data["type"] != "rollout_started" || st["updated"] != float64(1) {
 		t.Fatalf("arash rollout = %+v", ev)
 	}
+	// An other pod's change needs logs on the whole namespace.
+	e.kube.emit("payments-api", application.NamespaceChange{Type: application.ChangePodUpdated, Pod: "pg-main-1", Phase: "Pending"})
+	e.kube.emit("payments-api", application.NamespaceChange{Workload: api, Type: application.ChangeRolloutComplete,
+		Status: &application.RolloutStatus{Desired: 3, Updated: 3, Ready: 3, Complete: true}})
+	if ev := nextSSE(t, arashCh); ev.data["type"] != "rollout_complete" {
+		t.Fatalf("arash after other pod = %+v", ev)
+	}
 	// dev still sees everything, in order.
-	for _, want := range []string{"pod_restarted", "pod_restarted", "rollout_started"} {
+	for _, want := range []string{"pod_restarted", "pod_restarted", "rollout_started", "pod_updated", "rollout_complete"} {
 		if ev := nextSSE(t, devCh); ev.data["type"] != want {
 			t.Fatalf("dev change = %+v, want %s", ev, want)
 		}

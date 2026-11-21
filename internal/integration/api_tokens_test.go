@@ -142,3 +142,82 @@ func TestAPITokens(t *testing.T) {
 		t.Fatalf("unknown token: %d", status)
 	}
 }
+
+func TestPatchWindowsAndHolidays(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	admin := e.login(e.adminID)
+	status, win, _ := admin.do("POST", "/api/v1/admin/time-windows", map[string]any{
+		"name": "prod hours", "scopeKind": "environment", "scopeValue": "prod", "actions": []string{"exec", "restart"},
+		"daysOfWeek": []int{6, 0, 1}, "startTime": "09:00", "endTime": "18:00", "timezone": "Asia/Tehran",
+		"effect": "allow_inside", "enabled": true})
+	if status != 201 {
+		t.Fatalf("create window: %d %v", status, win)
+	}
+	winPath := "/api/v1/admin/time-windows/" + itoa(int64(win["id"].(float64)))
+	status, hol, _ := admin.do("POST", "/api/v1/admin/holidays", map[string]any{"date": "2026-12-31", "title": "New Year", "environments": []string{"prod"}})
+	if status != 201 {
+		t.Fatalf("create holiday: %d %v", status, hol)
+	}
+	holPath := "/api/v1/admin/holidays/" + itoa(int64(hol["id"].(float64)))
+
+	// update alone is enough: no read needed to change one field.
+	_, value := e.createToken(admin, map[string]any{"name": "ci", "permissions": []string{"time_windows:update", "holidays:update"}})
+	tok := &client{e: e, bearer: value}
+
+	status, m, _ := tok.do("PATCH", winPath, map[string]any{"enabled": false})
+	if status != 200 || m["enabled"] != false || m["name"] != "prod hours" || m["startTime"] != "09:00" || len(m["actions"].([]any)) != 2 || len(m["daysOfWeek"].([]any)) != 3 {
+		t.Fatalf("patch enabled: %d %v", status, m)
+	}
+	status, list := admin.list("/api/v1/admin/time-windows")
+	if status != 200 || len(list) != 1 || list[0]["enabled"] != false || list[0]["scopeValue"] != "prod" {
+		t.Fatalf("stored window: %d %v", status, list)
+	}
+	// Lists are replaced, the result is validated like a PUT, typos are refused.
+	if status, m, _ := tok.do("PATCH", winPath, map[string]any{"actions": []string{"exec"}, "endTime": "17:00"}); status != 200 || len(m["actions"].([]any)) != 1 || m["endTime"] != "17:00" {
+		t.Fatalf("patch actions: %d %v", status, m)
+	}
+	for _, body := range []map[string]any{{"startTime": "25:00"}, {"scopeKind": "team", "scopeValue": "nobody"}, {"enabeld": false}, {}, {"id": 99}} {
+		if status, m, _ := tok.do("PATCH", winPath, body); status != 422 {
+			t.Fatalf("patch %v: %d %v", body, status, m)
+		}
+	}
+	if status, _, _ := tok.do("PATCH", "/api/v1/admin/time-windows/999999", map[string]any{"enabled": true}); status != 404 {
+		t.Fatalf("patch unknown window: %d", status)
+	}
+
+	status, m, _ = tok.do("PATCH", holPath, map[string]any{"title": "New Year's Eve"})
+	if status != 200 || m["title"] != "New Year's Eve" || m["date"] != "2026-12-31" || len(m["environments"].([]any)) != 1 {
+		t.Fatalf("patch holiday: %d %v", status, m)
+	}
+	if status, _, _ := tok.do("PATCH", holPath, map[string]any{"date": "31/12/2026"}); status != 422 {
+		t.Fatalf("patch holiday date: %d", status)
+	}
+
+	// Without update: refused; admins may patch too.
+	_, ro := e.createToken(admin, map[string]any{"name": "ro", "permissions": []string{"time_windows:read"}})
+	if status, m, _ := (&client{e: e, bearer: ro}).do("PATCH", winPath, map[string]any{"enabled": true}); status != 403 || errCode(m) != "missing_permission" {
+		t.Fatalf("patch without update: %d %v", status, m)
+	}
+	if status, m, _ := admin.do("PATCH", winPath, map[string]any{"enabled": true}); status != 200 || m["enabled"] != true {
+		t.Fatalf("admin patch: %d %v", status, m)
+	}
+
+	// Audited as an update with before and after.
+	evs, err := e.store.Repos().Audit.List(ctx, application.AuditFilter{EventType: domain.EventAdminChange})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updates int
+	for _, ev := range evs {
+		if ev.Details["entity"] == "time_window" && ev.Details["operation"] == "update" && ev.Username == "token:ci" {
+			updates++
+			if ev.Details["before"] == nil || ev.Details["after"] == nil {
+				t.Fatalf("update event: %+v", ev.Details)
+			}
+		}
+	}
+	if updates != 2 {
+		t.Fatalf("window updates by the token: %d", updates)
+	}
+}

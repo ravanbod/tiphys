@@ -259,7 +259,7 @@ func (s *WorkloadService) kubeErr(cluster string, err error) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, ErrProtectedNamespace), errors.Is(err, ErrPodNotInWorkload), errors.Is(err, ErrInvalidName),
+	case errors.Is(err, ErrProtectedNamespace), errors.Is(err, ErrPodNotInWorkload), errors.Is(err, ErrPodHasWorkload), errors.Is(err, ErrInvalidName),
 		errors.Is(err, ErrAlreadyRunning), errors.Is(err, ErrNotFound), errors.Is(err, context.Canceled),
 		errors.Is(err, ErrPodDeleteUnavailable), errors.Is(err, ErrConflict):
 		return err
@@ -440,6 +440,26 @@ func (s *WorkloadService) NamespaceEvents(ctx context.Context, p Principal, clus
 	}
 	ev, err := s.kube.NamespaceEvents(ctx, p.KubeActor(d.BreakGlassID), cluster, ns)
 	return ev, s.kubeErr(cluster, err)
+}
+
+// OtherPods lists the namespace's pods that no workload owns (operator-managed
+// pods such as CloudNativePG instances, bare pods). They are reached only
+// through the whole namespace: logs there are needed, so a grant on single
+// workloads cannot cover them. Without it the list is empty, as the workload
+// list leaves out what the principal may not use.
+func (s *WorkloadService) OtherPods(ctx context.Context, p Principal, cluster, ns string) ([]OtherPod, error) {
+	if err := validateNames(ns, domain.WorkloadRef{}); err != nil {
+		return nil, err
+	}
+	if err := s.requireAnyGrant(ctx, p, cluster, ns); err != nil {
+		return nil, err
+	}
+	d := s.access.Decide(p, nsTarget(cluster, ns), domain.ActionLogs)
+	if !d.Allowed {
+		return nil, nil
+	}
+	pods, err := s.kube.ListOtherPods(ctx, p.KubeActor(d.BreakGlassID), cluster, ns)
+	return pods, s.kubeErr(cluster, err)
 }
 
 // NamespaceTraffic shows how traffic reaches the namespace's pods. Like
@@ -641,7 +661,15 @@ func (s *WorkloadService) followJob(op *Operation, actor KubeActor, cluster, ns,
 		details["outcome"] = "succeeded"
 		s.outcome(started, domain.ResultSucceeded, "", details)
 	case "failed":
-		op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "failed", Message: "Job failed"}})
+		msg := "Job failed"
+		if last.Reason != "" {
+			msg += ": " + last.Reason
+			details["reason"] = last.Reason
+		}
+		if last.Message != "" {
+			msg += ": " + last.Message
+		}
+		op.Publish(OpEvent{Name: "done", Data: OpDone{Outcome: "failed", Message: msg}})
 		details["outcome"] = "failed"
 		s.outcome(started, domain.ResultFailed, "job failed", details)
 	default:
@@ -653,8 +681,10 @@ func (s *WorkloadService) followJob(op *Operation, actor KubeActor, cluster, ns,
 
 // LogRequest are the validated-by-service options for logs.
 type LogRequest struct {
-	Cluster      string
-	Namespace    string
+	Cluster   string
+	Namespace string
+	// Workload is zero for a pod no workload owns (OtherPods): the target is
+	// then the namespace.
 	Workload     domain.WorkloadRef
 	Pod          string
 	Container    string
@@ -696,6 +726,18 @@ func (r LogRequest) target() domain.Target {
 	return t
 }
 
+// openLogs opens the stream of a workload's pod or of an other pod.
+func (s *WorkloadService) openLogs(ctx context.Context, actor KubeActor, r LogRequest, opts LogOptions) (io.ReadCloser, error) {
+	var body io.ReadCloser
+	var err error
+	if r.Workload.Name == "" {
+		body, err = s.kube.OtherPodLogs(ctx, actor, r.Cluster, r.Namespace, r.Pod, opts)
+	} else {
+		body, err = s.kube.Logs(ctx, actor, KubeWorkloadTarget{Cluster: r.Cluster, Namespace: r.Namespace, Workload: r.Workload}, r.Pod, opts)
+	}
+	return body, s.kubeErr(r.Cluster, err)
+}
+
 func (r LogRequest) kubeOpts() LogOptions {
 	return LogOptions{Container: r.Container, Previous: r.Previous, Follow: r.Follow,
 		TailLines: r.TailLines, SinceSeconds: r.SinceSeconds, Timestamps: r.Timestamps}
@@ -722,10 +764,9 @@ func (s *WorkloadService) OpenLogs(ctx context.Context, p Principal, req LogRequ
 	if err != nil {
 		return nil, err
 	}
-	body, err := s.kube.Logs(ctx, p.KubeActor(d.BreakGlassID),
-		KubeWorkloadTarget{Cluster: req.Cluster, Namespace: req.Namespace, Workload: req.Workload}, req.Pod, req.kubeOpts())
+	body, err := s.openLogs(ctx, p.KubeActor(d.BreakGlassID), req, req.kubeOpts())
 	if err != nil {
-		return nil, s.kubeErr(req.Cluster, err)
+		return nil, err
 	}
 	st := s.streams.Open(s.rootCtx, StreamSpec{
 		Kind: StreamLogs, UserID: p.User.ID, Username: p.User.Username, WebSessionID: p.SessionID,
@@ -755,10 +796,9 @@ func (s *WorkloadService) DownloadLogs(ctx context.Context, p Principal, req Log
 	}
 	opts := req.kubeOpts()
 	opts.LimitBytes = MaxLogDownloadBytes
-	body, err := s.kube.Logs(ctx, p.KubeActor(d.BreakGlassID),
-		KubeWorkloadTarget{Cluster: req.Cluster, Namespace: req.Namespace, Workload: req.Workload}, req.Pod, opts)
+	body, err := s.openLogs(ctx, p.KubeActor(d.BreakGlassID), req, opts)
 	if err != nil {
-		return LogDownload{}, s.kubeErr(req.Cluster, err)
+		return LogDownload{}, err
 	}
 	defer body.Close()
 	var buf bytes.Buffer

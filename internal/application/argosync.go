@@ -62,12 +62,15 @@ func (s *WorkloadService) NamespaceApps(ctx context.Context, p Principal, cluste
 	return out, nil
 }
 
-// SyncApp syncs an Argo CD application that deploys to the namespace. It is
-// allowed only when the principal may sync every namespace the app deploys
-// to (domain.DecideApp). Like the workload actions, it does not run if its
-// "started" audit event cannot be written; the sync is then followed in the
-// background until Argo CD reports the operation finished.
-func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns, appNamespace, name string) (OperationStarted, error) {
+// SyncApp syncs an Argo CD application that deploys to the namespace with
+// the options of Argo CD's sync dialog. It is allowed only when the
+// principal may sync every namespace the app deploys to
+// (domain.DecideApp); a sync to a revision other than the target also needs
+// rollback, decided with the revision's resources included (syncPlan). Like
+// the workload actions, it does not run if its "started" audit event cannot
+// be written; the sync is then followed in the background until Argo CD
+// reports the operation finished.
+func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns, appNamespace, name string, o ArgoSyncOptions) (OperationStarted, error) {
 	app, err := s.appFor(ctx, p, cluster, ns, appNamespace, name)
 	if err != nil {
 		return OperationStarted{}, err
@@ -76,8 +79,31 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 	if err != nil {
 		return OperationStarted{}, err
 	}
-	namespaces := make([]string, 0, len(app.Pairs()))
-	for _, pair := range app.Pairs() {
+	if err := checkSyncOptions(o); err != nil {
+		return OperationStarted{}, err
+	}
+	plan, err := s.syncPlan(ctx, p, app, o.Revision, d, nil)
+	if err != nil {
+		return OperationStarted{}, err
+	}
+	// Naming the target revision is a plain sync.
+	o.Revision = plan.Revision
+	if o.Revision != "" {
+		if plan.AutoSync && !o.DryRun {
+			return OperationStarted{}, ErrAutoSyncEnabled
+		}
+		if d, err = s.access.AuthorizeApp(ctx, p, plan.app, domain.ActionSync); err != nil {
+			return OperationStarted{}, err
+		}
+		if _, err = s.access.AuthorizeApp(ctx, p, plan.app, domain.ActionRollback); err != nil {
+			return OperationStarted{}, err
+		}
+	}
+	if err := plan.check(o); err != nil {
+		return OperationStarted{}, err
+	}
+	namespaces := make([]string, 0, len(plan.app.Pairs()))
+	for _, pair := range plan.app.Pairs() {
 		namespaces = append(namespaces, pair.Namespace)
 	}
 	e := s.audit.Event(p, domain.EventArgoSync)
@@ -87,9 +113,12 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 	e.BreakGlassID = d.BreakGlassID
 	e.Result = domain.ResultAllowed
 	e.Details = map[string]any{"app": app.Name, "appNamespace": app.AppNamespace, "project": app.Project, "namespaces": namespaces}
+	for k, v := range syncAuditDetails(o, plan) {
+		e.Details[k] = v
+	}
 	// What the sync applies beyond namespaces: kinds the settings allow, or
 	// anything for an admin.
-	if rs := app.ForeignClusterResources(); len(rs) > 0 {
+	if rs := plan.app.ForeignClusterResources(); len(rs) > 0 {
 		names := make([]string, len(rs))
 		for i, r := range rs {
 			names[i] = r.String()
@@ -102,7 +131,7 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 		return OperationStarted{}, fmt.Errorf("audit event could not be written, sync not run: %w", err)
 	}
 
-	prev, err := s.argo.Sync(ctx, app.AppNamespace, app.Name, p.Username())
+	prev, err := s.argo.Sync(ctx, app.AppNamespace, app.Name, p.Username(), o)
 	if err != nil {
 		if errors.Is(err, ErrSyncInProgress) {
 			s.outcome(started, domain.ResultFailed, "already_running", map[string]any{"app": app.Name, "outcome": "failed"})
@@ -112,7 +141,7 @@ func (s *WorkloadService) SyncApp(ctx context.Context, p Principal, cluster, ns,
 		return OperationStarted{}, &ArgoError{Err: err}
 	}
 	op := s.ops.Create(p.User.ID, s.clock.Now())
-	go s.followArgoOperation(op, app, prev, started, "Sync")
+	go s.followArgoOperation(op, app, prev, started, orText(dryRunText(o.DryRun), "Sync"))
 	return OperationStarted{OperationID: op.ID}, nil
 }
 
@@ -126,8 +155,8 @@ func (s *WorkloadService) namespaceApp(cluster, ns, appNamespace, name string) (
 	return domain.ArgoApp{}, false
 }
 
-// followArgoOperation polls the application until the sync or rollback
-// (what) it started finishes (an operation that started after prev), then
+// followArgoOperation polls the application until the sync, rollback or dry
+// run (what) it started finishes (an operation that started after prev), then
 // refreshes the Argo cache so the namespace page shows the new state. Failed
 // polls are retried until the deadline. The outcome names the operation's
 // startedAt, which Argo CD records on the deploy (argoDeployers).
@@ -175,6 +204,14 @@ func (s *WorkloadService) followArgoOperation(op *Operation, app domain.ArgoApp,
 		case <-time.After(argoSyncPoll):
 		}
 	}
+}
+
+// dryRunText names a dry run in the outcome ("" for a real operation).
+func dryRunText(dryRun bool) string {
+	if dryRun {
+		return "Dry run"
+	}
+	return ""
 }
 
 func orText(s, def string) string {
